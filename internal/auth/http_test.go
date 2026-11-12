@@ -13,7 +13,7 @@ import (
 func TestMiddlewareStoresAuthenticatedAccount(t *testing.T) {
 	provisioner := &provisionerStub{accountID: uuid.New()}
 	authenticator := NewAuthenticator(NewAuthService(
-		verifierStub{token: FirebaseToken{UID: "firebase-user"}},
+		verifierStub{identity: ClerkIdentity{UserID: "clerk-user"}},
 		provisioner,
 	))
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -49,7 +49,7 @@ func TestMiddlewareRejectsUnauthenticatedRequests(t *testing.T) {
 
 func TestMiddlewareReturnsServerErrorWhenProvisioningFails(t *testing.T) {
 	authenticator := NewAuthenticator(NewAuthService(
-		verifierStub{token: FirebaseToken{UID: "firebase-user"}},
+		verifierStub{identity: ClerkIdentity{UserID: "clerk-user"}},
 		&provisionerStub{err: errors.New("database unavailable")},
 	))
 	request := httptest.NewRequest(http.MethodGet, "/", nil)

@@ -22,14 +22,14 @@ func TestAccountServiceEnsureAccountCreatesDeterministicAccount(t *testing.T) {
 	store := &storeStub{}
 	service := NewAccountService(store)
 
-	accountID, err := service.EnsureAccount(context.Background(), "firebase-user")
+	accountID, err := service.EnsureAccount(context.Background(), "clerk-user")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if accountID != DeterministicID("firebase-user") {
+	if accountID != DeterministicID("clerk-user") {
 		t.Fatal("service did not return the deterministic account ID")
 	}
-	if store.account.ID != accountID || store.account.FirebaseUID != "firebase-user" {
+	if store.account.ID != accountID || store.account.ClerkUserID != "clerk-user" {
 		t.Fatalf("store received unexpected account: %+v", store.account)
 	}
 }
@@ -37,8 +37,8 @@ func TestAccountServiceEnsureAccountCreatesDeterministicAccount(t *testing.T) {
 func TestAccountServiceEnsureAccountRejectsEmptyUID(t *testing.T) {
 	service := NewAccountService(&storeStub{})
 
-	if _, err := service.EnsureAccount(context.Background(), ""); !errors.Is(err, ErrInvalidFirebaseUID) {
-		t.Fatalf("expected ErrInvalidFirebaseUID, got %v", err)
+	if _, err := service.EnsureAccount(context.Background(), ""); !errors.Is(err, ErrInvalidClerkUserID) {
+		t.Fatalf("expected ErrInvalidClerkUserID, got %v", err)
 	}
 }
 
@@ -46,25 +46,25 @@ func TestAccountServiceEnsureAccountReturnsStoreError(t *testing.T) {
 	want := errors.New("database unavailable")
 	service := NewAccountService(&storeStub{err: want})
 
-	if _, err := service.EnsureAccount(context.Background(), "firebase-user"); !errors.Is(err, want) {
+	if _, err := service.EnsureAccount(context.Background(), "clerk-user"); !errors.Is(err, want) {
 		t.Fatalf("expected store error, got %v", err)
 	}
 }
 
 func TestDeterministicID(t *testing.T) {
-	first := DeterministicID("firebase-user")
+	first := DeterministicID("clerk-user")
 
 	if first == uuid.Nil {
 		t.Fatal("deterministic ID must not be nil")
 	}
-	if first != DeterministicID("firebase-user") {
-		t.Fatal("the same Firebase UID produced different account IDs")
+	if first != DeterministicID("clerk-user") {
+		t.Fatal("the same Clerk user ID produced different account IDs")
 	}
 	if first == DeterministicID("another-user") {
-		t.Fatal("different Firebase UIDs produced the same account ID")
+		t.Fatal("different Clerk user IDs produced the same account ID")
 	}
 	if DeterministicID("") != uuid.Nil {
-		t.Fatal("an empty Firebase UID must produce a nil account ID")
+		t.Fatal("an empty Clerk user ID must produce a nil account ID")
 	}
 }
 

@@ -11,7 +11,7 @@ AS $$
 $$;
 
 REVOKE ALL ON FUNCTION app.current_user_id() FROM PUBLIC;
-GRANT EXECUTE ON FUNCTION app.current_user_id() TO betterguests_app;
+GRANT EXECUTE ON FUNCTION app.current_user_id() TO __APP_ROLE__;
 -- +goose StatementEnd
 
 -- +goose Down

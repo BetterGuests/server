@@ -25,8 +25,10 @@ import (
 )
 
 var (
-	errUsage              = errors.New("usage: migrate <up|status|version>")
-	errMissingDatabaseURL = errors.New("MIGRATION_DATABASE_URL is required")
+	errUsage                       = errors.New("usage: migrate <up|status|version>")
+	errMissingDatabaseURL          = errors.New("MIGRATION_DATABASE_URL is required")
+	errMissingExpectedRole         = errors.New("DB_EXPECTED_ROLE is required")
+	errMissingExpectedMigratorRole = errors.New("DB_EXPECTED_MIGRATOR_ROLE is required")
 )
 
 func main() {
@@ -56,6 +58,14 @@ func run() error {
 	databaseURL := os.Getenv("MIGRATION_DATABASE_URL")
 	if databaseURL == "" {
 		return errMissingDatabaseURL
+	}
+	expectedRole := os.Getenv("DB_EXPECTED_ROLE")
+	if expectedRole == "" {
+		return errMissingExpectedRole
+	}
+	expectedMigratorRole := os.Getenv("DB_EXPECTED_MIGRATOR_ROLE")
+	if expectedMigratorRole == "" {
+		return errMissingExpectedMigratorRole
 	}
 
 	// sql.Open doesn't actually connect yet - it just prepares a handle we
@@ -88,14 +98,21 @@ func run() error {
 	if err := database.QueryRowContext(ctx, "SELECT current_user::text").Scan(&role); err != nil {
 		return fmt.Errorf("verify migration role: %w", err)
 	}
-	if role != "betterguests_migrator" {
-		return fmt.Errorf("refusing migrations: expected role %q, got %q", "betterguests_migrator", role)
+	if role != expectedMigratorRole {
+		return fmt.Errorf("refusing migrations: expected role %q, got %q", expectedMigratorRole, role)
 	}
 
-	// goose is the migration library doing the real work. We point it at
-	// our embedded SQL files and tell it where to keep its own bookkeeping
+	// goose is the migration library doing the real work. We point it at a
+	// rendered copy of our embedded SQL files - with the configured role
+	// names substituted in - and tell it where to keep its own bookkeeping
 	// table (which migrations have already run).
-	goose.SetBaseFS(migrations.Files)
+	renderedDir, err := migrations.Rendered(expectedRole, expectedMigratorRole)
+	if err != nil {
+		return fmt.Errorf("render migrations: %w", err)
+	}
+	defer os.RemoveAll(renderedDir)
+
+	goose.SetBaseFS(os.DirFS(renderedDir))
 	goose.SetTableName("app.goose_db_version")
 	if err := goose.SetDialect("postgres"); err != nil {
 		return fmt.Errorf("configure migrations: %w", err)

@@ -1,0 +1,51 @@
+name: CI
+
+# Runs on every push and pull request against main so a broken build or a
+# failing test can never reach the branch that a Railway deploy builds
+# from. See SECURITY.md: "Run automated tests before deployment".
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt found unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      # cmd/dev test starts its own disposable PostgreSQL via Docker Compose
+      # (ubuntu-latest ships Docker), applies every migration to it, and runs
+      # the full suite — unit and integration — against it, then tears it
+      # down. This is the same command a contributor runs locally; CI runs
+      # nothing bespoke.
+      - name: Run full test suite (unit + integration)
+        run: go run ./cmd/dev test

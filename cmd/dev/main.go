@@ -22,6 +22,12 @@ const (
 	testComposeEnvFile       = "compose.test.env"
 	testDatabaseURL          = "postgres://betterguests_app:betterguests_app_test@127.0.0.1:55432/betterguests_test?sslmode=disable"
 	testMigrationDatabaseURL = "postgres://betterguests_migrator:betterguests_migrator_test@127.0.0.1:55432/betterguests_test?sslmode=disable"
+	// testSuperuserDatabaseURL connects as the compose Postgres container's
+	// own superuser (see compose.test.yaml), the same role
+	// scripts/backup.sh and scripts/restore.sh must run as in production,
+	// since betterguests_app/betterguests_migrator both have NOBYPASSRLS.
+	// Only db/restore_integration_test.go uses this.
+	testSuperuserDatabaseURL = "postgres://postgres:local_test_admin@127.0.0.1:55432/betterguests_test?sslmode=disable"
 )
 
 func main() {
@@ -110,7 +116,9 @@ func test() (err error) {
 		"MIGRATION_DATABASE_URL":      testMigrationDatabaseURL,
 		"TEST_DATABASE_URL":           testDatabaseURL,
 		"TEST_MIGRATION_DATABASE_URL": testMigrationDatabaseURL,
+		"TEST_SUPERUSER_DATABASE_URL": testSuperuserDatabaseURL,
 		"DB_EXPECTED_ROLE":            "betterguests_app",
+		"DB_EXPECTED_MIGRATOR_ROLE":   "betterguests_migrator",
 	}
 	if err := executeWithOverrides(testEnv, "go", "run", "./cmd/migrate", "up"); err != nil {
 		return err

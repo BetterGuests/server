@@ -41,14 +41,14 @@ func TestParseEnvSupportsMultilineSingleQuotedValues(t *testing.T) {
 
 	values, err := parseEnv(strings.NewReader(`
 PORT=8080
-FIREBASE_CREDENTIALS_JSON='` + credentials + `'
+SERVICE_ACCOUNT_CREDENTIALS_JSON='` + credentials + `'
 BASE_URL="https://api.example.test/"
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if values["FIREBASE_CREDENTIALS_JSON"] != credentials {
-		t.Fatalf("unexpected credentials: %q", values["FIREBASE_CREDENTIALS_JSON"])
+	if values["SERVICE_ACCOUNT_CREDENTIALS_JSON"] != credentials {
+		t.Fatalf("unexpected credentials: %q", values["SERVICE_ACCOUNT_CREDENTIALS_JSON"])
 	}
 	if values["PORT"] != "8080" {
 		t.Fatalf("value after the multi-line entry was lost: %q", values["PORT"])

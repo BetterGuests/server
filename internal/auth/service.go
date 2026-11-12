@@ -35,15 +35,15 @@ func (service *AuthService) Authenticate(ctx context.Context, authorization stri
 		return uuid.Nil, ErrUnauthenticated
 	}
 
-	token, err := service.verifier.VerifyIDToken(ctx, rawToken)
+	identity, err := service.verifier.VerifyIDToken(ctx, rawToken)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("%w: %v", ErrUnauthenticated, err)
 	}
-	if token.UID == "" {
+	if identity.UserID == "" {
 		return uuid.Nil, ErrUnauthenticated
 	}
 
-	accountID, err := service.provisioner.EnsureAccount(ctx, token.UID)
+	accountID, err := service.provisioner.EnsureAccount(ctx, identity.UserID)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("provision account: %w", err)
 	}

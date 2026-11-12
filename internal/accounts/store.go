@@ -23,9 +23,9 @@ func (store *PostgresAccountStore) Ensure(ctx context.Context, account Account) 
 	return db.WithUserTx(ctx, store.DB, account.ID.String(), func(tx pgx.Tx) error {
 		if _, err := tx.Exec(
 			ctx,
-			`INSERT INTO app.accounts (id, firebase_uid) VALUES ($1, NULLIF($2, '')) ON CONFLICT (id) DO NOTHING`,
+			`INSERT INTO app.accounts (id, clerk_user_id) VALUES ($1, NULLIF($2, '')) ON CONFLICT (id) DO NOTHING`,
 			account.ID,
-			account.FirebaseUID,
+			account.ClerkUserID,
 		); err != nil {
 			return fmt.Errorf("ensure account: %w", err)
 		}

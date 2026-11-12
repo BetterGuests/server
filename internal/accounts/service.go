@@ -7,14 +7,14 @@ import (
 	"github.com/google/uuid"
 )
 
-// ErrInvalidFirebaseUID is returned when an empty Firebase UID reaches the
+// ErrInvalidClerkUserID is returned when an empty Clerk user ID reaches the
 // account mapping.
-var ErrInvalidFirebaseUID = errors.New("firebase UID is required")
+var ErrInvalidClerkUserID = errors.New("clerk user ID is required")
 
-// firebaseNamespace fixes the UUID namespace used to derive account IDs from
-// Firebase UIDs. It must never change: a different namespace would orphan every
-// account created before the change.
-var firebaseNamespace = uuid.MustParse("3f2a6c1e-1b2d-4e5f-8a9b-0c1d2e3f4a5b")
+// clerkNamespace fixes the UUID namespace used to derive account IDs from
+// Clerk user IDs. It must never change: a different namespace would orphan
+// every account created before the change.
+var clerkNamespace = uuid.MustParse("4bf672a5-58a7-4f37-8903-731e3d495c74")
 
 // AccountService owns the account use cases.
 type AccountService struct {
@@ -26,12 +26,12 @@ func NewAccountService(store AccountStore) *AccountService {
 	return &AccountService{store: store}
 }
 
-// EnsureAccount returns the stable account ID for a verified Firebase UID and
+// EnsureAccount returns the stable account ID for a verified Clerk user ID and
 // creates the matching row if it does not exist yet.
-func (service *AccountService) EnsureAccount(ctx context.Context, firebaseUID string) (uuid.UUID, error) {
-	account := Account{ID: DeterministicID(firebaseUID), FirebaseUID: firebaseUID}
+func (service *AccountService) EnsureAccount(ctx context.Context, clerkUserID string) (uuid.UUID, error) {
+	account := Account{ID: DeterministicID(clerkUserID), ClerkUserID: clerkUserID}
 	if account.ID == uuid.Nil {
-		return uuid.Nil, ErrInvalidFirebaseUID
+		return uuid.Nil, ErrInvalidClerkUserID
 	}
 	if err := service.store.Ensure(ctx, account); err != nil {
 		return uuid.Nil, err
@@ -39,15 +39,15 @@ func (service *AccountService) EnsureAccount(ctx context.Context, firebaseUID st
 	return account.ID, nil
 }
 
-// DeterministicID maps a verified Firebase UID to a stable internal account ID.
-// Deriving the ID instead of generating a random one lets a request resolve the
-// account with the existing id-based row-level-security policies, without a
-// second lookup path keyed on firebase_uid.
-func DeterministicID(firebaseUID string) uuid.UUID {
-	if firebaseUID == "" {
+// DeterministicID maps a verified Clerk user ID to a stable internal account
+// ID. Deriving the ID instead of generating a random one lets a request
+// resolve the account with the existing id-based row-level-security
+// policies, without a second lookup path keyed on clerk_user_id.
+func DeterministicID(clerkUserID string) uuid.UUID {
+	if clerkUserID == "" {
 		return uuid.Nil
 	}
-	return uuid.NewSHA1(firebaseNamespace, []byte(firebaseUID))
+	return uuid.NewSHA1(clerkNamespace, []byte(clerkUserID))
 }
 
 type userIDKey struct{}

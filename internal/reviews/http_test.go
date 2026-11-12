@@ -34,3 +34,39 @@ func TestCreateReviewHTTPRequiresAuthentication(t *testing.T) {
 		t.Fatalf("expected 401, got %d", response.Code)
 	}
 }
+
+func reviewRequest(body string) *http.Request {
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/reviews", strings.NewReader(body))
+	return request.WithContext(accounts.WithUserID(request.Context(), uuid.New()))
+}
+
+func TestCreateReviewHTTPRejectsOversizedBody(t *testing.T) {
+	oversized := `{"comment":"` + strings.Repeat("a", 2<<20) + `"}`
+	response := httptest.NewRecorder()
+
+	NewHTTPHandler(&reviewCreatorStub{}).CreateReview(response, reviewRequest(oversized))
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a body over the byte limit, got %d", response.Code)
+	}
+}
+
+func TestCreateReviewHTTPRejectsUnknownFields(t *testing.T) {
+	response := httptest.NewRecorder()
+
+	NewHTTPHandler(&reviewCreatorStub{}).CreateReview(response, reviewRequest(`{"rating":5,"comment":"ok","unexpected":"field"}`))
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for an unknown field, got %d", response.Code)
+	}
+}
+
+func TestCreateReviewHTTPRejectsMalformedJSON(t *testing.T) {
+	response := httptest.NewRecorder()
+
+	NewHTTPHandler(&reviewCreatorStub{}).CreateReview(response, reviewRequest(`{"rating":`))
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for malformed JSON, got %d", response.Code)
+	}
+}

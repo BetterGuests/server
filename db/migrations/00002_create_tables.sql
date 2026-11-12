@@ -255,51 +255,51 @@ ALTER TABLE app.listing_reviews FORCE ROW LEVEL SECURITY;
 -- ---- accounts -------------------------------------------------
 
 CREATE POLICY accounts_select ON app.accounts
-    FOR SELECT TO betterguests_app
+    FOR SELECT TO __APP_ROLE__
     USING (id = app.current_user_id());
 
 CREATE POLICY accounts_insert ON app.accounts
-    FOR INSERT TO betterguests_app
+    FOR INSERT TO __APP_ROLE__
     WITH CHECK (id = app.current_user_id());
 
 -- ---- amenities --------------------------------------------------
 
 CREATE POLICY amenities_select ON app.amenities
-    FOR SELECT TO betterguests_app
+    FOR SELECT TO __APP_ROLE__
     USING (true);
 
 -- ---- listings -----------------------------------------------------
 
 CREATE POLICY listings_select ON app.listings
-    FOR SELECT TO betterguests_app
+    FOR SELECT TO __APP_ROLE__
     USING (
         status = 'published'
         OR host_id = app.current_user_id()
     );
 
 CREATE POLICY listings_insert ON app.listings
-    FOR INSERT TO betterguests_app
+    FOR INSERT TO __APP_ROLE__
     WITH CHECK (host_id = app.current_user_id());
 
 CREATE POLICY listings_update ON app.listings
-    FOR UPDATE TO betterguests_app
+    FOR UPDATE TO __APP_ROLE__
     USING (host_id = app.current_user_id())
     WITH CHECK (host_id = app.current_user_id());
 
 CREATE POLICY listings_delete ON app.listings
-    FOR DELETE TO betterguests_app
+    FOR DELETE TO __APP_ROLE__
     USING (host_id = app.current_user_id());
 
 -- ---- listing_photos -------------------------------------------------
 
 CREATE POLICY listing_photos_select ON app.listing_photos
-    FOR SELECT TO betterguests_app
+    FOR SELECT TO __APP_ROLE__
     USING (
         EXISTS (SELECT 1 FROM app.listings l WHERE l.id = listing_id)
     );
 
 CREATE POLICY listing_photos_insert ON app.listing_photos
-    FOR INSERT TO betterguests_app
+    FOR INSERT TO __APP_ROLE__
     WITH CHECK (
         EXISTS (
             SELECT 1 FROM app.listings l
@@ -308,7 +308,7 @@ CREATE POLICY listing_photos_insert ON app.listing_photos
     );
 
 CREATE POLICY listing_photos_update ON app.listing_photos
-    FOR UPDATE TO betterguests_app
+    FOR UPDATE TO __APP_ROLE__
     USING (
         EXISTS (
             SELECT 1 FROM app.listings l
@@ -323,7 +323,7 @@ CREATE POLICY listing_photos_update ON app.listing_photos
     );
 
 CREATE POLICY listing_photos_delete ON app.listing_photos
-    FOR DELETE TO betterguests_app
+    FOR DELETE TO __APP_ROLE__
     USING (
         EXISTS (
             SELECT 1 FROM app.listings l
@@ -334,13 +334,13 @@ CREATE POLICY listing_photos_delete ON app.listing_photos
 -- ---- listing_amenities ----------------------------------------------
 
 CREATE POLICY listing_amenities_select ON app.listing_amenities
-    FOR SELECT TO betterguests_app
+    FOR SELECT TO __APP_ROLE__
     USING (
         EXISTS (SELECT 1 FROM app.listings l WHERE l.id = listing_id)
     );
 
 CREATE POLICY listing_amenities_insert ON app.listing_amenities
-    FOR INSERT TO betterguests_app
+    FOR INSERT TO __APP_ROLE__
     WITH CHECK (
         EXISTS (
             SELECT 1 FROM app.listings l
@@ -349,7 +349,7 @@ CREATE POLICY listing_amenities_insert ON app.listing_amenities
     );
 
 CREATE POLICY listing_amenities_delete ON app.listing_amenities
-    FOR DELETE TO betterguests_app
+    FOR DELETE TO __APP_ROLE__
     USING (
         EXISTS (
             SELECT 1 FROM app.listings l
@@ -360,13 +360,13 @@ CREATE POLICY listing_amenities_delete ON app.listing_amenities
 -- ---- listing_rules ---------------------------------------------------
 
 CREATE POLICY listing_rules_select ON app.listing_rules
-    FOR SELECT TO betterguests_app
+    FOR SELECT TO __APP_ROLE__
     USING (
         EXISTS (SELECT 1 FROM app.listings l WHERE l.id = listing_id)
     );
 
 CREATE POLICY listing_rules_insert ON app.listing_rules
-    FOR INSERT TO betterguests_app
+    FOR INSERT TO __APP_ROLE__
     WITH CHECK (
         EXISTS (
             SELECT 1 FROM app.listings l
@@ -375,7 +375,7 @@ CREATE POLICY listing_rules_insert ON app.listing_rules
     );
 
 CREATE POLICY listing_rules_update ON app.listing_rules
-    FOR UPDATE TO betterguests_app
+    FOR UPDATE TO __APP_ROLE__
     USING (
         EXISTS (
             SELECT 1 FROM app.listings l
@@ -390,7 +390,7 @@ CREATE POLICY listing_rules_update ON app.listing_rules
     );
 
 CREATE POLICY listing_rules_delete ON app.listing_rules
-    FOR DELETE TO betterguests_app
+    FOR DELETE TO __APP_ROLE__
     USING (
         EXISTS (
             SELECT 1 FROM app.listings l
@@ -401,7 +401,7 @@ CREATE POLICY listing_rules_delete ON app.listing_rules
 -- ---- bookings ------------------------------------------------------
 
 CREATE POLICY bookings_select ON app.bookings
-    FOR SELECT TO betterguests_app
+    FOR SELECT TO __APP_ROLE__
     USING (
         guest_id = app.current_user_id()
         OR EXISTS (
@@ -411,7 +411,7 @@ CREATE POLICY bookings_select ON app.bookings
     );
 
 CREATE POLICY bookings_insert ON app.bookings
-    FOR INSERT TO betterguests_app
+    FOR INSERT TO __APP_ROLE__
     WITH CHECK (
         guest_id = app.current_user_id()
         AND status = 'pending'
@@ -423,7 +423,7 @@ CREATE POLICY bookings_insert ON app.bookings
     );
 
 CREATE POLICY bookings_update_host ON app.bookings
-    FOR UPDATE TO betterguests_app
+    FOR UPDATE TO __APP_ROLE__
     USING (
         EXISTS (
             SELECT 1 FROM app.listings l
@@ -440,14 +440,14 @@ CREATE POLICY bookings_update_host ON app.bookings
 -- ---- listing_reviews ------------------------------------------------
 
 CREATE POLICY reviews_select ON app.listing_reviews
-    FOR SELECT TO betterguests_app
+    FOR SELECT TO __APP_ROLE__
     USING (
         guest_id = app.current_user_id()
         OR EXISTS (SELECT 1 FROM app.listings l WHERE l.id = listing_id)
     );
 
 CREATE POLICY reviews_insert ON app.listing_reviews
-    FOR INSERT TO betterguests_app
+    FOR INSERT TO __APP_ROLE__
     WITH CHECK (
         guest_id = app.current_user_id()
         AND EXISTS (
@@ -460,24 +460,24 @@ CREATE POLICY reviews_insert ON app.listing_reviews
     );
 
 CREATE POLICY reviews_update ON app.listing_reviews
-    FOR UPDATE TO betterguests_app
+    FOR UPDATE TO __APP_ROLE__
     USING (guest_id = app.current_user_id())
     WITH CHECK (guest_id = app.current_user_id());
 
 CREATE POLICY reviews_delete ON app.listing_reviews
-    FOR DELETE TO betterguests_app
+    FOR DELETE TO __APP_ROLE__
     USING (guest_id = app.current_user_id());
 
 -- ============================================================
 -- Grants
 -- ============================================================
 
-GRANT SELECT, INSERT ON app.accounts TO betterguests_app;
-GRANT SELECT ON app.amenities TO betterguests_app;
-GRANT SELECT, INSERT, UPDATE, DELETE ON app.listings, app.listing_photos, app.listing_rules TO betterguests_app;
-GRANT SELECT, INSERT, DELETE ON app.listing_amenities TO betterguests_app;
-GRANT SELECT, INSERT, UPDATE ON app.bookings TO betterguests_app;
-GRANT SELECT, INSERT, UPDATE, DELETE ON app.listing_reviews TO betterguests_app;
+GRANT SELECT, INSERT ON app.accounts TO __APP_ROLE__;
+GRANT SELECT ON app.amenities TO __APP_ROLE__;
+GRANT SELECT, INSERT, UPDATE, DELETE ON app.listings, app.listing_photos, app.listing_rules TO __APP_ROLE__;
+GRANT SELECT, INSERT, DELETE ON app.listing_amenities TO __APP_ROLE__;
+GRANT SELECT, INSERT, UPDATE ON app.bookings TO __APP_ROLE__;
+GRANT SELECT, INSERT, UPDATE, DELETE ON app.listing_reviews TO __APP_ROLE__;
 
 -- +goose Down
 

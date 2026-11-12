@@ -44,3 +44,39 @@ func TestCreateListingHTTPRequiresAuthentication(t *testing.T) {
 		t.Fatalf("expected 401, got %d", response.Code)
 	}
 }
+
+func listingRequest(body string) *http.Request {
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/listings", strings.NewReader(body))
+	return request.WithContext(accounts.WithUserID(request.Context(), uuid.New()))
+}
+
+func TestCreateListingHTTPRejectsOversizedBody(t *testing.T) {
+	oversized := `{"title":"` + strings.Repeat("a", 2<<20) + `"}`
+	response := httptest.NewRecorder()
+
+	NewHTTPHandler(&listingCreatorStub{}).CreateListing(response, listingRequest(oversized))
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a body over the byte limit, got %d", response.Code)
+	}
+}
+
+func TestCreateListingHTTPRejectsUnknownFields(t *testing.T) {
+	response := httptest.NewRecorder()
+
+	NewHTTPHandler(&listingCreatorStub{}).CreateListing(response, listingRequest(`{"title":"ok","unexpected":"field"}`))
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for an unknown field, got %d", response.Code)
+	}
+}
+
+func TestCreateListingHTTPRejectsMalformedJSON(t *testing.T) {
+	response := httptest.NewRecorder()
+
+	NewHTTPHandler(&listingCreatorStub{}).CreateListing(response, listingRequest(`{"title":`))
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for malformed JSON, got %d", response.Code)
+	}
+}

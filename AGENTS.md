@@ -22,9 +22,11 @@ file style unless the change is specifically about fixing that file.
 - `http.go` contains the `HTTPHandler` struct, its `NewHTTPHandler` constructor,
   and the endpoint methods. Middleware may use a role name (for example
   `Authenticator`) instead of `HTTPHandler`.
-- Shared infrastructure lives in packages such as `internal/auth` and
-  `internal/logging`. Infrastructure may depend on domain packages; domain
-  packages must not depend on infrastructure.
+- Shared infrastructure lives in packages such as `internal/auth`,
+  `internal/logging`, and `internal/middleware` (rate limiting, HTTPS
+  enforcement, panic recovery, security headers — cross-cutting HTTP
+  concerns that do not belong to any one domain). Infrastructure may depend
+  on domain packages; domain packages must not depend on infrastructure.
 - Tests live beside the code they test and use the `_test.go` suffix.
 - A package name must match its directory name. Never declare `package foo` in
   a directory called `bar`.
@@ -41,7 +43,7 @@ file style unless the change is specifically about fixing that file.
   Name them for the capability the consumer needs: `Creator`, `Store`,
   `Provisioner`, `ListingCreator`.
 - Prefer small capability interfaces over large service interfaces.
-- Acronyms follow Go convention: `HTTPHandler`, `userID`, `firebaseUID`.
+- Acronyms follow Go convention: `HTTPHandler`, `userID`, `clerkUserID`.
 
 ## Errors
 
@@ -69,7 +71,23 @@ file style unless the change is specifically about fixing that file.
 - Follow `db/migrations/README.md` for every table migration: `app` schema,
   UUID primary key, explicit constraints, indexes, forced row-level security,
   command-specific policies, explicit grants, and no elevated privileges.
+- The app and migrator role names are never literals in migration SQL. Write
+  `__APP_ROLE__`/`__MIGRATOR_ROLE__`; `cmd/migrate` renders every embedded
+  migration through `migrations.Rendered` (`db/migrations/embed.go`),
+  substituting the configured `DB_EXPECTED_ROLE`/`DB_EXPECTED_MIGRATOR_ROLE`
+  values before handing the SQL to Goose. `db/bootstrap/` and `db/test/` SQL
+  run through `psql` directly instead of Goose, so they take literal role
+  names supplied on the `psql` command line, not the placeholders.
 - Migrations are append-only. Fix a bad migration with a new migration.
+- Fetch a collection with one query (`WHERE id = ANY($1)` or a join), never
+  by looping a per-row query over results from an earlier query — that is an
+  N+1 query bug.
+- A business rule that must hold across concurrent requests (two bookings
+  never overlapping a listing's calendar) is enforced by a database
+  constraint, not a Go-level check-then-write — see
+  `db/migrations/00005_booking_overlap_prevention.sql`'s exclusion
+  constraint and `internal/bookings/store.go`. A read in Go, however
+  careful, cannot see another transaction's uncommitted write.
 
 ## HTTP
 

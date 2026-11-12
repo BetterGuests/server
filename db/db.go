@@ -79,13 +79,18 @@ func configFromLookup(lookup func(string) string) (Config, error) {
 
 	expectedRole := lookup("DB_EXPECTED_ROLE")
 	if expectedRole == "" {
-		expectedRole = "betterguests_app"
+		return Config{}, errors.New("DB_EXPECTED_ROLE is required")
+	}
+
+	applicationName := lookup("DB_APPLICATION_NAME")
+	if applicationName == "" {
+		applicationName = "api"
 	}
 
 	return Config{
 		URL:             url,
 		ExpectedRole:    expectedRole,
-		ApplicationName: "betterguests-api",
+		ApplicationName: applicationName,
 		MaxConns:        maxConns,
 		MinIdleConns:    1,
 		ConnectTimeout:  5 * time.Second,
@@ -129,6 +134,7 @@ func Open(ctx context.Context, config Config) (*pgxpool.Pool, error) {
 	poolConfig.HealthCheckPeriod = config.HealthCheck
 
 	poolConfig.ConnConfig.ConnectTimeout = config.ConnectTimeout
+	poolConfig.ConnConfig.Tracer = SlowQueryTracer{}
 	if poolConfig.ConnConfig.RuntimeParams == nil {
 		poolConfig.ConnConfig.RuntimeParams = map[string]string{}
 	}
@@ -156,9 +162,9 @@ func Open(ctx context.Context, config Config) (*pgxpool.Pool, error) {
 }
 
 // verifyPool checks that we can actually talk to the database, and that
-// we're connected as the role we expect (e.g. "betterguests_app", not some
-// admin role). Asking for current_user already proves the connection is
-// alive, so no separate ping is needed.
+// we're connected as the role we expect (DB_EXPECTED_ROLE, not some admin
+// role). Asking for current_user already proves the connection is alive, so
+// no separate ping is needed.
 func verifyPool(ctx context.Context, pool *pgxpool.Pool, config Config) error {
 	queryCtx, cancel := context.WithTimeout(ctx, config.PingTimeout)
 	defer cancel()

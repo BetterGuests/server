@@ -27,8 +27,8 @@ func TestPostgresStoreEnsureProvisionsOnce(t *testing.T) {
 	defer pool.Close()
 
 	store := NewPostgresAccountStore(pool)
-	firebaseUID := "firebase-" + uuid.NewString()
-	account := Account{ID: DeterministicID(firebaseUID), FirebaseUID: firebaseUID}
+	clerkUserID := "clerk-" + uuid.NewString()
+	account := Account{ID: DeterministicID(clerkUserID), ClerkUserID: clerkUserID}
 
 	if err := store.Ensure(ctx, account); err != nil {
 		t.Fatal(err)
@@ -39,12 +39,12 @@ func TestPostgresStoreEnsureProvisionsOnce(t *testing.T) {
 
 	var storedUID string
 	if err := db.WithUserTx(ctx, pool, account.ID.String(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT firebase_uid FROM app.accounts WHERE id = $1`, account.ID).Scan(&storedUID)
+		return tx.QueryRow(ctx, `SELECT clerk_user_id FROM app.accounts WHERE id = $1`, account.ID).Scan(&storedUID)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if storedUID != firebaseUID {
-		t.Fatalf("stored firebase UID %q, want %q", storedUID, firebaseUID)
+	if storedUID != clerkUserID {
+		t.Fatalf("stored clerk user ID %q, want %q", storedUID, clerkUserID)
 	}
 
 	var visible int

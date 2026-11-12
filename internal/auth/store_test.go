@@ -1,56 +1,29 @@
 package auth
 
-import (
-	"encoding/base64"
-	"testing"
-)
+import "testing"
 
-func TestConfigFromLookupRequiresFirebaseSettings(t *testing.T) {
+func TestConfigFromLookupRequiresClerkSecretKey(t *testing.T) {
 	tests := []struct {
 		name    string
 		values  map[string]string
 		wantErr bool
 	}{
 		{
-			name: "valid raw JSON",
-			values: map[string]string{
-				"FIREBASE_PROJECT_ID":       "betterguests",
-				"FIREBASE_CREDENTIALS_JSON": `{"type":"service_account"}`,
-			},
+			name:   "valid secret key",
+			values: map[string]string{"CLERK_SECRET_KEY": "sk_test_abc123"},
 		},
 		{
-			name: "valid multi-line raw JSON",
-			values: map[string]string{
-				"FIREBASE_PROJECT_ID": "betterguests",
-				"FIREBASE_CREDENTIALS_JSON": `{
-  "type": "service_account",
-  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIB\n-----END PRIVATE KEY-----\n"
-}`,
-			},
+			name:   "secret key with surrounding whitespace",
+			values: map[string]string{"CLERK_SECRET_KEY": "  sk_test_abc123  "},
 		},
 		{
-			name: "valid base64 JSON",
-			values: map[string]string{
-				"FIREBASE_PROJECT_ID":       "betterguests",
-				"FIREBASE_CREDENTIALS_JSON": base64.StdEncoding.EncodeToString([]byte(`{"type":"service_account"}`)),
-			},
-		},
-		{
-			name:    "missing project ID",
-			values:  map[string]string{"FIREBASE_CREDENTIALS_JSON": `{}`},
+			name:    "missing secret key",
+			values:  map[string]string{},
 			wantErr: true,
 		},
 		{
-			name:    "missing credentials",
-			values:  map[string]string{"FIREBASE_PROJECT_ID": "betterguests"},
-			wantErr: true,
-		},
-		{
-			name: "invalid JSON",
-			values: map[string]string{
-				"FIREBASE_PROJECT_ID":       "betterguests",
-				"FIREBASE_CREDENTIALS_JSON": "not-json",
-			},
+			name:    "blank secret key",
+			values:  map[string]string{"CLERK_SECRET_KEY": "   "},
 			wantErr: true,
 		},
 	}
@@ -69,9 +42,15 @@ func TestConfigFromLookupRequiresFirebaseSettings(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if cfg.ProjectID != "betterguests" {
-				t.Fatalf("unexpected project ID: %q", cfg.ProjectID)
+			if cfg.SecretKey != "sk_test_abc123" {
+				t.Fatalf("unexpected secret key: %q", cfg.SecretKey)
 			}
 		})
+	}
+}
+
+func TestNewClerkTokenVerifierRequiresSecretKey(t *testing.T) {
+	if _, err := NewClerkTokenVerifier(ClerkConfig{}); err == nil {
+		t.Fatal("expected an error for an empty secret key")
 	}
 }

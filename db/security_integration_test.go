@@ -23,16 +23,21 @@ func TestDatabaseSecurityBoundary(t *testing.T) {
 	if appURL == "" || migrationURL == "" {
 		t.Skip("set TEST_DATABASE_URL and TEST_MIGRATION_DATABASE_URL to run database attack tests")
 	}
+	appRole := os.Getenv("DB_EXPECTED_ROLE")
+	migratorRole := os.Getenv("DB_EXPECTED_MIGRATOR_ROLE")
+	if appRole == "" || migratorRole == "" {
+		t.Skip("set DB_EXPECTED_ROLE and DB_EXPECTED_MIGRATOR_ROLE to run database attack tests")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 
-	migrationPool := openTestPool(t, ctx, migrationURL, "betterguests_migrator", 2)
+	migrationPool := openTestPool(t, ctx, migrationURL, migratorRole, 2)
 	defer migrationPool.Close()
-	appPool := openTestPool(t, ctx, appURL, "betterguests_app", 1)
+	appPool := openTestPool(t, ctx, appURL, appRole, 1)
 	defer appPool.Close()
 
-	createAttackFixture(t, ctx, migrationPool)
+	createAttackFixture(t, ctx, migrationPool, appRole)
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cleanupCancel()
@@ -164,7 +169,7 @@ func TestDatabaseSecurityBoundary(t *testing.T) {
 
 	t.Run("role escalation and DDL are rejected", func(t *testing.T) {
 		attacks := []string{
-			"SET ROLE betterguests_migrator",
+			fmt.Sprintf("SET ROLE %s", migratorRole),
 			"CREATE TABLE app.unauthorized_table (id integer)",
 			"ALTER TABLE app.security_attack_accounts DISABLE ROW LEVEL SECURITY",
 			"TRUNCATE app.security_attack_accounts",
@@ -198,7 +203,7 @@ func TestDatabaseSecurityBoundary(t *testing.T) {
 	})
 
 	t.Run("role and catalog invariants hold", func(t *testing.T) {
-		assertSecurityCatalog(t, ctx, migrationPool)
+		assertSecurityCatalog(t, ctx, migrationPool, appRole, migratorRole)
 	})
 }
 
@@ -213,7 +218,7 @@ func openTestPool(
 	pool, err := Open(ctx, Config{
 		URL:             url,
 		ExpectedRole:    role,
-		ApplicationName: "betterguests-security-test",
+		ApplicationName: "betterguests-security-test", // unchanged: this product keeps the BetterGuests name
 		MaxConns:        maxConns,
 		MinIdleConns:    0,
 		ConnectTimeout:  5 * time.Second,
@@ -228,9 +233,9 @@ func openTestPool(
 	return pool
 }
 
-func createAttackFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+func createAttackFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool, appRole string) {
 	t.Helper()
-	_, err := pool.Exec(ctx, `
+	_, err := pool.Exec(ctx, fmt.Sprintf(`
 		DROP TABLE IF EXISTS app.security_attack_accounts;
 
 		CREATE TABLE app.security_attack_accounts (
@@ -247,22 +252,22 @@ func createAttackFixture(t *testing.T, ctx context.Context, pool *pgxpool.Pool) 
 		ALTER TABLE app.security_attack_accounts FORCE ROW LEVEL SECURITY;
 
 		CREATE POLICY security_accounts_select ON app.security_attack_accounts
-			FOR SELECT TO betterguests_app
+			FOR SELECT TO %[1]s
 			USING (owner_id = app.current_user_id());
 		CREATE POLICY security_accounts_insert ON app.security_attack_accounts
-			FOR INSERT TO betterguests_app
+			FOR INSERT TO %[1]s
 			WITH CHECK (owner_id = app.current_user_id());
 		CREATE POLICY security_accounts_update ON app.security_attack_accounts
-			FOR UPDATE TO betterguests_app
+			FOR UPDATE TO %[1]s
 			USING (owner_id = app.current_user_id())
 			WITH CHECK (owner_id = app.current_user_id());
 		CREATE POLICY security_accounts_delete ON app.security_attack_accounts
-			FOR DELETE TO betterguests_app
+			FOR DELETE TO %[1]s
 			USING (owner_id = app.current_user_id());
 
 		GRANT SELECT, INSERT, UPDATE, DELETE
-			ON app.security_attack_accounts TO betterguests_app;
-	`)
+			ON app.security_attack_accounts TO %[1]s;
+	`, appRole))
 	if err != nil {
 		t.Fatalf("create attack fixture: %v", err)
 	}
@@ -313,10 +318,10 @@ func tamperPooledConnection(t *testing.T, ctx context.Context, pool *pgxpool.Poo
 	}
 }
 
-func assertSecurityCatalog(t *testing.T, ctx context.Context, pool *pgxpool.Pool) {
+func assertSecurityCatalog(t *testing.T, ctx context.Context, pool *pgxpool.Pool, appRole, migratorRole string) {
 	t.Helper()
 
-	for _, role := range []string{"betterguests_app", "betterguests_migrator"} {
+	for _, role := range []string{appRole, migratorRole} {
 		var superuser, createDB, createRole, replication, bypassRLS bool
 		err := pool.QueryRow(
 			ctx,
@@ -335,7 +340,8 @@ func assertSecurityCatalog(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 	var appCanCreate bool
 	if err := pool.QueryRow(
 		ctx,
-		"SELECT has_schema_privilege('betterguests_app', 'app', 'CREATE')",
+		"SELECT has_schema_privilege($1, 'app', 'CREATE')",
+		appRole,
 	).Scan(&appCanCreate); err != nil {
 		t.Fatal(err)
 	}
@@ -351,11 +357,11 @@ func assertSecurityCatalog(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 	}{
 		{
 			name: "app-owned tables",
-			query: `SELECT count(*) FROM pg_class c
+			query: fmt.Sprintf(`SELECT count(*) FROM pg_class c
 				JOIN pg_namespace n ON n.oid = c.relnamespace
 				JOIN pg_roles r ON r.oid = c.relowner
 				WHERE n.nspname = 'app' AND c.relkind IN ('r', 'p')
-				  AND r.rolname = 'betterguests_app'`,
+				  AND r.rolname = '%s'`, appRole),
 			target: &appOwned,
 		},
 		{
@@ -376,17 +382,17 @@ func assertSecurityCatalog(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 		},
 		{
 			name: "tables without app policies",
-			query: `SELECT count(*) FROM pg_class c
+			query: fmt.Sprintf(`SELECT count(*) FROM pg_class c
 				JOIN pg_namespace n ON n.oid = c.relnamespace
 				WHERE n.nspname = 'app' AND c.relkind IN ('r', 'p')
 				  AND c.relname <> 'goose_db_version'
 				  AND NOT EXISTS (
 				      SELECT 1 FROM pg_policy p
 				      WHERE p.polrelid = c.oid
-				        AND 'betterguests_app' = ANY (
+				        AND '%s' = ANY (
 				            SELECT rolname FROM pg_roles WHERE oid = ANY (p.polroles)
 				        )
-				  )`,
+				  )`, appRole),
 			target: &missingPolicies,
 		},
 		{

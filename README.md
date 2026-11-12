@@ -2,6 +2,10 @@
 
 Go API for Better Guests.
 
+See `RAILWAY.md` for how this deploys: a one-shot migrate service plus a
+horizontally scaled api service, split so the api service never holds
+migration credentials.
+
 ## Developer command
 
 The repository has one developer command:
@@ -38,14 +42,24 @@ Railway or production URL in your shell or `.env` cannot be used by tests.
 
 ## Database roles
 
-- `betterguests_app` is the API runtime role. It cannot create schemas or
-  tables, own objects, change RLS, truncate tables, or assume the migration
-  role.
-- `betterguests_migrator` owns the `app` schema and applies reviewed schema
-  migrations. The migration command refuses any other database role.
+- The app role (`DB_EXPECTED_ROLE`, `betterguests_app` by default) is the API
+  runtime role. It cannot create schemas or tables, own objects, change RLS,
+  truncate tables, or assume the migration role.
+- The migrator role (`DB_EXPECTED_MIGRATOR_ROLE`, `betterguests_migrator` by
+  default) owns the `app` schema and applies reviewed schema migrations. The
+  migration command refuses any other database role.
 
 The API verifies `current_user` at startup and refuses to start unless it is
-connected as `betterguests_app`.
+connected as the configured app role.
+
+Both role names are environment variables, not literals baked into the
+database: `db/bootstrap/001_roles_and_schema.sql` creates whatever roles the
+administrator names when running it, and `cmd/migrate` renders every
+embedded migration (see `db/migrations/embed.go`'s `Rendered`) with
+`DB_EXPECTED_ROLE`/`DB_EXPECTED_MIGRATOR_ROLE` substituted in before handing
+it to Goose, since `GRANT ... TO` and `CREATE POLICY ... TO` can't bind a
+role name as a query parameter. Renaming the roles later is one environment
+variable, not a grep across every migration file.
 
 ## Bootstrap and migrations
 
@@ -64,17 +78,23 @@ disposable local container and cannot inherit production credentials.
 
 ## Environment
 
-- `DATABASE_URL`: runtime connection URL for `betterguests_app`
-- `MIGRATION_DATABASE_URL`: migration URL for `betterguests_migrator`
-- `DB_EXPECTED_ROLE=betterguests_app`
+- `DATABASE_URL`: runtime connection URL for the app role
+- `MIGRATION_DATABASE_URL`: migration URL for the migrator role
+- `DB_EXPECTED_ROLE`: the app role name, e.g. `betterguests_app`. The running
+  server refuses to start unless `current_user` matches this. Migrations
+  also read it, substituting it into every `GRANT`/`CREATE POLICY ... TO`
+  statement — see "Database roles" above.
+- `DB_EXPECTED_MIGRATOR_ROLE`: the migrator role name, e.g.
+  `betterguests_migrator`. `cmd/migrate` refuses to run unless connected as
+  this role, and substitutes it the same way `DB_EXPECTED_ROLE` is
+  substituted.
+- `DB_APPLICATION_NAME`: shown in PostgreSQL logs/monitoring; defaults to
+  `api`.
 - `DB_MAX_CONNS=5` initially; total across replicas must remain below the role's
   20-connection limit
-- `FIREBASE_PROJECT_ID`: Firebase project that issues the client ID tokens
-- `FIREBASE_CREDENTIALS_JSON`: Firebase Admin service-account JSON, either raw
-  or base64-encoded. Raw JSON may be wrapped in single quotes and span several
-  lines; double quotes also work but must escape every JSON quote. The API
-  verifies each bearer token with it and maps the Firebase UID to a stable
-  `app.accounts` row on first use.
+- `CLERK_SECRET_KEY`: Clerk secret key. The API verifies each bearer token
+  with it and maps the Clerk user ID to a stable `app.accounts` row on first
+  use.
 - `PORT`: HTTP port
 
 ## Tests

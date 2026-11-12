@@ -9,24 +9,24 @@ import (
 )
 
 type verifierStub struct {
-	token FirebaseToken
-	err   error
+	identity ClerkIdentity
+	err      error
 }
 
-func (stub verifierStub) VerifyIDToken(context.Context, string) (FirebaseToken, error) {
-	return stub.token, stub.err
+func (stub verifierStub) VerifyIDToken(context.Context, string) (ClerkIdentity, error) {
+	return stub.identity, stub.err
 }
 
 type provisionerStub struct {
 	accountID   uuid.UUID
-	firebaseUID string
+	clerkUserID string
 	err         error
 	called      bool
 }
 
-func (stub *provisionerStub) EnsureAccount(_ context.Context, firebaseUID string) (uuid.UUID, error) {
+func (stub *provisionerStub) EnsureAccount(_ context.Context, clerkUserID string) (uuid.UUID, error) {
 	stub.called = true
-	stub.firebaseUID = firebaseUID
+	stub.clerkUserID = clerkUserID
 	if stub.accountID == uuid.Nil {
 		stub.accountID = uuid.New()
 	}
@@ -35,7 +35,7 @@ func (stub *provisionerStub) EnsureAccount(_ context.Context, firebaseUID string
 
 func TestAuthServiceAuthenticateReturnsProvisionedAccount(t *testing.T) {
 	provisioner := &provisionerStub{}
-	service := NewAuthService(verifierStub{token: FirebaseToken{UID: "firebase-user"}}, provisioner)
+	service := NewAuthService(verifierStub{identity: ClerkIdentity{UserID: "clerk-user"}}, provisioner)
 
 	accountID, err := service.Authenticate(context.Background(), "Bearer token")
 	if err != nil {
@@ -44,7 +44,7 @@ func TestAuthServiceAuthenticateReturnsProvisionedAccount(t *testing.T) {
 	if accountID != provisioner.accountID {
 		t.Fatalf("unexpected account ID: %v", accountID)
 	}
-	if !provisioner.called || provisioner.firebaseUID != "firebase-user" {
+	if !provisioner.called || provisioner.clerkUserID != "clerk-user" {
 		t.Fatalf("provisioner not called correctly: %+v", provisioner)
 	}
 }
@@ -59,7 +59,7 @@ func TestAuthServiceAuthenticateRejectsInvalidTokens(t *testing.T) {
 		{name: "wrong scheme", authorization: "Basic token"},
 		{name: "empty bearer", authorization: "Bearer "},
 		{name: "verifier rejects", authorization: "Bearer token", verifier: verifierStub{err: ErrUnauthenticated}},
-		{name: "empty provider UID", authorization: "Bearer token", verifier: verifierStub{token: FirebaseToken{}}},
+		{name: "empty provider user ID", authorization: "Bearer token", verifier: verifierStub{identity: ClerkIdentity{}}},
 	}
 
 	for _, test := range tests {
@@ -75,7 +75,7 @@ func TestAuthServiceAuthenticateRejectsInvalidTokens(t *testing.T) {
 func TestAuthServiceAuthenticateReturnsProvisioningError(t *testing.T) {
 	want := errors.New("database unavailable")
 	service := NewAuthService(
-		verifierStub{token: FirebaseToken{UID: "firebase-user"}},
+		verifierStub{identity: ClerkIdentity{UserID: "clerk-user"}},
 		&provisionerStub{err: want},
 	)
 

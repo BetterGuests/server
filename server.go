@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/BetterGuests/BetterGuests-Server/internal/middleware"
 	"github.com/go-chi/cors"
 )
 
@@ -84,7 +85,7 @@ func routes(database databasePinger, origins []string, protected ...http.Handler
 		mux.Handle("/api/v1/", protected[0])
 	}
 
-	return cors.Handler(cors.Options{
+	corsHandler := cors.Handler(cors.Options{
 		AllowedOrigins: origins,
 		AllowedMethods: []string{
 			"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS",
@@ -94,6 +95,17 @@ func routes(database databasePinger, origins []string, protected ...http.Handler
 		},
 		AllowCredentials: false,
 	})(mux)
+
+	// Order matters: Recover must be outermost so it catches a panic from
+	// any middleware below it, not just from mux. RateLimit runs before CORS
+	// so an over-limit client is rejected without doing CORS/mux work.
+	return middleware.Recover(
+		middleware.SecurityHeaders(
+			middleware.RequireHTTPS(
+				middleware.RateLimit(middleware.DefaultRateLimiterConfig())(corsHandler),
+			),
+		),
+	)
 }
 
 func health(w http.ResponseWriter, r *http.Request) {

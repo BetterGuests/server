@@ -26,7 +26,16 @@ func (auth *Authenticator) Middleware(next http.Handler) http.Handler {
 		accountID, err := auth.service.Authenticate(r.Context(), r.Header.Get("Authorization"))
 		switch {
 		case errors.Is(err, ErrUnauthenticated):
-			slog.Debug("Authentication rejected", "error", err)
+			// Warn, not Debug: a rejected authentication attempt is exactly
+			// the signal an alert on repeated failures from one client would
+			// watch for, and Debug-level logs are commonly dropped in
+			// production.
+			slog.Warn("Authentication rejected",
+				"error", err,
+				"method", r.Method,
+				"path", r.URL.Path,
+				"remote_addr", r.RemoteAddr,
+			)
 			writeError(w, http.StatusUnauthorized, "authentication required")
 			return
 		case err != nil:

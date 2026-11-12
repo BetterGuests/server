@@ -8,10 +8,10 @@ import (
 
 // T Y P E S --------------------------------------- //
 
-// Account is an internal BetterGuests account linked to a Firebase identity.
+// Account is an internal BetterGuests account linked to a Clerk identity.
 type Account struct {
 	ID          uuid.UUID
-	FirebaseUID string
+	ClerkUserID string
 }
 
 // AccountStore persists accounts.
