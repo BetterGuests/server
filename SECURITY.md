@@ -142,3 +142,11 @@ equally deep. A few are worth reading before you trust them blindly:
   available in the environment this work was done in. Run it yourself
   before deploying anything that touched `db/`, `internal/bookings`, or the
   scripts above.
+
+## Age and consent
+
+- [x] Age confirmation is stored server side; only adults get a row (database CHECK enforces 18 or older)
+- [x] Booking, checkout, listing creation and verification require a confirmed adult account
+- [x] Biometric consent is recorded with a policy version and timestamp before any Persona inquiry is created
+- [x] A minor's date of birth is never stored
+- [ ] Withdrawal endpoint for biometric consent

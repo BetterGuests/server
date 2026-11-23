@@ -10,8 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/BetterGuests/BetterGuests-Server/internal/middleware"
-	"github.com/go-chi/cors"
+	"github.com/BetterGuests/BetterGuests-Server/db"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type databasePinger interface {
@@ -77,35 +77,12 @@ func runServer(server *http.Server) error {
 	return nil
 }
 
-func routes(database databasePinger, origins []string, protected ...http.Handler) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", health)
-	mux.HandleFunc("GET /ready", ready(database))
-	if len(protected) > 0 && protected[0] != nil {
-		mux.Handle("/api/v1/", protected[0])
+func logPoolStatsPeriodically(pool *pgxpool.Pool) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		db.LogPoolStats(pool)
 	}
-
-	corsHandler := cors.Handler(cors.Options{
-		AllowedOrigins: origins,
-		AllowedMethods: []string{
-			"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS",
-		},
-		AllowedHeaders: []string{
-			"Authorization", "Content-Type",
-		},
-		AllowCredentials: false,
-	})(mux)
-
-	// Order matters: Recover must be outermost so it catches a panic from
-	// any middleware below it, not just from mux. RateLimit runs before CORS
-	// so an over-limit client is rejected without doing CORS/mux work.
-	return middleware.Recover(
-		middleware.SecurityHeaders(
-			middleware.RequireHTTPS(
-				middleware.RateLimit(middleware.DefaultRateLimiterConfig())(corsHandler),
-			),
-		),
-	)
 }
 
 func health(w http.ResponseWriter, r *http.Request) {

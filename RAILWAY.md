@@ -101,8 +101,17 @@ Create a second Railway service from the same repo.
   - `DB_EXPECTED_ROLE` — `betterguests_app`
   - `DB_APPLICATION_NAME` — e.g. `betterguests-api`
   - `DB_MAX_CONNS` — see scaling math below
-  - `BASE_URL`, `ALLOWED_ORIGINS`, `CLERK_SECRET_KEY`, `PORT`, and any other
-    secrets from `.env.example`
+  - `ALLOWED_ORIGINS` — JSON array of the web origins allowed to call the API
+  - `CLERK_SECRET_KEY`
+  - `PERSONA_API_KEY`, `PERSONA_TEMPLATE_ID`, `PERSONA_WEBHOOK_SECRET` — all
+    three are required; the server refuses to start without them
+  - `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`
+  - `S3_ENDPOINT`, `S3_BUCKET`, `S3_REGION`, `S3_ACCESS_KEY_ID`,
+    `S3_SECRET_ACCESS_KEY` — listing photos and cashback photos; optional
+    `S3_URL_STYLE=path` for path-style buckets
+  - `SENTRY_DSN`, `SENTRY_ENVIRONMENT`
+  - `PORT`, optional `LOG_LEVEL`
+  - Firebase variables and `BASE_URL` are no longer read and must not be set.
 - **Health checks:** point Railway's healthcheck at `GET /ready` (checks the
   database) and leave `GET /health` for an external uptime monitor that
   should stay green even during a database outage.

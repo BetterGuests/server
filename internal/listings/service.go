@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -246,5 +248,68 @@ func validListingType(value ListingType) bool {
 	return value == EntirePlace || value == PrivateRoom || value == SharedRoom
 }
 func validPropertyType(value PropertyType) bool {
-	return value == House || value == Apartment || value == Condo || value == Townhouse || value == Villa
+	return slices.Contains(
+		[]PropertyType{House, Apartment, Condo, Townhouse, Villa, Cabin, Cottage, Unique},
+		value,
+	)
+}
+
+var ErrListingNotFound = errors.New("listing not found")
+
+const (
+	photoURLLifetime      = time.Hour
+	publicCoordinateScale = 100.0
+)
+
+type PublicListingService struct {
+	reader PublishedListingReader
+	signer PhotoSigner
+}
+
+func NewPublicListingService(reader PublishedListingReader, signer PhotoSigner) *PublicListingService {
+	return &PublicListingService{reader: reader, signer: signer}
+}
+
+func (service *PublicListingService) ListPublished(ctx context.Context) ([]PublicListing, error) {
+	listings, err := service.reader.ListPublished(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for index := range listings {
+		if err := service.prepare(ctx, &listings[index]); err != nil {
+			return nil, err
+		}
+	}
+	return listings, nil
+}
+
+func (service *PublicListingService) GetPublished(ctx context.Context, id uuid.UUID) (PublicListing, error) {
+	listing, err := service.reader.GetPublished(ctx, id)
+	if err != nil {
+		return PublicListing{}, err
+	}
+	if err := service.prepare(ctx, &listing); err != nil {
+		return PublicListing{}, err
+	}
+	return listing, nil
+}
+
+func (service *PublicListingService) prepare(ctx context.Context, listing *PublicListing) error {
+	listing.Location.Latitude = roundCoordinate(listing.Location.Latitude)
+	listing.Location.Longitude = roundCoordinate(listing.Location.Longitude)
+	if service.signer == nil {
+		return nil
+	}
+	for index := range listing.Photos {
+		url, err := service.signer.PresignDownload(ctx, listing.Photos[index].ObjectKey, photoURLLifetime)
+		if err != nil {
+			return fmt.Errorf("sign photo for listing %s: %w", listing.ID, err)
+		}
+		listing.Photos[index].URL = url
+	}
+	return nil
+}
+
+func roundCoordinate(value float64) float64 {
+	return math.Round(value*publicCoordinateScale) / publicCoordinateScale
 }

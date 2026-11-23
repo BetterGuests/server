@@ -1,6 +1,7 @@
 package listings
 
 import (
+	"context"
 	"slices"
 	"time"
 
@@ -179,6 +180,9 @@ const (
 	Condo     PropertyType = "condo"
 	Townhouse PropertyType = "townhouse"
 	Villa     PropertyType = "villa"
+	Cabin     PropertyType = "cabin"
+	Cottage   PropertyType = "cottage"
+	Unique    PropertyType = "unique"
 )
 
 type ListingStatus string
@@ -209,4 +213,60 @@ type Review struct {
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type PublicLocation struct {
+	City        string  `json:"city"`
+	Region      string  `json:"region,omitempty"`
+	CountryCode string  `json:"country_code"`
+	Latitude    float64 `json:"latitude"`
+	Longitude   float64 `json:"longitude"`
+}
+
+type ListingPrice struct {
+	NightlyCents     int    `json:"nightly_cents"`
+	CleaningFeeCents int    `json:"cleaning_fee_cents"`
+	Currency         string `json:"currency"`
+}
+
+type ListingRating struct {
+	Average float64 `json:"average"`
+	Count   int     `json:"count"`
+}
+
+type PublicListing struct {
+	ID            uuid.UUID      `json:"id"`
+	Slug          string         `json:"slug,omitempty"`
+	Title         string         `json:"title"`
+	Summary       string         `json:"summary,omitempty"`
+	Description   string         `json:"description"`
+	HostName      string         `json:"host_name,omitempty"`
+	Location      PublicLocation `json:"location"`
+	Type          ListingType    `json:"type"`
+	PropertyType  PropertyType   `json:"property_type"`
+	MaxGuests     int            `json:"max_guests"`
+	Bedrooms      int            `json:"bedrooms"`
+	Beds          int            `json:"beds"`
+	Bathrooms     float64        `json:"bathrooms"`
+	MinimumNights int            `json:"minimum_nights"`
+	Price         *ListingPrice  `json:"price,omitempty"`
+	Rating        *ListingRating `json:"rating,omitempty"`
+	Amenities     []Amenity      `json:"amenities"`
+	Photos        []ListingPhoto `json:"photos"`
+	Rules         []HouseRule    `json:"rules"`
+	CreatedAt     time.Time      `json:"created_at"`
+}
+
+type PublishedListingReader interface {
+	ListPublished(ctx context.Context) ([]PublicListing, error)
+	GetPublished(ctx context.Context, id uuid.UUID) (PublicListing, error)
+}
+
+type PhotoSigner interface {
+	PresignDownload(ctx context.Context, key string, expires time.Duration) (string, error)
+}
+
+type PublicListingReader interface {
+	ListPublished(ctx context.Context) ([]PublicListing, error)
+	GetPublished(ctx context.Context, id uuid.UUID) (PublicListing, error)
 }

@@ -232,3 +232,23 @@ func WithUserTx(
 	}
 	return nil
 }
+
+func WithPublicTx(
+	ctx context.Context,
+	db transactionBeginner,
+	fn func(pgx.Tx) error,
+) error {
+	tx, err := db.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return fmt.Errorf("begin public transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback(context.Background()) }()
+
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit public transaction: %w", err)
+	}
+	return nil
+}

@@ -6,7 +6,18 @@ file style unless the change is specifically about fixing that file.
 
 ## Layout
 
-- `main.go` is the composition root. It builds dependencies and mounts routes.
+- The server entrypoint is split by job, and `layout_test.go` enforces it:
+  - `main.go` declares only `main` and `run`: load config, open the pool,
+    call `buildRouteDeps`, create and run the server. It imports no
+    `internal/<domain>` package.
+  - `wiring.go` is the composition root. It constructs stores, services and
+    handlers and returns them as `routeDeps`.
+  - `routes.go` is the only file that registers routes (`Handle`/`HandleFunc`)
+    and builds the middleware stack. Add a new endpoint here and nowhere else.
+  - `server.go` holds the `http.Server` lifecycle and the health and readiness
+    handlers.
+  A new domain adds one field to `routeDeps`, one construction in
+  `buildRouteDeps`, and its routes in `routes.go`.
   Do not create a package that only re-exports route wiring.
 - Domain packages live in `internal/<domain>` and use `domain.go`, `service.go`,
   `store.go`, and `http.go`. Keep a domain together rather than splitting it
@@ -126,10 +137,19 @@ file style unless the change is specifically about fixing that file.
 
 ## Comments
 
-- Write doc comments for every exported type, function, and method.
-- Explain *why* a non-obvious decision was made, not *what* the code does.
-- Keep comments short. Do not leave commented-out code.
-- Do not add a comment that merely restates the line below it.
+- Code carries no comments: no line comments, block comments, doc comments on
+  exported items, or commented-out code. Delete dead code; git has it.
+- Make the code say it: rename until a comment would be redundant, extract a
+  well-named function, replace a magic number with a named constant.
+- Put the reason for a non-obvious decision in a test named after the edge case,
+  the commit message or PR description, or a lasting note in this file or
+  `SECURITY.md`.
+- When editing code that already has comments, remove the ones inside the code
+  you touch.
+- Machine-read directives are allowed (`//go:embed`, `//go:build`,
+  `//go:generate`, `-- +goose ...`, `shellcheck`). Nothing else is.
+- This overrides the golint and revive "exported should have comment" checks.
+  Disable those rules rather than adding comments.
 
 ## Tests
 

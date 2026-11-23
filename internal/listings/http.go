@@ -25,10 +25,16 @@ type ListingCreator interface {
 // application capability above, not PostgreSQL or object storage.
 type HTTPHandler struct {
 	listingCreator ListingCreator
+	publicReader   PublicListingReader
 }
 
 func NewHTTPHandler(listingCreator ListingCreator) *HTTPHandler {
 	return &HTTPHandler{listingCreator: listingCreator}
+}
+
+func (handler *HTTPHandler) WithPublicReader(reader PublicListingReader) *HTTPHandler {
+	handler.publicReader = reader
+	return handler
 }
 
 // CreateListingRequest is the JSON body accepted by POST /api/v1/listings.
@@ -111,4 +117,38 @@ func writeListingError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
+}
+
+func (handler *HTTPHandler) ListListings(w http.ResponseWriter, r *http.Request) {
+	listings, err := handler.publicReader.ListPublished(r.Context())
+	if err != nil {
+		writeListingError(w, http.StatusInternalServerError, "could not load listings")
+		return
+	}
+	writePublicJSON(w, http.StatusOK, map[string]any{"listings": listings})
+}
+
+func (handler *HTTPHandler) GetListing(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("listing_id"))
+	if err != nil {
+		writeListingError(w, http.StatusBadRequest, "invalid listing id")
+		return
+	}
+	listing, err := handler.publicReader.GetPublished(r.Context(), id)
+	if errors.Is(err, ErrListingNotFound) {
+		writeListingError(w, http.StatusNotFound, "listing not found")
+		return
+	}
+	if err != nil {
+		writeListingError(w, http.StatusInternalServerError, "could not load listing")
+		return
+	}
+	writePublicJSON(w, http.StatusOK, listing)
+}
+
+func writePublicJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=60")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
 }

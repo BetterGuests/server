@@ -7,6 +7,9 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/BetterGuests/BetterGuests-Server/internal/verification"
+	"github.com/google/uuid"
 )
 
 type stubPinger struct {
@@ -21,10 +24,10 @@ func TestHealthIsIndependentOfDatabase(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/health", nil)
 	response := httptest.NewRecorder()
 
-	handler := routes(
-		stubPinger{err: errors.New("database unavailable")},
-		[]string{"http://localhost:3000"},
-	)
+	handler := routes(routeDeps{
+		database: stubPinger{err: errors.New("database unavailable")},
+		origins:  []string{"http://localhost:3000"},
+	})
 
 	handler.ServeHTTP(response, request)
 
@@ -75,10 +78,10 @@ func TestReadinessChecksDatabase(t *testing.T) {
 			request := httptest.NewRequest(http.MethodGet, "/ready", nil)
 			response := httptest.NewRecorder()
 
-			handler := routes(
-				stubPinger{err: test.pingError},
-				[]string{"http://localhost:3000"},
-			)
+			handler := routes(routeDeps{
+				database: stubPinger{err: test.pingError},
+				origins:  []string{"http://localhost:3000"},
+			})
 
 			handler.ServeHTTP(response, request)
 
@@ -90,5 +93,74 @@ func TestReadinessChecksDatabase(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+type stubVerification struct {
+	started   int
+	processed int
+}
+
+func (stub *stubVerification) StartVerification(context.Context, uuid.UUID, bool) (verification.StartResult, error) {
+	stub.started++
+	return verification.StartResult{InquiryID: "inq_1", SessionToken: "tok"}, nil
+}
+
+func (stub *stubVerification) HandleWebhook(context.Context, string, []byte) error {
+	stub.processed++
+	return nil
+}
+
+func rejectAll(http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	})
+}
+
+func TestPersonaWebhookRouteIsPublic(t *testing.T) {
+	stub := &stubVerification{}
+	handler := routes(routeDeps{
+		database:     stubPinger{},
+		origins:      []string{"http://localhost:3000"},
+		verification: verification.NewHTTPHandler(stub, stub),
+		authenticate: rejectAll,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/persona", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK || stub.processed != 1 {
+		t.Fatalf("status = %d, processed = %d", response.Code, stub.processed)
+	}
+}
+
+func TestStartVerificationRouteRequiresAuthentication(t *testing.T) {
+	stub := &stubVerification{}
+	handler := routes(routeDeps{
+		database:     stubPinger{},
+		origins:      []string{"http://localhost:3000"},
+		verification: verification.NewHTTPHandler(stub, stub),
+		authenticate: rejectAll,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/verification/inquiries", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized || stub.started != 0 {
+		t.Fatalf("status = %d, started = %d", response.Code, stub.started)
+	}
+}
+
+func TestVerificationRoutesAreAbsentWithoutHandler(t *testing.T) {
+	handler := routes(routeDeps{database: stubPinger{}, origins: []string{"http://localhost:3000"}})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/persona", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", response.Code)
 	}
 }

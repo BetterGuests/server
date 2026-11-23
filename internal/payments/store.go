@@ -1,0 +1,118 @@
+package payments
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/BetterGuests/BetterGuests-Server/db"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+type PostgresPaymentStore struct{ DB *pgxpool.Pool }
+
+func NewPostgresPaymentStore(pool *pgxpool.Pool) *PostgresPaymentStore {
+	return &PostgresPaymentStore{DB: pool}
+}
+
+func (store *PostgresPaymentStore) QuoteBooking(ctx context.Context, guestID, bookingID uuid.UUID) (Quote, error) {
+	var quote Quote
+	err := db.WithUserTx(ctx, store.DB, guestID.String(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT b.id, b.listing_id, l.host_id, b.status, (b.ends_on - b.starts_on), COALESCE(l.nightly_price_cents, 0)
+			 FROM app.bookings b
+			 JOIN app.listings l ON l.id = b.listing_id
+			 WHERE b.id = $1 AND b.guest_id = $2`,
+			bookingID, guestID,
+		).Scan(&quote.BookingID, &quote.ListingID, &quote.HostID, &quote.BookingStatus, &quote.Nights, &quote.NightlyPriceCents)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Quote{}, ErrBookingNotFound
+	}
+	if err != nil {
+		return Quote{}, fmt.Errorf("quote booking: %w", err)
+	}
+	return quote, nil
+}
+
+func (store *PostgresPaymentStore) ExistingPayment(ctx context.Context, guestID, bookingID uuid.UUID) (Payment, bool, error) {
+	var payment Payment
+	err := db.WithUserTx(ctx, store.DB, guestID.String(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT id, booking_id, guest_id, stripe_payment_intent_id, amount_cents, currency, status, created_at, updated_at
+			 FROM app.payments WHERE booking_id = $1 AND guest_id = $2`,
+			bookingID, guestID,
+		).Scan(&payment.ID, &payment.BookingID, &payment.GuestID, &payment.StripePaymentIntentID,
+			&payment.AmountCents, &payment.Currency, &payment.Status, &payment.CreatedAt, &payment.UpdatedAt)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Payment{}, false, nil
+	}
+	if err != nil {
+		return Payment{}, false, fmt.Errorf("select payment: %w", err)
+	}
+	return payment, true, nil
+}
+
+func (store *PostgresPaymentStore) CreatePayment(ctx context.Context, payment Payment) error {
+	return db.WithUserTx(ctx, store.DB, payment.GuestID.String(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO app.payments (id, booking_id, guest_id, host_id, stripe_payment_intent_id, amount_cents, currency, status, created_at, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			 ON CONFLICT (booking_id) DO UPDATE
+			 SET stripe_payment_intent_id = EXCLUDED.stripe_payment_intent_id,
+			     amount_cents = EXCLUDED.amount_cents,
+			     status = 'pending',
+			     last_event_at = NULL,
+			     updated_at = EXCLUDED.updated_at
+			 WHERE app.payments.status <> 'succeeded'`,
+			payment.ID, payment.BookingID, payment.GuestID, payment.HostID, payment.StripePaymentIntentID,
+			payment.AmountCents, payment.Currency, string(payment.Status), payment.CreatedAt, payment.UpdatedAt)
+		if err != nil {
+			return fmt.Errorf("insert payment: %w", err)
+		}
+		return nil
+	})
+}
+
+func (store *PostgresPaymentStore) ApplyOutcome(ctx context.Context, guestID uuid.UUID, intentID string, status Status, occurredAt time.Time) error {
+	return db.WithUserTx(ctx, store.DB, guestID.String(), func(tx pgx.Tx) error {
+		var bookingID uuid.UUID
+		err := tx.QueryRow(ctx,
+			`UPDATE app.payments
+			 SET status = $3, last_event_at = $4, updated_at = now()
+			 WHERE guest_id = $1 AND stripe_payment_intent_id = $2
+			   AND status <> 'succeeded'
+			   AND (last_event_at IS NULL OR last_event_at <= $4)
+			 RETURNING booking_id`,
+			guestID, intentID, string(status), occurredAt,
+		).Scan(&bookingID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			var exists bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS (SELECT 1 FROM app.payments WHERE guest_id = $1 AND stripe_payment_intent_id = $2)`,
+				guestID, intentID).Scan(&exists); err != nil {
+				return fmt.Errorf("look up payment: %w", err)
+			}
+			if !exists {
+				return ErrPaymentNotFound
+			}
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("update payment: %w", err)
+		}
+		if status != StatusSucceeded {
+			return nil
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE app.bookings SET status = 'confirmed' WHERE id = $1 AND guest_id = $2 AND status = 'pending'`,
+			bookingID, guestID); err != nil {
+			return fmt.Errorf("confirm booking: %w", err)
+		}
+		return nil
+	})
+}

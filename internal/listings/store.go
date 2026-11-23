@@ -138,35 +138,255 @@ func insertListingRow(ctx context.Context, tx pgx.Tx, listing Listing) error {
 }
 
 func insertListingAmenities(ctx context.Context, tx pgx.Tx, listingID uuid.UUID, amenities []Amenity) error {
-	for _, amenity := range amenities {
-		result, err := tx.Exec(ctx, `
-			INSERT INTO app.listing_amenities (id, listing_id, amenity_key)
-			SELECT $1, $2, key FROM app.amenities WHERE key = $3
-		`, uuid.New(), listingID, amenity)
-		if err != nil {
-			return fmt.Errorf("link amenity %q: %w", amenity, err)
-		}
-		if result.RowsAffected() != 1 {
-			return fmt.Errorf("amenity catalog is missing %q", amenity)
-		}
+	if len(amenities) == 0 {
+		return nil
+	}
+	ids := make([]string, len(amenities))
+	keys := make([]string, len(amenities))
+	for index, amenity := range amenities {
+		ids[index] = uuid.NewString()
+		keys[index] = string(amenity)
+	}
+	result, err := tx.Exec(ctx, `
+		INSERT INTO app.listing_amenities (id, listing_id, amenity_key)
+		SELECT input.id::uuid, $2, catalog.key
+		FROM unnest($1::text[], $3::text[]) AS input(id, key)
+		JOIN app.amenities catalog ON catalog.key = input.key
+	`, ids, listingID, keys)
+	if err != nil {
+		return fmt.Errorf("link amenities: %w", err)
+	}
+	if result.RowsAffected() != int64(len(amenities)) {
+		return fmt.Errorf("amenity catalog is missing %d of %d requested amenities", int64(len(amenities))-result.RowsAffected(), len(amenities))
 	}
 	return nil
 }
 
 func insertListingPhotos(ctx context.Context, tx pgx.Tx, listingID uuid.UUID, photos []ListingPhoto) error {
-	for _, photo := range photos {
-		if _, err := tx.Exec(ctx, `INSERT INTO app.listing_photos (id, listing_id, object_key, alt_text, position) VALUES ($1,$2,$3,NULLIF($4,''),$5)`, photo.ID, listingID, photo.ObjectKey, photo.AltText, photo.Position); err != nil {
-			return fmt.Errorf("insert listing photo: %w", err)
-		}
+	if len(photos) == 0 {
+		return nil
+	}
+	ids := make([]string, len(photos))
+	objectKeys := make([]string, len(photos))
+	altTexts := make([]string, len(photos))
+	positions := make([]int32, len(photos))
+	for index, photo := range photos {
+		ids[index] = photo.ID.String()
+		objectKeys[index] = photo.ObjectKey
+		altTexts[index] = photo.AltText
+		positions[index] = int32(photo.Position)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO app.listing_photos (id, listing_id, object_key, alt_text, position)
+		SELECT input.id::uuid, $2, input.object_key, NULLIF(input.alt_text, ''), input.position
+		FROM unnest($1::text[], $3::text[], $4::text[], $5::int[]) AS input(id, object_key, alt_text, position)
+	`, ids, listingID, objectKeys, altTexts, positions); err != nil {
+		return fmt.Errorf("insert listing photos: %w", err)
 	}
 	return nil
 }
 
 func insertListingRules(ctx context.Context, tx pgx.Tx, listingID uuid.UUID, rules []HouseRule) error {
-	for position, rule := range rules {
-		if _, err := tx.Exec(ctx, `INSERT INTO app.listing_rules (id, listing_id, title, description, position) VALUES ($1,$2,$3,NULLIF($4,''),$5)`, uuid.New(), listingID, rule.Title, rule.Description, position); err != nil {
-			return fmt.Errorf("insert listing rule: %w", err)
-		}
+	if len(rules) == 0 {
+		return nil
+	}
+	ids := make([]string, len(rules))
+	titles := make([]string, len(rules))
+	descriptions := make([]string, len(rules))
+	positions := make([]int32, len(rules))
+	for index, rule := range rules {
+		ids[index] = uuid.NewString()
+		titles[index] = rule.Title
+		descriptions[index] = rule.Description
+		positions[index] = int32(index)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO app.listing_rules (id, listing_id, title, description, position)
+		SELECT input.id::uuid, $2, input.title, NULLIF(input.description, ''), input.position
+		FROM unnest($1::text[], $3::text[], $4::text[], $5::int[]) AS input(id, title, description, position)
+	`, ids, listingID, titles, descriptions, positions); err != nil {
+		return fmt.Errorf("insert listing rules: %w", err)
 	}
 	return nil
+}
+
+const publicListingColumns = `
+	l.id, coalesce(l.slug, ''), l.title, coalesce(l.summary, ''), l.description,
+	coalesce(l.host_name, ''), l.city, coalesce(l.region, ''), l.country_code,
+	l.latitude, l.longitude, l.listing_type, l.property_type, l.max_guests,
+	l.bedrooms, l.beds, l.bathrooms::float8, l.minimum_nights,
+	l.nightly_price_cents, l.cleaning_fee_cents, l.currency,
+	l.rating_avg::float8, l.rating_count, l.created_at`
+
+func (s *PostgresListingStore) ListPublished(ctx context.Context) ([]PublicListing, error) {
+	var listings []PublicListing
+	err := db.WithPublicTx(ctx, s.DB, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			SELECT `+publicListingColumns+`
+			FROM app.listings l
+			WHERE l.status = 'published'
+			ORDER BY l.created_at, l.id
+			LIMIT 200`)
+		if err != nil {
+			return fmt.Errorf("query published listings: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			listing, err := scanPublicListing(rows)
+			if err != nil {
+				return err
+			}
+			listings = append(listings, listing)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("read published listings: %w", err)
+		}
+		return attachChildren(ctx, tx, listings)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return listings, nil
+}
+
+func (s *PostgresListingStore) GetPublished(ctx context.Context, id uuid.UUID) (PublicListing, error) {
+	var found []PublicListing
+	err := db.WithPublicTx(ctx, s.DB, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			SELECT `+publicListingColumns+`
+			FROM app.listings l
+			WHERE l.id = $1 AND l.status = 'published'`, id)
+		if err != nil {
+			return fmt.Errorf("query published listing: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			listing, err := scanPublicListing(rows)
+			if err != nil {
+				return err
+			}
+			found = append(found, listing)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("read published listing: %w", err)
+		}
+		return attachChildren(ctx, tx, found)
+	})
+	if err != nil {
+		return PublicListing{}, err
+	}
+	if len(found) == 0 {
+		return PublicListing{}, ErrListingNotFound
+	}
+	return found[0], nil
+}
+
+func scanPublicListing(rows pgx.Rows) (PublicListing, error) {
+	var (
+		listing       PublicListing
+		nightly       *int
+		cleaning      int
+		currency      string
+		ratingAverage *float64
+		ratingCount   int
+	)
+	if err := rows.Scan(
+		&listing.ID, &listing.Slug, &listing.Title, &listing.Summary, &listing.Description,
+		&listing.HostName, &listing.Location.City, &listing.Location.Region, &listing.Location.CountryCode,
+		&listing.Location.Latitude, &listing.Location.Longitude, &listing.Type, &listing.PropertyType, &listing.MaxGuests,
+		&listing.Bedrooms, &listing.Beds, &listing.Bathrooms, &listing.MinimumNights,
+		&nightly, &cleaning, &currency,
+		&ratingAverage, &ratingCount, &listing.CreatedAt,
+	); err != nil {
+		return PublicListing{}, fmt.Errorf("scan published listing: %w", err)
+	}
+	if nightly != nil && *nightly > 0 {
+		listing.Price = &ListingPrice{NightlyCents: *nightly, CleaningFeeCents: cleaning, Currency: currency}
+	}
+	if ratingAverage != nil && ratingCount > 0 {
+		listing.Rating = &ListingRating{Average: *ratingAverage, Count: ratingCount}
+	}
+	listing.Amenities = []Amenity{}
+	listing.Photos = []ListingPhoto{}
+	listing.Rules = []HouseRule{}
+	return listing, nil
+}
+
+func attachChildren(ctx context.Context, tx pgx.Tx, listings []PublicListing) error {
+	if len(listings) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, len(listings))
+	position := make(map[uuid.UUID]int, len(listings))
+	for index, listing := range listings {
+		ids[index] = listing.ID
+		position[listing.ID] = index
+	}
+	if err := attachPhotos(ctx, tx, listings, ids, position); err != nil {
+		return err
+	}
+	if err := attachAmenities(ctx, tx, listings, ids, position); err != nil {
+		return err
+	}
+	return attachRules(ctx, tx, listings, ids, position)
+}
+
+func attachPhotos(ctx context.Context, tx pgx.Tx, listings []PublicListing, ids []uuid.UUID, position map[uuid.UUID]int) error {
+	rows, err := tx.Query(ctx, `
+		SELECT listing_id, id, object_key, coalesce(alt_text, ''), position
+		FROM app.listing_photos WHERE listing_id = ANY($1) ORDER BY listing_id, position`, ids)
+	if err != nil {
+		return fmt.Errorf("query listing photos: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var listingID uuid.UUID
+		var photo ListingPhoto
+		if err := rows.Scan(&listingID, &photo.ID, &photo.ObjectKey, &photo.AltText, &photo.Position); err != nil {
+			return fmt.Errorf("scan listing photo: %w", err)
+		}
+		index := position[listingID]
+		listings[index].Photos = append(listings[index].Photos, photo)
+	}
+	return rows.Err()
+}
+
+func attachAmenities(ctx context.Context, tx pgx.Tx, listings []PublicListing, ids []uuid.UUID, position map[uuid.UUID]int) error {
+	rows, err := tx.Query(ctx, `
+		SELECT listing_id, amenity_key
+		FROM app.listing_amenities WHERE listing_id = ANY($1) ORDER BY listing_id, amenity_key`, ids)
+	if err != nil {
+		return fmt.Errorf("query listing amenities: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var listingID uuid.UUID
+		var key Amenity
+		if err := rows.Scan(&listingID, &key); err != nil {
+			return fmt.Errorf("scan listing amenity: %w", err)
+		}
+		index := position[listingID]
+		listings[index].Amenities = append(listings[index].Amenities, key)
+	}
+	return rows.Err()
+}
+
+func attachRules(ctx context.Context, tx pgx.Tx, listings []PublicListing, ids []uuid.UUID, position map[uuid.UUID]int) error {
+	rows, err := tx.Query(ctx, `
+		SELECT listing_id, title, coalesce(description, '')
+		FROM app.listing_rules WHERE listing_id = ANY($1) ORDER BY listing_id, position`, ids)
+	if err != nil {
+		return fmt.Errorf("query listing rules: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var listingID uuid.UUID
+		var rule HouseRule
+		if err := rows.Scan(&listingID, &rule.Title, &rule.Description); err != nil {
+			return fmt.Errorf("scan listing rule: %w", err)
+		}
+		index := position[listingID]
+		listings[index].Rules = append(listings[index].Rules, rule)
+	}
+	return rows.Err()
 }

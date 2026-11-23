@@ -1,0 +1,203 @@
+package cashback
+
+import (
+	"context"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+type TaskStatus string
+
+const (
+	TaskTodo     TaskStatus = "todo"
+	TaskChecking TaskStatus = "checking"
+	TaskApproved TaskStatus = "approved"
+	TaskRetake   TaskStatus = "retake"
+)
+
+type RefundStatus string
+
+const (
+	RefundPending   RefundStatus = "pending"
+	RefundSucceeded RefundStatus = "succeeded"
+	RefundFailed    RefundStatus = "failed"
+)
+
+type Decision string
+
+const (
+	DecisionApprove Decision = "approve"
+	DecisionRetake  Decision = "retake"
+)
+
+const BundleRefundCents = 5000
+
+type Task struct {
+	Key   string
+	Label string
+	Hint  string
+}
+
+type Bundle struct {
+	Key   string
+	Label string
+	Tasks []Task
+}
+
+type Submission struct {
+	ID         uuid.UUID  `json:"id"`
+	BookingID  uuid.UUID  `json:"booking_id"`
+	GuestID    uuid.UUID  `json:"guest_id"`
+	TaskKey    string     `json:"task_key"`
+	PhotoURL   string     `json:"photo_url"`
+	Status     TaskStatus `json:"status"`
+	Note       string     `json:"note,omitempty"`
+	ReviewedAt *time.Time `json:"reviewed_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
+}
+
+type Refund struct {
+	ID             uuid.UUID    `json:"id"`
+	BookingID      uuid.UUID    `json:"booking_id"`
+	GuestID        uuid.UUID    `json:"guest_id"`
+	BundleKey      string       `json:"bundle_key"`
+	AmountCents    int          `json:"amount_cents"`
+	Status         RefundStatus `json:"status"`
+	StripeRefundID string       `json:"-"`
+	CreatedAt      time.Time    `json:"created_at"`
+	UpdatedAt      time.Time    `json:"updated_at"`
+}
+
+type BookingState struct {
+	BookingID       uuid.UUID
+	BookingStatus   string
+	PaymentIntentID string
+	PaymentStatus   string
+}
+
+type ReviewTarget struct {
+	Submission      Submission
+	HostID          uuid.UUID
+	PaymentIntentID string
+}
+
+type TaskView struct {
+	SubmissionID *uuid.UUID `json:"submission_id,omitempty"`
+	Key          string     `json:"key"`
+	Label        string     `json:"label"`
+	Hint         string     `json:"hint"`
+	Status       TaskStatus `json:"status"`
+	Note         string     `json:"note,omitempty"`
+	PhotoURL     string     `json:"photo_url,omitempty"`
+}
+
+type BundleView struct {
+	Key          string       `json:"key"`
+	Label        string       `json:"label"`
+	AmountCents  int          `json:"amount_cents"`
+	Status       TaskStatus   `json:"status"`
+	RefundStatus RefundStatus `json:"refund_status,omitempty"`
+	Tasks        []TaskView   `json:"tasks"`
+}
+
+type TripView struct {
+	BookingID   uuid.UUID    `json:"booking_id"`
+	Verified    bool         `json:"verified"`
+	CanEarn     bool         `json:"can_earn"`
+	EarnedCents int          `json:"earned_cents"`
+	Bundles     []BundleView `json:"bundles"`
+}
+
+type PendingSubmission struct {
+	Submission   Submission `json:"submission"`
+	TaskLabel    string     `json:"task_label"`
+	ListingTitle string     `json:"listing_title"`
+}
+
+type HostTripView struct {
+	BookingID    uuid.UUID    `json:"booking_id"`
+	GuestID      uuid.UUID    `json:"guest_id"`
+	ListingTitle string       `json:"listing_title"`
+	EarnedCents  int          `json:"earned_cents"`
+	Bundles      []BundleView `json:"bundles"`
+}
+
+type StorageConfig struct {
+	Endpoint        string
+	Bucket          string
+	Region          string
+	AccessKeyID     string
+	SecretAccessKey string
+	UseSSL          bool
+	PathStyle       bool
+}
+
+type ObjectInfo struct {
+	Size        int64
+	ContentType string
+}
+
+type UploadTicket struct {
+	UploadURL   string `json:"upload_url"`
+	PhotoKey    string `json:"photo_key"`
+	ContentType string `json:"content_type"`
+	ExpiresIn   int    `json:"expires_in_seconds"`
+	MaxBytes    int64  `json:"max_bytes"`
+}
+
+type ObjectStore interface {
+	PresignUpload(ctx context.Context, key, contentType string, expires time.Duration) (string, error)
+	PresignDownload(ctx context.Context, key string, expires time.Duration) (string, error)
+	Stat(ctx context.Context, key string) (ObjectInfo, error)
+}
+
+type UploadRequester interface {
+	RequestUpload(ctx context.Context, guestID, bookingID uuid.UUID, taskKey, contentType string, sizeBytes int64) (UploadTicket, error)
+}
+
+type VerificationChecker interface {
+	HasCompleted(ctx context.Context, accountID uuid.UUID) (bool, error)
+}
+
+type Refunder interface {
+	RefundPayment(ctx context.Context, paymentIntentID string, amountCents int, idempotencyKey string) (string, error)
+}
+
+type Store interface {
+	BookingState(ctx context.Context, actingID, bookingID uuid.UUID) (BookingState, error)
+	SaveSubmission(ctx context.Context, submission Submission) (Submission, error)
+	ListSubmissions(ctx context.Context, actingID, bookingID uuid.UUID) ([]Submission, error)
+	ListRefunds(ctx context.Context, actingID, bookingID uuid.UUID) ([]Refund, error)
+	HostBooking(ctx context.Context, hostID, bookingID uuid.UUID) (HostBooking, error)
+	ListPendingForHost(ctx context.Context, hostID uuid.UUID) ([]Submission, error)
+	LoadReviewTarget(ctx context.Context, actingID, submissionID uuid.UUID) (ReviewTarget, error)
+	ApplyReview(ctx context.Context, actingID, submissionID uuid.UUID, status TaskStatus, note string, reviewedAt time.Time) error
+	ApprovedTaskKeys(ctx context.Context, actingID, bookingID uuid.UUID) ([]string, error)
+	ReserveRefund(ctx context.Context, actingID uuid.UUID, refund Refund) (Refund, bool, error)
+	SettleRefund(ctx context.Context, actingID, refundID uuid.UUID, status RefundStatus, stripeRefundID string, at time.Time) error
+}
+
+type HostBooking struct {
+	BookingID    uuid.UUID
+	GuestID      uuid.UUID
+	ListingTitle string
+}
+
+type HostReader interface {
+	HostTrip(ctx context.Context, hostID, bookingID uuid.UUID) (HostTripView, error)
+	PendingForHost(ctx context.Context, hostID uuid.UUID) ([]PendingSubmission, error)
+}
+
+type TripReader interface {
+	Trip(ctx context.Context, guestID, bookingID uuid.UUID) (TripView, error)
+}
+
+type PhotoSubmitter interface {
+	SubmitPhoto(ctx context.Context, guestID, bookingID uuid.UUID, taskKey, photoURL string) (Submission, error)
+}
+
+type Reviewer interface {
+	Review(ctx context.Context, hostID, submissionID uuid.UUID, decision Decision, note string) (Submission, *Refund, error)
+}
