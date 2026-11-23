@@ -3,6 +3,7 @@ package accounts
 import (
 	"context"
 	"errors"
+	"sync"
 
 	"github.com/google/uuid"
 )
@@ -16,9 +17,9 @@ var ErrInvalidClerkUserID = errors.New("clerk user ID is required")
 // every account created before the change.
 var clerkNamespace = uuid.MustParse("4bf672a5-58a7-4f37-8903-731e3d495c74")
 
-// AccountService owns the account use cases.
 type AccountService struct {
-	store AccountStore
+	store   AccountStore
+	ensured sync.Map
 }
 
 // NewAccountService returns an account service backed by store.
@@ -33,9 +34,13 @@ func (service *AccountService) EnsureAccount(ctx context.Context, clerkUserID st
 	if account.ID == uuid.Nil {
 		return uuid.Nil, ErrInvalidClerkUserID
 	}
+	if _, known := service.ensured.Load(account.ID); known {
+		return account.ID, nil
+	}
 	if err := service.store.Ensure(ctx, account); err != nil {
 		return uuid.Nil, err
 	}
+	service.ensured.Store(account.ID, struct{}{})
 	return account.ID, nil
 }
 

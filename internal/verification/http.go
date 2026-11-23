@@ -20,6 +20,7 @@ type HTTPHandler struct {
 	starter   Starter
 	processor WebhookProcessor
 	status    StatusReader
+	current   CurrentChecker
 }
 
 func NewHTTPHandler(starter Starter, processor WebhookProcessor) *HTTPHandler {
@@ -28,6 +29,11 @@ func NewHTTPHandler(starter Starter, processor WebhookProcessor) *HTTPHandler {
 
 func (handler *HTTPHandler) WithStatusReader(reader StatusReader) *HTTPHandler {
 	handler.status = reader
+	return handler
+}
+
+func (handler *HTTPHandler) WithCurrentChecker(checker CurrentChecker) *HTTPHandler {
+	handler.current = checker
 	return handler
 }
 
@@ -50,6 +56,17 @@ func (handler *HTTPHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
 	response := StatusResponse{Status: "none"}
 	if found {
 		response = StatusResponse{Status: string(status), Verified: status == StatusCompleted}
+		if status == StatusCompleted && handler.current != nil {
+			_, current, err := handler.current.CurrentVerificationID(r.Context(), accountID)
+			if err != nil {
+				slog.Error("Verification currency", "error", err)
+				writeError(w, http.StatusInternalServerError, "could not read verification status")
+				return
+			}
+			if !current {
+				response = StatusResponse{Status: StatusStale}
+			}
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")

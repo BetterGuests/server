@@ -16,6 +16,8 @@ const (
 	personaVersion        = "2026-09-29"
 	personaRequestTimeout = 15 * time.Second
 	personaMaxResponse    = 1 << 20
+
+	personaErrorDetailBytes = 2048
 )
 
 var ErrPersonaRequest = errors.New("persona request failed")
@@ -79,7 +81,8 @@ func (client *PersonaClient) CreateInquiry(ctx context.Context, templateID, refe
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		return Inquiry{}, fmt.Errorf("%w: status %d", ErrPersonaRequest, response.StatusCode)
+		detail, _ := io.ReadAll(io.LimitReader(response.Body, personaErrorDetailBytes))
+		return Inquiry{}, fmt.Errorf("%w: status %d: %s", ErrPersonaRequest, response.StatusCode, strings.TrimSpace(string(detail)))
 	}
 	var decoded createInquiryResponse
 	if err := json.NewDecoder(io.LimitReader(response.Body, personaMaxResponse)).Decode(&decoded); err != nil {

@@ -104,3 +104,10 @@ func (store *S3ObjectStore) Stat(ctx context.Context, key string) (ObjectInfo, e
 	}
 	return ObjectInfo{Size: info.Size, ContentType: info.ContentType}, nil
 }
+
+func (store *S3ObjectStore) Remove(ctx context.Context, key string) error {
+	if err := store.client.RemoveObject(ctx, store.bucket, key, minio.RemoveObjectOptions{}); err != nil {
+		return fmt.Errorf("remove object: %w", err)
+	}
+	return nil
+}

@@ -9,6 +9,7 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/listings"
 	"github.com/BetterGuests/BetterGuests-Server/internal/middleware"
 	"github.com/BetterGuests/BetterGuests-Server/internal/payments"
+	"github.com/BetterGuests/BetterGuests-Server/internal/profiles"
 	"github.com/BetterGuests/BetterGuests-Server/internal/reviews"
 	"github.com/BetterGuests/BetterGuests-Server/internal/verification"
 	"github.com/go-chi/cors"
@@ -25,6 +26,7 @@ type routeDeps struct {
 	verification *verification.HTTPHandler
 	payments     *payments.HTTPHandler
 	compliance   *compliance.HTTPHandler
+	profiles     *profiles.HTTPHandler
 }
 
 func routes(deps routeDeps) http.Handler {
@@ -80,6 +82,10 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.HandleFunc("POST /api/v1/bookings/{booking_id}/cashback/tasks/{task_key}/photo", deps.cashback.SubmitPhoto)
 	api.HandleFunc("GET /api/v1/hosting/bookings/{booking_id}/cashback", deps.cashback.GetHostTrip)
 	api.HandleFunc("GET /api/v1/hosting/cashback/pending", deps.cashback.ListPending)
+	api.HandleFunc("GET /api/v1/profile/banner", deps.profiles.GetBanner)
+	api.HandleFunc("POST /api/v1/profile/banner/upload", deps.profiles.RequestUpload)
+	api.HandleFunc("PUT /api/v1/profile/banner", deps.profiles.SaveBanner)
+	api.HandleFunc("DELETE /api/v1/profile/banner", deps.profiles.RemoveBanner)
 	api.HandleFunc("GET /api/v1/verification/status", deps.verification.GetStatus)
 	api.HandleFunc("POST /api/v1/cashback/submissions/{submission_id}/review", deps.cashback.ReviewSubmission)
 	mux.Handle("/api/v1/", deps.authenticate(api))

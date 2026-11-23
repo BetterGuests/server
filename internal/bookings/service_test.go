@@ -143,3 +143,61 @@ func TestCreateBookingPropagatesOverlapError(t *testing.T) {
 		t.Fatalf("expected ErrBookingOverlaps, got %v", err)
 	}
 }
+
+type verificationStub struct {
+	id      uuid.UUID
+	current bool
+	err     error
+}
+
+func (stub verificationStub) CurrentVerificationID(context.Context, uuid.UUID) (uuid.UUID, bool, error) {
+	return stub.id, stub.current, stub.err
+}
+
+func futureStay() CreateBookingInput {
+	return CreateBookingInput{
+		ListingID: uuid.New(),
+		StartsOn:  time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
+		EndsOn:    time.Date(2026, 7, 4, 0, 0, 0, 0, time.UTC),
+	}
+}
+
+func TestCreateBookingAttachesCurrentVerification(t *testing.T) {
+	store := &storeStub{}
+	verificationID := uuid.New()
+	service := newTestService(store).WithVerification(verificationStub{id: verificationID, current: true})
+
+	created, err := service.CreateBooking(context.Background(), uuid.New(), futureStay())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.VerificationID == nil || *created.VerificationID != verificationID {
+		t.Fatalf("verification id = %v, want %s", created.VerificationID, verificationID)
+	}
+	if store.created.VerificationID == nil || *store.created.VerificationID != verificationID {
+		t.Fatal("stored booking is missing the verification id")
+	}
+}
+
+func TestCreateBookingRequiresCurrentVerification(t *testing.T) {
+	store := &storeStub{}
+	service := newTestService(store).WithVerification(verificationStub{current: false})
+
+	_, err := service.CreateBooking(context.Background(), uuid.New(), futureStay())
+	if !errors.Is(err, ErrVerificationRequired) {
+		t.Fatalf("expected ErrVerificationRequired, got %v", err)
+	}
+	if store.created.ID != uuid.Nil || store.created.GuestID != uuid.Nil {
+		t.Fatal("nothing may be stored without a current verification")
+	}
+}
+
+func TestCreateBookingSurfacesVerificationLookupFailure(t *testing.T) {
+	lookupErr := errors.New("boom")
+	service := newTestService(&storeStub{}).WithVerification(verificationStub{err: lookupErr})
+
+	_, err := service.CreateBooking(context.Background(), uuid.New(), futureStay())
+	if !errors.Is(err, lookupErr) || errors.Is(err, ErrVerificationRequired) {
+		t.Fatalf("expected the lookup error, got %v", err)
+	}
+}

@@ -34,6 +34,53 @@ func TestAccountServiceEnsureAccountCreatesDeterministicAccount(t *testing.T) {
 	}
 }
 
+type countingStore struct {
+	calls int
+	err   error
+}
+
+func (store *countingStore) Ensure(_ context.Context, _ Account) error {
+	store.calls++
+	return store.err
+}
+
+func TestAccountServiceEnsureAccountHitsStoreOncePerAccount(t *testing.T) {
+	store := &countingStore{}
+	service := NewAccountService(store)
+
+	for range 3 {
+		if _, err := service.EnsureAccount(context.Background(), "clerk-user"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if store.calls != 1 {
+		t.Fatalf("expected one store call for a repeat account, got %d", store.calls)
+	}
+
+	if _, err := service.EnsureAccount(context.Background(), "another-user"); err != nil {
+		t.Fatal(err)
+	}
+	if store.calls != 2 {
+		t.Fatalf("expected a new account to reach the store, got %d calls", store.calls)
+	}
+}
+
+func TestAccountServiceEnsureAccountRetriesAfterStoreError(t *testing.T) {
+	store := &countingStore{err: errors.New("database unavailable")}
+	service := NewAccountService(store)
+
+	if _, err := service.EnsureAccount(context.Background(), "clerk-user"); err == nil {
+		t.Fatal("expected the store error")
+	}
+	store.err = nil
+	if _, err := service.EnsureAccount(context.Background(), "clerk-user"); err != nil {
+		t.Fatal(err)
+	}
+	if store.calls != 2 {
+		t.Fatalf("a failed ensure must not be remembered, got %d calls", store.calls)
+	}
+}
+
 func TestAccountServiceEnsureAccountRejectsEmptyUID(t *testing.T) {
 	service := NewAccountService(&storeStub{})
 

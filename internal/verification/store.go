@@ -29,6 +29,25 @@ func (store *PostgresVerificationStore) HasCompleted(ctx context.Context, accoun
 	return completed, nil
 }
 
+func (store *PostgresVerificationStore) LatestCompleted(ctx context.Context, accountID uuid.UUID) (CompletedVerification, bool, error) {
+	var completed CompletedVerification
+	err := db.WithUserTx(ctx, store.DB, accountID.String(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT id, COALESCE(last_event_at, updated_at) FROM app.identity_verifications
+			 WHERE account_id = $1 AND status = 'completed'
+			 ORDER BY COALESCE(last_event_at, updated_at) DESC
+			 LIMIT 1`,
+			accountID).Scan(&completed.ID, &completed.CompletedAt)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return CompletedVerification{}, false, nil
+	}
+	if err != nil {
+		return CompletedVerification{}, false, fmt.Errorf("latest completed verification: %w", err)
+	}
+	return completed, true, nil
+}
+
 func (store *PostgresVerificationStore) LatestStatus(ctx context.Context, accountID uuid.UUID) (Status, bool, error) {
 	var status string
 	err := db.WithUserTx(ctx, store.DB, accountID.String(), func(tx pgx.Tx) error {

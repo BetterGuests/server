@@ -41,8 +41,8 @@ func (store *PostgresBookingStore) Create(ctx context.Context, actingUserID stri
 
 		_, err := tx.Exec(
 			ctx,
-			`INSERT INTO app.bookings (id, listing_id, guest_id, status, starts_on, ends_on, created_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+			`INSERT INTO app.bookings (id, listing_id, guest_id, status, starts_on, ends_on, created_at, verification_id)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 			booking.ID,
 			booking.ListingID,
 			booking.GuestID,
@@ -50,6 +50,7 @@ func (store *PostgresBookingStore) Create(ctx context.Context, actingUserID stri
 			booking.StartsOn,
 			booking.EndsOn,
 			booking.CreatedAt,
+			booking.VerificationID,
 		)
 
 		var pgError *pgconn.PgError

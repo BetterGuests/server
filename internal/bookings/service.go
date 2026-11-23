@@ -22,6 +22,12 @@ var (
 	ErrBookingOverlaps = errors.New("listing is already booked for part of that date range")
 )
 
+var ErrVerificationRequired = errors.New("a current ID verification is required to book")
+
+type VerificationChecker interface {
+	CurrentVerificationID(ctx context.Context, accountID uuid.UUID) (uuid.UUID, bool, error)
+}
+
 // maxStayNights caps how long a single booking can run, so a malformed or
 // abusive date range can't hold a listing's calendar indefinitely.
 const maxStayNights = 90
@@ -30,14 +36,20 @@ const maxStayNights = 90
 // injected so CreateBooking stays a deterministic, pure function of its
 // inputs in tests.
 type BookingService struct {
-	store BookingStore
-	now   func() time.Time
-	newID func() uuid.UUID
+	store    BookingStore
+	verified VerificationChecker
+	now      func() time.Time
+	newID    func() uuid.UUID
 }
 
 // NewBookingService returns a booking service backed by store.
 func NewBookingService(store BookingStore) *BookingService {
 	return &BookingService{store: store, now: time.Now, newID: uuid.New}
+}
+
+func (service *BookingService) WithVerification(checker VerificationChecker) *BookingService {
+	service.verified = checker
+	return service
 }
 
 // CreateBookingInput contains only values a guest may provide. GuestID comes
@@ -63,14 +75,27 @@ func (service *BookingService) CreateBooking(
 		return Booking{}, err
 	}
 
+	var verificationID *uuid.UUID
+	if service.verified != nil {
+		id, current, err := service.verified.CurrentVerificationID(ctx, guestID)
+		if err != nil {
+			return Booking{}, fmt.Errorf("check verification: %w", err)
+		}
+		if !current {
+			return Booking{}, ErrVerificationRequired
+		}
+		verificationID = &id
+	}
+
 	booking := Booking{
-		ID:        service.newID(),
-		ListingID: input.ListingID,
-		GuestID:   guestID,
-		Status:    StatusPending,
-		StartsOn:  input.StartsOn,
-		EndsOn:    input.EndsOn,
-		CreatedAt: service.now().UTC(),
+		VerificationID: verificationID,
+		ID:             service.newID(),
+		ListingID:      input.ListingID,
+		GuestID:        guestID,
+		Status:         StatusPending,
+		StartsOn:       input.StartsOn,
+		EndsOn:         input.EndsOn,
+		CreatedAt:      service.now().UTC(),
 	}
 
 	if err := service.store.Create(ctx, guestID.String(), booking); err != nil {

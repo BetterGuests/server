@@ -100,6 +100,7 @@ func TestCreateBookingMapsErrorsToStatusCodes(t *testing.T) {
 	}{
 		{name: "invalid", err: ErrInvalidBooking, want: http.StatusBadRequest},
 		{name: "overlap", err: ErrBookingOverlaps, want: http.StatusConflict},
+		{name: "verification required", err: ErrVerificationRequired, want: http.StatusForbidden},
 		{name: "unexpected", err: context.DeadlineExceeded, want: http.StatusInternalServerError},
 	}
 
@@ -115,5 +116,17 @@ func TestCreateBookingMapsErrorsToStatusCodes(t *testing.T) {
 				t.Fatalf("expected %d, got %d", test.want, response.Code)
 			}
 		})
+	}
+}
+
+func TestCreateBookingVerificationRequiredResponseCarriesCode(t *testing.T) {
+	handler := NewHTTPHandler(creatorStub{err: ErrVerificationRequired})
+	request := authenticatedRequest(`{"listing_id":"` + uuid.New().String() + `","starts_on":"2026-06-10","ends_on":"2026-06-15"}`)
+	response := httptest.NewRecorder()
+
+	handler.CreateBooking(response, request)
+
+	if !strings.Contains(response.Body.String(), `"code":"`+VerificationRequiredCode+`"`) {
+		t.Fatalf("body = %s", response.Body.String())
 	}
 }

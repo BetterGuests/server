@@ -28,14 +28,15 @@ const (
 // code, since a check-then-insert in Go would race under concurrent
 // requests.
 type Booking struct {
-	ID          uuid.UUID  `json:"id"`
-	ListingID   uuid.UUID  `json:"listing_id"`
-	GuestID     uuid.UUID  `json:"guest_id"`
-	Status      Status     `json:"status"`
-	StartsOn    time.Time  `json:"starts_on"`
-	EndsOn      time.Time  `json:"ends_on"`
-	CompletedAt *time.Time `json:"completed_at,omitempty"`
-	CreatedAt   time.Time  `json:"created_at"`
+	ID             uuid.UUID  `json:"id"`
+	ListingID      uuid.UUID  `json:"listing_id"`
+	GuestID        uuid.UUID  `json:"guest_id"`
+	Status         Status     `json:"status"`
+	StartsOn       time.Time  `json:"starts_on"`
+	EndsOn         time.Time  `json:"ends_on"`
+	CompletedAt    *time.Time `json:"completed_at,omitempty"`
+	VerificationID *uuid.UUID `json:"verification_id,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
 }
 
 // BookingStore persists bookings.

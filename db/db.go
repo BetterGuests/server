@@ -7,8 +7,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -48,6 +50,7 @@ type Config struct {
 	MaxConnLifetime time.Duration // how long a single connection is allowed to live before it's recycled
 	MaxConnIdleTime time.Duration // how long a connection can sit unused before it's closed
 	HealthCheck     time.Duration // how often the pool checks on its idle connections
+	ResetOnRelease  bool          // scrub session state on every release; costs one round trip each time
 }
 
 // transactionBeginner is anything that can start a transaction - normally
@@ -87,17 +90,28 @@ func configFromLookup(lookup func(string) string) (Config, error) {
 		applicationName = "api"
 	}
 
+	minIdleConns, err := minIdleConnections(lookup("DB_MIN_IDLE_CONNS"), maxConns)
+	if err != nil {
+		return Config{}, err
+	}
+
+	resetOnRelease, err := resetOnReleaseSetting(lookup("DB_RESET_ON_RELEASE"))
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		URL:             url,
 		ExpectedRole:    expectedRole,
 		ApplicationName: applicationName,
 		MaxConns:        maxConns,
-		MinIdleConns:    1,
+		MinIdleConns:    minIdleConns,
 		ConnectTimeout:  5 * time.Second,
 		PingTimeout:     5 * time.Second,
 		MaxConnLifetime: 30 * time.Minute,
 		MaxConnIdleTime: 5 * time.Minute,
 		HealthCheck:     30 * time.Second,
+		ResetOnRelease:  resetOnRelease,
 	}, nil
 }
 
@@ -113,6 +127,60 @@ func maxConnections(value string) (int32, error) {
 		return 0, fmt.Errorf("DB_MAX_CONNS must be between 1 and %d", roleConnLimit)
 	}
 	return int32(parsed), nil
+}
+
+func minIdleConnections(value string, maxConns int32) (int32, error) {
+	if value == "" {
+		return 1, nil
+	}
+
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 || parsed > int(maxConns) {
+		return 0, fmt.Errorf("DB_MIN_IDLE_CONNS must be between 0 and DB_MAX_CONNS (%d)", maxConns)
+	}
+	return int32(parsed), nil
+}
+
+func resetOnReleaseSetting(value string) (bool, error) {
+	if value == "" {
+		return true, nil
+	}
+
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, errors.New("DB_RESET_ON_RELEASE must be true or false")
+	}
+	return parsed, nil
+}
+
+func warmPool(ctx context.Context, pool *pgxpool.Pool, count int32, timeout time.Duration) {
+	if count < 2 {
+		return
+	}
+
+	warmCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	var group sync.WaitGroup
+	var lock sync.Mutex
+	held := make([]*pgxpool.Conn, 0, count)
+	for range count {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			connection, err := pool.Acquire(warmCtx)
+			if err != nil {
+				return
+			}
+			lock.Lock()
+			held = append(held, connection)
+			lock.Unlock()
+		}()
+	}
+	group.Wait()
+	for _, connection := range held {
+		connection.Release()
+	}
 }
 
 // Open creates a database connection pool from a Config and checks that it
@@ -139,11 +207,16 @@ func Open(ctx context.Context, config Config) (*pgxpool.Pool, error) {
 		poolConfig.ConnConfig.RuntimeParams = map[string]string{}
 	}
 	poolConfig.ConnConfig.RuntimeParams["application_name"] = config.ApplicationName
-	poolConfig.AfterRelease = func(connection *pgx.Conn) bool {
-		resetCtx, cancel := context.WithTimeout(context.Background(), config.PingTimeout)
-		defer cancel()
-		_, err := connection.Exec(resetCtx, "RESET ALL")
-		return err == nil
+	if !config.ResetOnRelease {
+		slog.Warn("Database connections are not reset on release; use only for local development")
+	}
+	if config.ResetOnRelease {
+		poolConfig.AfterRelease = func(connection *pgx.Conn) bool {
+			resetCtx, cancel := context.WithTimeout(context.Background(), config.PingTimeout)
+			defer cancel()
+			_, err := connection.Exec(resetCtx, "RESET ALL")
+			return err == nil
+		}
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
@@ -157,6 +230,8 @@ func Open(ctx context.Context, config Config) (*pgxpool.Pool, error) {
 		pool.Close()
 		return nil, err
 	}
+
+	warmPool(ctx, pool, config.MinIdleConns, config.ConnectTimeout*2)
 
 	return pool, nil
 }

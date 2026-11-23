@@ -16,6 +16,8 @@ import (
 // dateLayout is the wire format for starts_on/ends_on: a bare calendar date
 // with no time-of-day or timezone component, matching app.bookings' "date"
 // columns.
+const VerificationRequiredCode = "verification_required"
+
 const dateLayout = "2006-01-02"
 
 // BookingCreator is the application capability the create-booking HTTP
@@ -80,6 +82,11 @@ func (handler *HTTPHandler) CreateBooking(w http.ResponseWriter, r *http.Request
 	switch {
 	case errors.Is(err, ErrInvalidBooking):
 		writeBookingError(w, http.StatusBadRequest, err.Error())
+		return
+	case errors.Is(err, ErrVerificationRequired):
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error(), "code": VerificationRequiredCode})
 		return
 	case errors.Is(err, ErrBookingOverlaps):
 		writeBookingError(w, http.StatusConflict, err.Error())

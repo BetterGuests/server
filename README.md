@@ -92,6 +92,14 @@ disposable local container and cannot inherit production credentials.
   `api`.
 - `DB_MAX_CONNS=5` initially; total across replicas must remain below the role's
   20-connection limit
+- `DB_MIN_IDLE_CONNS=1` by default. Connections kept open and pre-opened in
+  parallel at startup so the first requests skip the connection handshake. Set
+  it equal to `DB_MAX_CONNS` when the database is remote (a tunnel adds seconds
+  to each new connection). It must be between 0 and `DB_MAX_CONNS`.
+- `DB_RESET_ON_RELEASE=true` by default. Runs `RESET ALL` every time a pooled
+  connection is returned, so session state from one request can never reach the
+  next. It costs one database round trip per release. Set it to `false` only
+  for local development against a remote database. Never in production.
 - `CLERK_SECRET_KEY`: Clerk secret key. The API verifies each bearer token
   with it and maps the Clerk user ID to a stable `app.accounts` row on first
   use.

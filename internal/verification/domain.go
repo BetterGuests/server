@@ -19,6 +19,8 @@ const (
 	StatusExpired     Status = "expired"
 )
 
+const StatusStale = "stale"
+
 const (
 	EventCompleted       = "inquiry.completed"
 	EventFailed          = "inquiry.failed"

@@ -226,6 +226,7 @@ func openTestPool(
 		MaxConnLifetime: 10 * time.Minute,
 		MaxConnIdleTime: time.Minute,
 		HealthCheck:     30 * time.Second,
+		ResetOnRelease:  true,
 	})
 	if err != nil {
 		t.Fatalf("open %s test pool: %v", role, err)

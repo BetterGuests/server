@@ -108,7 +108,10 @@ Create a second Railway service from the same repo.
   - `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`
   - `S3_ENDPOINT`, `S3_BUCKET`, `S3_REGION`, `S3_ACCESS_KEY_ID`,
     `S3_SECRET_ACCESS_KEY` — listing photos and cashback photos; optional
-    `S3_URL_STYLE=path` for path-style buckets
+    `S3_URL_STYLE=path` for path-style buckets. Profile banners upload from the
+    browser straight to the bucket, so run `scripts/bucket-cors.sh` once per
+    bucket (it needs the `S3_*` variables, `ALLOWED_ORIGINS`, `jq` and the AWS
+    CLI; set `DRY_RUN=1` to print the rules first)
   - `SENTRY_DSN`, `SENTRY_ENVIRONMENT`
   - `PORT`, optional `LOG_LEVEL`
   - Firebase variables and `BASE_URL` are no longer read and must not be set.
