@@ -8,6 +8,7 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/compliance"
 	"github.com/BetterGuests/BetterGuests-Server/internal/listings"
 	"github.com/BetterGuests/BetterGuests-Server/internal/middleware"
+	"github.com/BetterGuests/BetterGuests-Server/internal/nearby"
 	"github.com/BetterGuests/BetterGuests-Server/internal/payments"
 	"github.com/BetterGuests/BetterGuests-Server/internal/profiles"
 	"github.com/BetterGuests/BetterGuests-Server/internal/reviews"
@@ -20,6 +21,7 @@ type routeDeps struct {
 	origins      []string
 	authenticate func(http.Handler) http.Handler
 	listings     *listings.HTTPHandler
+	nearby       *nearby.HTTPHandler
 	reviews      *reviews.HTTPHandler
 	bookings     *bookings.HTTPHandler
 	cashback     *cashback.HTTPHandler
@@ -36,6 +38,7 @@ func routes(deps routeDeps) http.Handler {
 	deps.mountVerification(mux)
 	deps.mountPayments(mux)
 	deps.mountPublicListings(mux)
+	deps.mountNearby(mux)
 	deps.mountAuthenticatedAPI(mux)
 	return withMiddleware(mux, deps.origins)
 }
@@ -64,6 +67,13 @@ func (deps routeDeps) mountPublicListings(mux *http.ServeMux) {
 	}
 	mux.HandleFunc("GET /api/v1/listings", deps.listings.ListListings)
 	mux.HandleFunc("GET /api/v1/listings/{listing_id}", deps.listings.GetListing)
+}
+
+func (deps routeDeps) mountNearby(mux *http.ServeMux) {
+	if deps.nearby == nil {
+		return
+	}
+	mux.HandleFunc("GET /api/v1/listings/{listing_id}/nearby", deps.nearby.Search)
 }
 
 func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {

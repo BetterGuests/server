@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -15,10 +16,12 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/compliance"
 	"github.com/BetterGuests/BetterGuests-Server/internal/listings"
 	"github.com/BetterGuests/BetterGuests-Server/internal/monitoring"
+	"github.com/BetterGuests/BetterGuests-Server/internal/nearby"
 	"github.com/BetterGuests/BetterGuests-Server/internal/payments"
 	"github.com/BetterGuests/BetterGuests-Server/internal/profiles"
 	"github.com/BetterGuests/BetterGuests-Server/internal/reviews"
 	"github.com/BetterGuests/BetterGuests-Server/internal/verification"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -82,6 +85,7 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		authenticate: authenticator.Middleware,
 		listings: listings.NewHTTPHandler(listings.NewListingService(listingStore)).
 			WithPublicReader(listings.NewPublicListingService(listingStore, objectStore)),
+		nearby:       buildNearbyHandler(listingStore),
 		reviews:      reviews.NewHTTPHandler(reviews.NewService(reviews.NewPostgresStore(pool))),
 		bookings:     bookings.NewHTTPHandler(bookings.NewBookingService(bookings.NewPostgresBookingStore(pool)).WithVerification(currentVerifier)),
 		cashback:     cashback.NewHTTPHandler(cashbackService, cashbackService, cashbackService, cashbackService, cashbackService),
@@ -90,6 +94,36 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		compliance:   compliance.NewHTTPHandler(complianceService, complianceService, complianceService),
 		profiles:     profiles.NewHTTPHandler(profileService, profileService, profileService, profileService),
 	}, nil
+}
+
+func buildNearbyHandler(listingStore *listings.PostgresListingStore) *nearby.HTTPHandler {
+	config := nearby.ConfigFromEnv()
+	if !config.Configured() {
+		slog.Warn("Nearby places are disabled: GEOAPIFY_API_KEY is not set")
+		return nil
+	}
+	service := nearby.NewNearbyService(
+		listingLocations{reader: listings.NewPublicListingService(listingStore, nil)},
+		nearby.NewGeoapifySource(config, nil),
+	)
+	return nearby.NewHTTPHandler(service)
+}
+
+type publishedListingReader interface {
+	GetPublished(ctx context.Context, id uuid.UUID) (listings.PublicListing, error)
+}
+
+type listingLocations struct{ reader publishedListingReader }
+
+func (locations listingLocations) Location(ctx context.Context, listingID uuid.UUID) (nearby.Point, error) {
+	listing, err := locations.reader.GetPublished(ctx, listingID)
+	if errors.Is(err, listings.ErrListingNotFound) {
+		return nearby.Point{}, nearby.ErrListingNotFound
+	}
+	if err != nil {
+		return nearby.Point{}, err
+	}
+	return nearby.Point{Latitude: listing.Location.Latitude, Longitude: listing.Location.Longitude}, nil
 }
 
 func allowedOrigins() ([]string, error) {

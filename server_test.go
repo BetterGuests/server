@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/BetterGuests/BetterGuests-Server/internal/listings"
+	"github.com/BetterGuests/BetterGuests-Server/internal/nearby"
 	"github.com/BetterGuests/BetterGuests-Server/internal/verification"
 	"github.com/google/uuid"
 )
@@ -162,5 +164,66 @@ func TestVerificationRoutesAreAbsentWithoutHandler(t *testing.T) {
 
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", response.Code)
+	}
+}
+
+type nearbySearcherStub struct{}
+
+func (nearbySearcherStub) Search(context.Context, uuid.UUID, string) ([]nearby.Place, error) {
+	return []nearby.Place{{ID: "N1", Name: "Tiki Bar"}}, nil
+}
+
+type listingReaderStub struct {
+	listing listings.PublicListing
+	err     error
+}
+
+func (stub listingReaderStub) GetPublished(context.Context, uuid.UUID) (listings.PublicListing, error) {
+	return stub.listing, stub.err
+}
+
+func TestNearbyRouteIsPublic(t *testing.T) {
+	handler := routes(routeDeps{
+		database: stubPinger{},
+		origins:  []string{"http://localhost:3000"},
+		nearby:   nearby.NewHTTPHandler(nearbySearcherStub{}),
+	})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/listings/"+uuid.NewString()+"/nearby?category=drinks", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("expected status 200 without credentials, got %d", response.Code)
+	}
+}
+
+func TestNearbyRouteIsAbsentWithoutHandler(t *testing.T) {
+	handler := routes(routeDeps{database: stubPinger{}, origins: []string{"http://localhost:3000"}})
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/listings/"+uuid.NewString()+"/nearby?category=drinks", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("expected status 404, got %d", response.Code)
+	}
+}
+
+func TestListingLocationsMapNotFoundAndKeepPublicCoordinates(t *testing.T) {
+	missing := listingLocations{reader: listingReaderStub{err: listings.ErrListingNotFound}}
+	if _, err := missing.Location(context.Background(), uuid.New()); !errors.Is(err, nearby.ErrListingNotFound) {
+		t.Fatalf("expected nearby.ErrListingNotFound, got %v", err)
+	}
+
+	present := listingLocations{reader: listingReaderStub{listing: listings.PublicListing{
+		Location: listings.PublicLocation{Latitude: 20.71, Longitude: -156.45},
+	}}}
+	point, err := present.Location(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if point.Latitude != 20.71 || point.Longitude != -156.45 {
+		t.Fatalf("unexpected point %+v", point)
 	}
 }

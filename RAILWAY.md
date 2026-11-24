@@ -113,6 +113,13 @@ Create a second Railway service from the same repo.
     bucket (it needs the `S3_*` variables, `ALLOWED_ORIGINS`, `jq` and the AWS
     CLI; set `DRY_RUN=1` to print the rules first)
   - `SENTRY_DSN`, `SENTRY_ENVIRONMENT`
+  - Optional `GEOAPIFY_API_KEY`: `GET /api/v1/listings/{id}/nearby?category=drinks`
+    asks Geoapify Places for bars, cafes and similar places around a stay's
+    public (rounded) coordinates. Without the key the route is not mounted
+    and the server logs a warning at startup; the web app then falls back to
+    name search. The free plan allows 3,000 credits a day and requires
+    Geoapify and OpenStreetMap attribution next to the results. Answers are
+    cached in memory for 24 hours per stay and category.
   - `PORT`, optional `LOG_LEVEL`
   - Firebase variables and `BASE_URL` are no longer read and must not be set.
 - **Health checks:** point Railway's healthcheck at `GET /ready` (checks the
