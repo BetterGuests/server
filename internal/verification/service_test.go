@@ -29,6 +29,11 @@ func (fake *fakeInquiries) CreateInquiry(_ context.Context, templateID, referenc
 	return fake.inquiry, fake.err
 }
 
+func (fake *fakeInquiries) CreateHandoffInquiry(_ context.Context, templateID, referenceID string) (Inquiry, error) {
+	fake.calls = append(fake.calls, "handoff|"+templateID+"|"+referenceID)
+	return fake.inquiry, fake.err
+}
+
 type fakeStore struct {
 	rows      map[string]*Verification
 	completed bool
@@ -376,5 +381,38 @@ func TestStartVerificationReplaceAllowsVerifiedAccountToStartAgain(t *testing.T)
 	}
 	if result.InquiryID != "inq_2" || len(inquiries.calls) != 1 {
 		t.Fatalf("unexpected result %+v calls %v", result, inquiries.calls)
+	}
+}
+
+func TestStartHandoffReturnsOneTimeLinkAndRecordsInquiry(t *testing.T) {
+	inquiries := &fakeInquiries{inquiry: Inquiry{ID: "inq_9", OneTimeLink: "https://inquiry.withpersona.com/verify?code=abc"}}
+	store := newFakeStore()
+	service := NewVerificationService(store, inquiries, Config{TemplateID: "itmpl_1"})
+	accountID := uuid.New()
+	result, err := service.StartHandoff(context.Background(), accountID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.OneTimeLink != "https://inquiry.withpersona.com/verify?code=abc" || result.InquiryID != "inq_9" || result.SessionToken != "" {
+		t.Fatalf("result = %+v", result)
+	}
+	if len(inquiries.calls) != 1 || inquiries.calls[0] != "handoff|itmpl_1|"+accountID.String() {
+		t.Fatalf("calls = %v", inquiries.calls)
+	}
+	if len(store.rows) != 1 {
+		t.Fatalf("recorded rows = %d", len(store.rows))
+	}
+}
+
+type plainInquiries struct{}
+
+func (plainInquiries) CreateInquiry(context.Context, string, string) (Inquiry, error) {
+	return Inquiry{}, nil
+}
+
+func TestStartHandoffWithoutHandoffCreatorIsUnavailable(t *testing.T) {
+	service := NewVerificationService(newFakeStore(), plainInquiries{}, Config{})
+	if _, err := service.StartHandoff(context.Background(), uuid.New(), false); !errors.Is(err, ErrHandoffUnavailable) {
+		t.Fatalf("err = %v", err)
 	}
 }

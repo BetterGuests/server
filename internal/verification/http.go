@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/google/uuid"
+
 	"github.com/BetterGuests/BetterGuests-Server/internal/accounts"
 )
 
@@ -14,6 +16,7 @@ const (
 	maxWebhookBodyBytes = 1 << 20
 	signatureHeaderName = "Persona-Signature"
 	replaceQueryParam   = "replace"
+	handoffQueryParam   = "handoff"
 )
 
 type HTTPHandler struct {
@@ -80,8 +83,18 @@ func (handler *HTTPHandler) StartVerification(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	result, err := handler.starter.StartVerification(r.Context(), accountID, r.URL.Query().Get(replaceQueryParam) == "true")
+	replace := r.URL.Query().Get(replaceQueryParam) == "true"
+	var result StartResult
+	var err error
+	if r.URL.Query().Get(handoffQueryParam) == "true" {
+		result, err = handler.startHandoff(r, accountID, replace)
+	} else {
+		result, err = handler.starter.StartVerification(r.Context(), accountID, replace)
+	}
 	switch {
+	case errors.Is(err, ErrHandoffUnavailable):
+		writeError(w, http.StatusNotFound, "handoff is not available")
+		return
 	case errors.Is(err, ErrAlreadyVerified):
 		writeError(w, http.StatusConflict, "account is already verified")
 		return
@@ -97,6 +110,14 @@ func (handler *HTTPHandler) StartVerification(w http.ResponseWriter, r *http.Req
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(result)
+}
+
+func (handler *HTTPHandler) startHandoff(r *http.Request, accountID uuid.UUID, replace bool) (StartResult, error) {
+	starter, ok := handler.starter.(HandoffStarter)
+	if !ok {
+		return StartResult{}, ErrHandoffUnavailable
+	}
+	return starter.StartHandoff(r.Context(), accountID, replace)
 }
 
 func (handler *HTTPHandler) PersonaWebhook(w http.ResponseWriter, r *http.Request) {

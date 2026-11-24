@@ -241,6 +241,7 @@ type PublicListing struct {
 	Summary       string         `json:"summary,omitempty"`
 	Description   string         `json:"description"`
 	HostName      string         `json:"host_name,omitempty"`
+	HostAvatarURL string         `json:"host_avatar_url,omitempty"`
 	Location      PublicLocation `json:"location"`
 	Type          ListingType    `json:"type"`
 	PropertyType  PropertyType   `json:"property_type"`

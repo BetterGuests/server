@@ -24,11 +24,12 @@ const (
 )
 
 var (
-	ErrAlreadyVerified  = errors.New("account is already verified")
-	ErrConsentRequired  = errors.New("biometric consent is required")
-	ErrInvalidSignature = errors.New("invalid webhook signature")
-	ErrInvalidPayload   = errors.New("invalid webhook payload")
-	ErrInquiryNotFound  = errors.New("verification inquiry not found")
+	ErrAlreadyVerified    = errors.New("account is already verified")
+	ErrConsentRequired    = errors.New("biometric consent is required")
+	ErrHandoffUnavailable = errors.New("handoff is not available")
+	ErrInvalidSignature   = errors.New("invalid webhook signature")
+	ErrInvalidPayload     = errors.New("invalid webhook payload")
+	ErrInquiryNotFound    = errors.New("verification inquiry not found")
 )
 
 var eventStatuses = map[string]Status{
@@ -92,7 +93,21 @@ func (service *VerificationService) WithConsents(consents ConsentChecker) *Verif
 	return service
 }
 
+type inquiryFactory func(ctx context.Context, templateID, referenceID string) (Inquiry, error)
+
 func (service *VerificationService) StartVerification(ctx context.Context, accountID uuid.UUID, replace bool) (StartResult, error) {
+	return service.start(ctx, accountID, replace, service.inquiries.CreateInquiry)
+}
+
+func (service *VerificationService) StartHandoff(ctx context.Context, accountID uuid.UUID, replace bool) (StartResult, error) {
+	creator, ok := service.inquiries.(HandoffInquiryCreator)
+	if !ok {
+		return StartResult{}, ErrHandoffUnavailable
+	}
+	return service.start(ctx, accountID, replace, creator.CreateHandoffInquiry)
+}
+
+func (service *VerificationService) start(ctx context.Context, accountID uuid.UUID, replace bool, create inquiryFactory) (StartResult, error) {
 	if err := service.requireConsent(ctx, accountID); err != nil {
 		return StartResult{}, err
 	}
@@ -103,7 +118,7 @@ func (service *VerificationService) StartVerification(ctx context.Context, accou
 	if completed && !replace {
 		return StartResult{}, ErrAlreadyVerified
 	}
-	inquiry, err := service.inquiries.CreateInquiry(ctx, service.templateID, accountID.String())
+	inquiry, err := create(ctx, service.templateID, accountID.String())
 	if err != nil {
 		return StartResult{}, fmt.Errorf("create persona inquiry: %w", err)
 	}
@@ -119,7 +134,7 @@ func (service *VerificationService) StartVerification(ctx context.Context, accou
 	if err != nil {
 		return StartResult{}, fmt.Errorf("record verification: %w", err)
 	}
-	return StartResult{InquiryID: inquiry.ID, SessionToken: inquiry.SessionToken, Status: StatusCreated}, nil
+	return StartResult{InquiryID: inquiry.ID, SessionToken: inquiry.SessionToken, OneTimeLink: inquiry.OneTimeLink, Status: StatusCreated}, nil
 }
 
 func (service *VerificationService) HandleWebhook(ctx context.Context, signatureHeader string, body []byte) error {

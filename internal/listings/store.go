@@ -212,7 +212,7 @@ func insertListingRules(ctx context.Context, tx pgx.Tx, listingID uuid.UUID, rul
 
 const publicListingColumns = `
 	l.id, coalesce(l.slug, ''), l.title, coalesce(l.summary, ''), l.description,
-	coalesce(l.host_name, ''), l.city, coalesce(l.region, ''), l.country_code,
+	coalesce(l.host_name, ''), coalesce(l.host_avatar_url, ''), l.city, coalesce(l.region, ''), l.country_code,
 	l.latitude, l.longitude, l.listing_type, l.property_type, l.max_guests,
 	l.bedrooms, l.beds, l.bathrooms::float8, l.minimum_nights,
 	l.nightly_price_cents, l.cleaning_fee_cents, l.currency,
@@ -292,7 +292,7 @@ func scanPublicListing(rows pgx.Rows) (PublicListing, error) {
 	)
 	if err := rows.Scan(
 		&listing.ID, &listing.Slug, &listing.Title, &listing.Summary, &listing.Description,
-		&listing.HostName, &listing.Location.City, &listing.Location.Region, &listing.Location.CountryCode,
+		&listing.HostName, &listing.HostAvatarURL, &listing.Location.City, &listing.Location.Region, &listing.Location.CountryCode,
 		&listing.Location.Latitude, &listing.Location.Longitude, &listing.Type, &listing.PropertyType, &listing.MaxGuests,
 		&listing.Bedrooms, &listing.Beds, &listing.Bathrooms, &listing.MinimumNights,
 		&nightly, &cleaning, &currency,

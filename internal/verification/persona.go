@@ -43,8 +43,8 @@ type createInquiryRequest struct {
 		} `json:"attributes"`
 	} `json:"data"`
 	Meta struct {
-		AutoCreateInquirySession     bool   `json:"auto-create-inquiry-session"`
-		AutoCreateAccountReferenceID string `json:"auto-create-account-reference-id"`
+		AutoCreateInquirySession bool `json:"auto-create-inquiry-session"`
+		AutoCreateOneTimeLink    bool `json:"auto-create-one-time-link,omitempty"`
 	} `json:"meta"`
 }
 
@@ -54,15 +54,24 @@ type createInquiryResponse struct {
 	} `json:"data"`
 	Meta struct {
 		SessionToken string `json:"session-token"`
+		OneTimeLink  string `json:"one-time-link"`
 	} `json:"meta"`
 }
 
 func (client *PersonaClient) CreateInquiry(ctx context.Context, templateID, referenceID string) (Inquiry, error) {
+	return client.createInquiry(ctx, templateID, referenceID, false)
+}
+
+func (client *PersonaClient) CreateHandoffInquiry(ctx context.Context, templateID, referenceID string) (Inquiry, error) {
+	return client.createInquiry(ctx, templateID, referenceID, true)
+}
+
+func (client *PersonaClient) createInquiry(ctx context.Context, templateID, referenceID string, handoff bool) (Inquiry, error) {
 	var payload createInquiryRequest
 	payload.Data.Attributes.TemplateID = templateID
 	payload.Data.Attributes.ReferenceID = referenceID
-	payload.Meta.AutoCreateInquirySession = true
-	payload.Meta.AutoCreateAccountReferenceID = referenceID
+	payload.Meta.AutoCreateInquirySession = !handoff
+	payload.Meta.AutoCreateOneTimeLink = handoff
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return Inquiry{}, fmt.Errorf("encode inquiry request: %w", err)
@@ -88,8 +97,14 @@ func (client *PersonaClient) CreateInquiry(ctx context.Context, templateID, refe
 	if err := json.NewDecoder(io.LimitReader(response.Body, personaMaxResponse)).Decode(&decoded); err != nil {
 		return Inquiry{}, fmt.Errorf("%w: decode response: %v", ErrPersonaRequest, err)
 	}
-	if decoded.Data.ID == "" || decoded.Meta.SessionToken == "" {
-		return Inquiry{}, fmt.Errorf("%w: response missing inquiry id or session token", ErrPersonaRequest)
+	if decoded.Data.ID == "" {
+		return Inquiry{}, fmt.Errorf("%w: response missing inquiry id", ErrPersonaRequest)
 	}
-	return Inquiry{ID: decoded.Data.ID, SessionToken: decoded.Meta.SessionToken}, nil
+	if handoff && decoded.Meta.OneTimeLink == "" {
+		return Inquiry{}, fmt.Errorf("%w: response missing one-time link", ErrPersonaRequest)
+	}
+	if !handoff && decoded.Meta.SessionToken == "" {
+		return Inquiry{}, fmt.Errorf("%w: response missing session token", ErrPersonaRequest)
+	}
+	return Inquiry{ID: decoded.Data.ID, SessionToken: decoded.Meta.SessionToken, OneTimeLink: decoded.Meta.OneTimeLink}, nil
 }

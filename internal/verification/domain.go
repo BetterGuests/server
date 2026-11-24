@@ -50,12 +50,14 @@ type Verification struct {
 type Inquiry struct {
 	ID           string
 	SessionToken string
+	OneTimeLink  string
 }
 
 type StartResult struct {
 	InquiryID    string `json:"inquiry_id"`
 	SessionToken string `json:"session_token"`
 	Status       Status `json:"status"`
+	OneTimeLink  string `json:"one_time_link,omitempty"`
 }
 
 type WebhookEvent struct {
@@ -67,6 +69,14 @@ type WebhookEvent struct {
 
 type InquiryCreator interface {
 	CreateInquiry(ctx context.Context, templateID, referenceID string) (Inquiry, error)
+}
+
+type HandoffInquiryCreator interface {
+	CreateHandoffInquiry(ctx context.Context, templateID, referenceID string) (Inquiry, error)
+}
+
+type HandoffStarter interface {
+	StartHandoff(ctx context.Context, accountID uuid.UUID, replace bool) (StartResult, error)
 }
 
 type Store interface {
