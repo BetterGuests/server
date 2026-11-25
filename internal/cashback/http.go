@@ -38,7 +38,6 @@ type ReviewRequest struct {
 
 type ReviewResponse struct {
 	Submission Submission `json:"submission"`
-	Refund     *Refund    `json:"refund,omitempty"`
 }
 
 func (handler *HTTPHandler) GetTrip(w http.ResponseWriter, r *http.Request) {
@@ -124,12 +123,12 @@ func (handler *HTTPHandler) ReviewSubmission(w http.ResponseWriter, r *http.Requ
 	if !decodeBody(w, r, &request) {
 		return
 	}
-	submission, refund, err := handler.reviewer.Review(r.Context(), hostID, submissionID, request.Decision, request.Note)
+	submission, err := handler.reviewer.Review(r.Context(), hostID, submissionID, request.Decision, request.Note)
 	if err != nil {
 		writeServiceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, ReviewResponse{Submission: submission, Refund: refund})
+	writeJSON(w, http.StatusOK, ReviewResponse{Submission: submission})
 }
 
 func actorAndPathID(w http.ResponseWriter, r *http.Request, name string) (uuid.UUID, uuid.UUID, bool) {
@@ -166,9 +165,9 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, ErrBookingNotFound), errors.Is(err, ErrSubmissionNotFound):
 		writeError(w, http.StatusNotFound, "not found")
-	case errors.Is(err, ErrBookingNotEarning), errors.Is(err, ErrSubmissionLocked), errors.Is(err, ErrNotAwaitingReview):
+	case errors.Is(err, ErrBookingNotEarning), errors.Is(err, ErrSubmissionLocked), errors.Is(err, ErrNotAwaitingReview), errors.Is(err, ErrPhotoWindowClosed), errors.Is(err, ErrReviewClosed):
 		writeError(w, http.StatusConflict, err.Error())
-	case errors.Is(err, ErrUnknownTask), errors.Is(err, ErrInvalidPhotoKey), errors.Is(err, ErrPhotoRejected), errors.Is(err, ErrPhotoNotUploaded), errors.Is(err, ErrInvalidDecision), errors.Is(err, ErrRetakeNeedsNote):
+	case errors.Is(err, ErrUnknownTask), errors.Is(err, ErrInvalidPhotoKey), errors.Is(err, ErrPhotoRejected), errors.Is(err, ErrPhotoNotUploaded), errors.Is(err, ErrInvalidDecision), errors.Is(err, ErrRejectNeedsNote):
 		writeError(w, http.StatusBadRequest, err.Error())
 	default:
 		slog.Error("Cashback request", "error", err)

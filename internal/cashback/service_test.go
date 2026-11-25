@@ -15,13 +15,14 @@ type memoryStore struct {
 	stateErr    error
 	submissions map[string]Submission
 	refunds     map[string]Refund
+	settlement  SettlementState
 	hostID      uuid.UUID
 	guestID     uuid.UUID
 }
 
 func newMemoryStore(hostID uuid.UUID) *memoryStore {
 	return &memoryStore{
-		state:       BookingState{BookingStatus: "confirmed", PaymentStatus: "succeeded", PaymentIntentID: "pi_1"},
+		state:       BookingState{BookingStatus: "confirmed", PaymentStatus: "succeeded", PaymentIntentID: "pi_1", AmountCents: 60000, EndsOn: stayEndsOn},
 		submissions: map[string]Submission{},
 		refunds:     map[string]Refund{},
 		hostID:      hostID,
@@ -64,9 +65,9 @@ func (store *memoryStore) HostBooking(_ context.Context, hostID uuid.UUID, booki
 	return HostBooking{BookingID: bookingID, GuestID: store.guestID, ListingTitle: "Emerald Escape"}, nil
 }
 
-func (store *memoryStore) ListPendingForHost(_ context.Context, hostID uuid.UUID) ([]Submission, error) {
+func (store *memoryStore) ListPendingForHost(_ context.Context, hostID uuid.UUID, earliestEndsOn time.Time) ([]Submission, error) {
 	pending := []Submission{}
-	if hostID != store.hostID {
+	if hostID != store.hostID || store.state.EndsOn.Before(earliestEndsOn) {
 		return pending, nil
 	}
 	for _, submission := range store.submissions {
@@ -80,7 +81,7 @@ func (store *memoryStore) ListPendingForHost(_ context.Context, hostID uuid.UUID
 func (store *memoryStore) LoadReviewTarget(_ context.Context, _ uuid.UUID, submissionID uuid.UUID) (ReviewTarget, error) {
 	for _, submission := range store.submissions {
 		if submission.ID == submissionID {
-			return ReviewTarget{Submission: submission, HostID: store.hostID, PaymentIntentID: store.state.PaymentIntentID}, nil
+			return ReviewTarget{Submission: submission, HostID: store.hostID, EndsOn: store.state.EndsOn}, nil
 		}
 	}
 	return ReviewTarget{}, ErrSubmissionNotFound
@@ -99,33 +100,8 @@ func (store *memoryStore) ApplyReview(_ context.Context, _ uuid.UUID, submission
 	return ErrSubmissionNotFound
 }
 
-func (store *memoryStore) ApprovedTaskKeys(context.Context, uuid.UUID, uuid.UUID) ([]string, error) {
-	var keys []string
-	for key, submission := range store.submissions {
-		if submission.Status == TaskApproved {
-			keys = append(keys, key)
-		}
-	}
-	return keys, nil
-}
-
-func (store *memoryStore) ReserveRefund(_ context.Context, _ uuid.UUID, refund Refund) (Refund, bool, error) {
-	if existing, found := store.refunds[refund.BundleKey]; found {
-		return existing, false, nil
-	}
-	store.refunds[refund.BundleKey] = refund
-	return refund, true, nil
-}
-
-func (store *memoryStore) SettleRefund(_ context.Context, _ uuid.UUID, refundID uuid.UUID, status RefundStatus, stripeRefundID string, _ time.Time) error {
-	for key, refund := range store.refunds {
-		if refund.ID == refundID {
-			refund.Status = status
-			refund.StripeRefundID = stripeRefundID
-			store.refunds[key] = refund
-		}
-	}
-	return nil
+func (store *memoryStore) Settlement(context.Context, uuid.UUID, uuid.UUID) (SettlementState, error) {
+	return store.settlement, nil
 }
 
 type fakeObjects struct {
@@ -162,49 +138,38 @@ func (verifier fakeVerifier) HasCompleted(context.Context, uuid.UUID) (bool, err
 	return verifier.verified, nil
 }
 
-type fakeRefunder struct {
-	calls []refundCall
-	err   error
-}
-
-type refundCall struct {
-	intentID string
-	amount   int
-	key      string
-}
-
-func (refunder *fakeRefunder) RefundPayment(_ context.Context, intentID string, amount int, key string) (string, error) {
-	refunder.calls = append(refunder.calls, refundCall{intentID, amount, key})
-	if refunder.err != nil {
-		return "", refunder.err
-	}
-	return "re_" + key, nil
-}
+var (
+	stayEndsOn  = time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC)
+	checkoutDay = stayEndsOn.Add(CheckoutHourUTC * time.Hour)
+)
 
 type harness struct {
-	service  *CashbackService
-	store    *memoryStore
-	refunder *fakeRefunder
-	objects  *fakeObjects
-	hostID   uuid.UUID
-	guestID  uuid.UUID
-	booking  uuid.UUID
+	service *CashbackService
+	store   *memoryStore
+	objects *fakeObjects
+	hostID  uuid.UUID
+	guestID uuid.UUID
+	booking uuid.UUID
 }
 
 func newHarness(verified bool) harness {
 	hostID := uuid.New()
 	store := newMemoryStore(hostID)
-	refunder := &fakeRefunder{}
 	objects := newFakeObjects()
+	service := NewCashbackService(store, fakeVerifier{verified: verified}, objects)
+	service.now = func() time.Time { return checkoutDay }
 	return harness{
-		service:  NewCashbackService(store, fakeVerifier{verified: verified}, refunder, objects),
-		objects:  objects,
-		store:    store,
-		refunder: refunder,
-		hostID:   hostID,
-		guestID:  uuid.New(),
-		booking:  uuid.New(),
+		service: service,
+		objects: objects,
+		store:   store,
+		hostID:  hostID,
+		guestID: uuid.New(),
+		booking: uuid.New(),
 	}
+}
+
+func (h harness) at(moment time.Time) {
+	h.service.now = func() time.Time { return moment }
 }
 
 func (h harness) key(taskKey string) string {
@@ -220,13 +185,13 @@ func (h harness) submit(t *testing.T, taskKey string) Submission {
 	return submission
 }
 
-func (h harness) approve(t *testing.T, submission Submission) *Refund {
+func (h harness) review(t *testing.T, submission Submission, decision Decision, note string) Submission {
 	t.Helper()
-	_, refund, err := h.service.Review(context.Background(), h.hostID, submission.ID, DecisionApprove, "")
+	reviewed, err := h.service.Review(context.Background(), h.hostID, submission.ID, decision, note)
 	if err != nil {
 		t.Fatalf("Review() error = %v", err)
 	}
-	return refund
+	return reviewed
 }
 
 func TestUnverifiedGuestCannotSubmitPhotos(t *testing.T) {
@@ -395,65 +360,111 @@ func TestStorageConfigFromLookup(t *testing.T) {
 	}
 }
 
-func TestPartialBundleApprovalPaysNothing(t *testing.T) {
-	h := newHarness(true)
-	refund := h.approve(t, h.submit(t, "run_dishwasher"))
-	h.approve(t, h.submit(t, "empty_fridge"))
-	if refund != nil || len(h.refunder.calls) != 0 {
-		t.Fatalf("refund = %+v, calls = %d", refund, len(h.refunder.calls))
+func TestPhotoWindowRunsFromCheckoutDayUntilADayAfterCheckout(t *testing.T) {
+	cases := map[string]struct {
+		moment time.Time
+		want   error
+	}{
+		"the night before checkout":     {stayEndsOn.Add(-time.Second), ErrPhotoWindowClosed},
+		"the start of checkout day":     {stayEndsOn, nil},
+		"just before the window closes": {checkoutDay.Add(PhotoWindow - time.Second), nil},
+		"as the window closes":          {checkoutDay.Add(PhotoWindow), ErrPhotoWindowClosed},
+	}
+	for name, test := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(true)
+			h.at(test.moment)
+			_, err := h.service.SubmitPhoto(context.Background(), h.guestID, h.booking, "run_dishwasher", h.key("run_dishwasher"))
+			if !errors.Is(err, test.want) {
+				t.Fatalf("submit error = %v, want %v", err, test.want)
+			}
+			_, err = h.service.RequestUpload(context.Background(), h.guestID, h.booking, "empty_fridge", "image/jpeg", 100)
+			if !errors.Is(err, test.want) {
+				t.Fatalf("upload error = %v, want %v", err, test.want)
+			}
+		})
 	}
 }
 
-func TestCompletingBundleRefundsFiftyDollarsOnce(t *testing.T) {
+func TestHostRejectionIsFinal(t *testing.T) {
 	h := newHarness(true)
-	h.approve(t, h.submit(t, "run_dishwasher"))
-	h.approve(t, h.submit(t, "empty_fridge"))
-	refund := h.approve(t, h.submit(t, "wipe_counters"))
-	if refund == nil || refund.Status != RefundSucceeded || refund.AmountCents != 5000 {
-		t.Fatalf("refund = %+v", refund)
+	dark := h.submit(t, "towels_in_hamper")
+	if reviewed := h.review(t, dark, DecisionReject, "Towels still on the floor"); reviewed.Status != TaskRejected {
+		t.Fatalf("status = %s", reviewed.Status)
 	}
-	if len(h.refunder.calls) != 1 || h.refunder.calls[0].amount != 5000 || h.refunder.calls[0].intentID != "pi_1" {
-		t.Fatalf("calls = %+v", h.refunder.calls)
+	if _, err := h.service.SubmitPhoto(context.Background(), h.guestID, h.booking, "towels_in_hamper", h.key("towels_in_hamper")); !errors.Is(err, ErrSubmissionLocked) {
+		t.Fatalf("resubmit error = %v", err)
 	}
 }
 
-func TestTwoTaskBundleRefundsAfterSecondApproval(t *testing.T) {
+func TestHostCannotReviewOnceTheBookingIsDueToSettle(t *testing.T) {
 	h := newHarness(true)
-	h.approve(t, h.submit(t, "strip_beds"))
-	refund := h.approve(t, h.submit(t, "towels_in_hamper"))
-	if refund == nil || refund.BundleKey != "beds_towels" {
-		t.Fatalf("refund = %+v", refund)
+	submission := h.submit(t, "run_dishwasher")
+	h.at(checkoutDay.Add(SettlementDelay))
+	if _, err := h.service.Review(context.Background(), h.hostID, submission.ID, DecisionReject, "Too late"); !errors.Is(err, ErrReviewClosed) {
+		t.Fatalf("error = %v", err)
+	}
+	pending, err := h.service.PendingForHost(context.Background(), h.hostID)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pending = %+v, err = %v", pending, err)
 	}
 }
 
-func TestEachCompletedBundlePaysSeparately(t *testing.T) {
+func TestSettlementBecomesDueExactlyWhenReviewCloses(t *testing.T) {
+	settlesAt := ScheduleFor(stayEndsOn).SettlesAt
+	if got := LatestSettleableEndsOn(settlesAt.Add(-time.Second)); !got.Before(stayEndsOn) {
+		t.Fatalf("due before review closed: %s", got)
+	}
+	if got := LatestSettleableEndsOn(settlesAt); !got.Equal(stayEndsOn) {
+		t.Fatalf("not due when review closed: %s", got)
+	}
+}
+
+func TestEarnableCashbackCountsOnlyFullBundlesAndIsCapped(t *testing.T) {
+	kitchen := []string{"run_dishwasher", "empty_fridge", "wipe_counters"}
+	everything := append([]string{"strip_beds", "towels_in_hamper", "take_out_trash", "lights_thermostat"}, kitchen...)
+	cases := map[string]struct {
+		keys []string
+		paid int
+		want int
+	}{
+		"nothing submitted":           {nil, 60000, 0},
+		"two of three kitchen photos": {kitchen[:2], 60000, 0},
+		"one full bundle":             {kitchen, 60000, 5000},
+		"all bundles on a long stay":  {everything, 60000, 15000},
+		"all bundles on a cheap stay": {everything, 10000, 2500},
+		"cap rounds down":             {everything, 10003, 2500},
+	}
+	for name, test := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := EarnableCents(test.keys, test.paid); got != test.want {
+				t.Fatalf("cents = %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
+func TestSilenceCountsTowardCashbackAndRejectionDoesNot(t *testing.T) {
 	h := newHarness(true)
-	for _, key := range []string{"strip_beds", "towels_in_hamper", "take_out_trash", "lights_thermostat"} {
-		h.approve(t, h.submit(t, key))
-	}
-	if len(h.refunder.calls) != 2 {
-		t.Fatalf("calls = %d", len(h.refunder.calls))
-	}
-	if h.refunder.calls[0].key == h.refunder.calls[1].key {
-		t.Fatal("idempotency keys must differ per bundle")
-	}
+	h.submit(t, "strip_beds")
+	h.submit(t, "towels_in_hamper")
+	h.submit(t, "take_out_trash")
+	h.review(t, h.submit(t, "lights_thermostat"), DecisionReject, "Thermostat left at 65")
 	trip, err := h.service.Trip(context.Background(), h.guestID, h.booking)
-	if err != nil || trip.EarnedCents != 10000 {
+	if err != nil || trip.ExpectedCents != 5000 || trip.EarnedCents != 0 || trip.CapCents != 15000 {
 		t.Fatalf("trip = %+v, err = %v", trip, err)
 	}
+	if trip.Bundles[2].Status != TaskRejected {
+		t.Fatalf("lock up status = %s", trip.Bundles[2].Status)
+	}
 }
 
-func TestRetakeThenResubmitThenApprovePaysOut(t *testing.T) {
+func TestTripShowsMoneyOnlyOnceSettlementRefundedIt(t *testing.T) {
 	h := newHarness(true)
-	h.approve(t, h.submit(t, "strip_beds"))
-	dark := h.submit(t, "towels_in_hamper")
-	reviewed, refund, err := h.service.Review(context.Background(), h.hostID, dark.ID, DecisionRetake, "Too dark")
-	if err != nil || reviewed.Status != TaskRetake || refund != nil {
-		t.Fatalf("reviewed = %+v, refund = %+v, err = %v", reviewed, refund, err)
-	}
-	retaken := h.submit(t, "towels_in_hamper")
-	if refund := h.approve(t, retaken); refund == nil || refund.Status != RefundSucceeded {
-		t.Fatalf("refund = %+v", refund)
+	h.store.settlement = SettlementState{Status: "awaiting_host", RefundedCents: 10000}
+	trip, err := h.service.Trip(context.Background(), h.guestID, h.booking)
+	if err != nil || trip.EarnedCents != 10000 || trip.SettlementStatus != "awaiting_host" {
+		t.Fatalf("trip = %+v, err = %v", trip, err)
 	}
 }
 
@@ -463,7 +474,7 @@ func TestPhotoCannotBeReplacedWhileWaitingOrApproved(t *testing.T) {
 	if _, err := h.service.SubmitPhoto(context.Background(), h.guestID, h.booking, "run_dishwasher", h.key("run_dishwasher")); !errors.Is(err, ErrSubmissionLocked) {
 		t.Fatalf("waiting error = %v", err)
 	}
-	h.approve(t, waiting)
+	h.review(t, waiting, DecisionApprove, "")
 	if _, err := h.service.SubmitPhoto(context.Background(), h.guestID, h.booking, "run_dishwasher", h.key("run_dishwasher")); !errors.Is(err, ErrSubmissionLocked) {
 		t.Fatalf("approved error = %v", err)
 	}
@@ -472,7 +483,7 @@ func TestPhotoCannotBeReplacedWhileWaitingOrApproved(t *testing.T) {
 func TestOnlyTheListingHostCanReview(t *testing.T) {
 	h := newHarness(true)
 	submission := h.submit(t, "run_dishwasher")
-	_, _, err := h.service.Review(context.Background(), uuid.New(), submission.ID, DecisionApprove, "")
+	_, err := h.service.Review(context.Background(), uuid.New(), submission.ID, DecisionApprove, "")
 	if !errors.Is(err, ErrNotHost) {
 		t.Fatalf("error = %v", err)
 	}
@@ -481,20 +492,20 @@ func TestOnlyTheListingHostCanReview(t *testing.T) {
 func TestGuestCannotApproveTheirOwnPhoto(t *testing.T) {
 	h := newHarness(true)
 	submission := h.submit(t, "run_dishwasher")
-	_, _, err := h.service.Review(context.Background(), h.guestID, submission.ID, DecisionApprove, "")
+	_, err := h.service.Review(context.Background(), h.guestID, submission.ID, DecisionApprove, "")
 	if !errors.Is(err, ErrNotHost) {
 		t.Fatalf("error = %v", err)
 	}
-	if len(h.refunder.calls) != 0 {
-		t.Fatal("refund issued from guest self-approval")
+	if h.store.submissions["run_dishwasher"].Status != TaskChecking {
+		t.Fatal("guest self-approval changed the photo")
 	}
 }
 
 func TestReviewRejectsAlreadyReviewedSubmission(t *testing.T) {
 	h := newHarness(true)
 	submission := h.submit(t, "run_dishwasher")
-	h.approve(t, submission)
-	_, _, err := h.service.Review(context.Background(), h.hostID, submission.ID, DecisionApprove, "")
+	h.review(t, submission, DecisionApprove, "")
+	_, err := h.service.Review(context.Background(), h.hostID, submission.ID, DecisionApprove, "")
 	if !errors.Is(err, ErrNotAwaitingReview) {
 		t.Fatalf("error = %v", err)
 	}
@@ -503,28 +514,11 @@ func TestReviewRejectsAlreadyReviewedSubmission(t *testing.T) {
 func TestReviewValidatesDecision(t *testing.T) {
 	h := newHarness(true)
 	submission := h.submit(t, "run_dishwasher")
-	if _, _, err := h.service.Review(context.Background(), h.hostID, submission.ID, "maybe", ""); !errors.Is(err, ErrInvalidDecision) {
+	if _, err := h.service.Review(context.Background(), h.hostID, submission.ID, "maybe", ""); !errors.Is(err, ErrInvalidDecision) {
 		t.Fatalf("decision error = %v", err)
 	}
-	if _, _, err := h.service.Review(context.Background(), h.hostID, submission.ID, DecisionRetake, "  "); !errors.Is(err, ErrRetakeNeedsNote) {
+	if _, err := h.service.Review(context.Background(), h.hostID, submission.ID, DecisionReject, "  "); !errors.Is(err, ErrRejectNeedsNote) {
 		t.Fatalf("note error = %v", err)
-	}
-}
-
-func TestStripeRefundFailureIsRecordedAndSurfaced(t *testing.T) {
-	h := newHarness(true)
-	h.refunder.err = errors.New("charge already refunded")
-	h.approve(t, h.submit(t, "strip_beds"))
-	_, _, err := h.service.Review(context.Background(), h.hostID, h.submit(t, "towels_in_hamper").ID, DecisionApprove, "")
-	if err == nil {
-		t.Fatal("expected refund error")
-	}
-	if h.store.refunds["beds_towels"].Status != RefundFailed {
-		t.Fatalf("refund status = %s", h.store.refunds["beds_towels"].Status)
-	}
-	trip, _ := h.service.Trip(context.Background(), h.guestID, h.booking)
-	if trip.EarnedCents != 0 {
-		t.Fatalf("earned = %d", trip.EarnedCents)
 	}
 }
 
@@ -581,7 +575,7 @@ func TestPendingForHostListsOnlyPhotosWaitingForReview(t *testing.T) {
 	h := newHarness(true)
 	waiting := h.submit(t, "run_dishwasher")
 	approved := h.submit(t, "empty_fridge")
-	h.approve(t, approved)
+	h.review(t, approved, DecisionApprove, "")
 	pending, err := h.service.PendingForHost(context.Background(), h.hostID)
 	if err != nil || len(pending) != 1 || pending[0].Submission.ID != waiting.ID || pending[0].TaskLabel != "Run the dishwasher" {
 		t.Fatalf("pending = %+v, err = %v", pending, err)

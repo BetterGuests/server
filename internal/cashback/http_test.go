@@ -34,8 +34,8 @@ func (service stubService) RequestUpload(context.Context, uuid.UUID, uuid.UUID, 
 	return UploadTicket{}, service.err
 }
 
-func (service stubService) Review(context.Context, uuid.UUID, uuid.UUID, Decision, string) (Submission, *Refund, error) {
-	return Submission{}, nil, service.err
+func (service stubService) Review(context.Context, uuid.UUID, uuid.UUID, Decision, string) (Submission, error) {
+	return Submission{}, service.err
 }
 
 func serve(t *testing.T, err error, authenticated bool, method, path, body string) *httptest.ResponseRecorder {
@@ -74,6 +74,7 @@ func TestSubmitPhotoStatuses(t *testing.T) {
 		{"not verified", ErrNotVerified, true, body, http.StatusForbidden},
 		{"not earning", ErrBookingNotEarning, true, body, http.StatusConflict},
 		{"locked", ErrSubmissionLocked, true, body, http.StatusConflict},
+		{"photo window closed", ErrPhotoWindowClosed, true, body, http.StatusConflict},
 		{"bad task", ErrUnknownTask, true, body, http.StatusBadRequest},
 		{"bad key", ErrInvalidPhotoKey, true, body, http.StatusBadRequest},
 		{"not uploaded", ErrPhotoNotUploaded, true, body, http.StatusBadRequest},
@@ -105,7 +106,8 @@ func TestReviewStatuses(t *testing.T) {
 		{"not host", ErrNotHost, true, http.StatusForbidden},
 		{"already reviewed", ErrNotAwaitingReview, true, http.StatusConflict},
 		{"missing", ErrSubmissionNotFound, true, http.StatusNotFound},
-		{"retake needs note", ErrRetakeNeedsNote, true, http.StatusBadRequest},
+		{"rejection needs note", ErrRejectNeedsNote, true, http.StatusBadRequest},
+		{"review window closed", ErrReviewClosed, true, http.StatusConflict},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {

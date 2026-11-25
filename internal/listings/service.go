@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -16,6 +18,8 @@ type ListingService struct {
 	store        ListingStore
 	publishStore ListingPublishStore
 	verifier     HostVerifier
+	media        MediaStore
+	objects      PhotoObjects
 	now          func() time.Time
 	newID        func() uuid.UUID
 }
@@ -28,9 +32,6 @@ func NewListingService(store ListingStore) *ListingService {
 	}
 }
 
-// CreateListingInput contains only values a host may provide when creating a
-// listing. HostID comes from authentication; ID, status, and timestamps are
-// assigned by ListingService.
 type CreateListingInput struct {
 	Title            string
 	Description      string
@@ -47,9 +48,6 @@ type CreateListingInput struct {
 	Rules            []HouseRule
 }
 
-// CreateListingPhotoInput references a photo that has already been uploaded
-// to object storage. A presigned read URL is generated later and is never
-// accepted as permanent listing data.
 type CreateListingPhotoInput struct {
 	ObjectKey string
 	AltText   string
@@ -85,15 +83,8 @@ func (service *ListingService) CreateListing(
 		CreatedAt:        now,
 		UpdatedAt:        now,
 	}
-	listing.Photos = make([]ListingPhoto, len(input.Photos))
-	for index, photo := range input.Photos {
-		listing.Photos[index] = ListingPhoto{
-			ID: service.newID(), ObjectKey: photo.ObjectKey,
-			AltText: photo.AltText, Position: photo.Position,
-		}
-	}
+	listing.Photos = []ListingPhoto{}
 
-	// Save the listing as the authenticated host.
 	err = service.store.Create(ctx, hostID.String(), listing)
 
 	if err != nil {
@@ -127,8 +118,8 @@ func validateCreateInput(input CreateListingInput) (CreateListingInput, error) {
 	}
 	input.Amenities = amenities
 
-	if err := validatePhotos(input.Photos); err != nil {
-		return input, err
+	if len(input.Photos) > 0 {
+		return input, invalidListing("photos are added after the draft is created")
 	}
 	if err := validateRules(input.Rules); err != nil {
 		return input, err
@@ -136,8 +127,6 @@ func validateCreateInput(input CreateListingInput) (CreateListingInput, error) {
 	return input, nil
 }
 
-// trimCreateInput normalizes whitespace (and the country code's casing)
-// before any length or content checks run.
 func trimCreateInput(input CreateListingInput) CreateListingInput {
 	input.Title = strings.TrimSpace(input.Title)
 	input.Description = strings.TrimSpace(input.Description)
@@ -187,15 +176,12 @@ func validateCapacity(input CreateListingInput) error {
 }
 
 func validateCollectionSizes(input CreateListingInput) error {
-	if len(input.Amenities) > 100 || len(input.Photos) > 100 || len(input.Rules) > 50 {
-		return invalidListing("too many amenities, photos, or rules")
+	if len(input.Amenities) > 100 || len(input.Rules) > 50 {
+		return invalidListing("too many amenities or rules")
 	}
 	return nil
 }
 
-// dedupeAmenities rejects anything not in the amenity catalog and silently
-// drops repeats, since a host resubmitting the same amenity twice isn't
-// worth failing the request over.
 func dedupeAmenities(input []Amenity) ([]Amenity, error) {
 	seen := map[Amenity]struct{}{}
 	amenities := make([]Amenity, 0, len(input))
@@ -210,23 +196,6 @@ func dedupeAmenities(input []Amenity) ([]Amenity, error) {
 		amenities = append(amenities, amenity)
 	}
 	return amenities, nil
-}
-
-func validatePhotos(photos []CreateListingPhotoInput) error {
-	seenPositions := map[int]struct{}{}
-	for index := range photos {
-		photo := &photos[index]
-		photo.ObjectKey = strings.TrimSpace(photo.ObjectKey)
-		photo.AltText = strings.TrimSpace(photo.AltText)
-		if photo.ObjectKey == "" || len(photo.ObjectKey) > 1024 || len(photo.AltText) > 500 || photo.Position < 0 {
-			return invalidListing("photo metadata is invalid")
-		}
-		if _, duplicate := seenPositions[photo.Position]; duplicate {
-			return invalidListing("photo positions must be unique")
-		}
-		seenPositions[photo.Position] = struct{}{}
-	}
-	return nil
 }
 
 func validateRules(rules []HouseRule) error {
@@ -259,6 +228,17 @@ var (
 	ErrNotListingOwner      = errors.New("only the host can publish this listing")
 	ErrVerificationRequired = errors.New("identity verification is required to publish a listing")
 	ErrProofRequired        = errors.New("approved proof of property control is required to publish a listing")
+	ErrPriceRequired        = errors.New("set a nightly price before publishing")
+	ErrPhotoRequired        = errors.New("add at least one photo before publishing")
+	ErrUploadsDisabled      = errors.New("photo uploads are not available")
+	ErrPhotoRejected        = errors.New("photo must be a JPEG, PNG or WebP image up to 10 MB")
+	ErrInvalidPhotoKey      = errors.New("photo key is not valid for this listing")
+	ErrPhotoNotUploaded     = errors.New("photo was not uploaded")
+	ErrPhotoAlreadyAdded    = errors.New("that photo is already on the listing")
+	ErrTooManyPhotos        = errors.New("a listing can have up to 20 photos")
+	ErrPhotoNotFound        = errors.New("photo not found")
+	ErrLastPhoto            = errors.New("a published listing needs at least one photo")
+	ErrInvalidPrice         = errors.New("nightly price must be between $1 and $100,000")
 )
 
 type ListingPublishStore interface {
@@ -345,4 +325,142 @@ func (service *PublicListingService) prepare(ctx context.Context, listing *Publi
 
 func roundCoordinate(value float64) float64 {
 	return math.Round(value*publicCoordinateScale) / publicCoordinateScale
+}
+
+const (
+	maxPhotoBytes       = 10 << 20
+	maxPhotos           = 20
+	maxAltTextLength    = 500
+	minNightlyCents     = 100
+	maxNightlyCents     = 10_000_000
+	photoUploadLifetime = 10 * time.Minute
+)
+
+var allowedPhotoTypes = map[string]string{
+	"image/jpeg": ".jpg",
+	"image/png":  ".png",
+	"image/webp": ".webp",
+}
+
+var photoNamePattern = regexp.MustCompile(`^[0-9a-f-]{36}\.(jpg|png|webp)$`)
+
+func photoKeyPrefix(listingID uuid.UUID) string {
+	return "listings/" + listingID.String() + "/"
+}
+
+func validPhotoKey(key string, listingID uuid.UUID) bool {
+	name, owned := strings.CutPrefix(key, photoKeyPrefix(listingID))
+	return owned && photoNamePattern.MatchString(name)
+}
+
+func (service *ListingService) WithMedia(store MediaStore, objects PhotoObjects) *ListingService {
+	service.media = store
+	service.objects = objects
+	return service
+}
+
+func (service *ListingService) Setup(ctx context.Context, hostID, listingID uuid.UUID) (Setup, error) {
+	setup, err := service.media.Setup(ctx, hostID.String(), listingID)
+	if err != nil {
+		return Setup{}, err
+	}
+	if service.objects == nil {
+		return setup, nil
+	}
+	for index := range setup.Photos {
+		url, err := service.objects.PresignDownload(ctx, setup.Photos[index].ObjectKey, photoURLLifetime)
+		if err != nil {
+			return Setup{}, fmt.Errorf("sign listing photo: %w", err)
+		}
+		setup.Photos[index].URL = url
+	}
+	return setup, nil
+}
+
+func (service *ListingService) RequestPhotoUpload(ctx context.Context, hostID, listingID uuid.UUID, contentType string, sizeBytes int64) (PhotoTicket, error) {
+	if service.objects == nil {
+		return PhotoTicket{}, ErrUploadsDisabled
+	}
+	extension, allowed := allowedPhotoTypes[contentType]
+	if !allowed || sizeBytes <= 0 || sizeBytes > maxPhotoBytes {
+		return PhotoTicket{}, ErrPhotoRejected
+	}
+	setup, err := service.media.Setup(ctx, hostID.String(), listingID)
+	if err != nil {
+		return PhotoTicket{}, err
+	}
+	if len(setup.Photos) >= maxPhotos {
+		return PhotoTicket{}, ErrTooManyPhotos
+	}
+	key := photoKeyPrefix(listingID) + service.newID().String() + extension
+	url, err := service.objects.PresignUpload(ctx, key, contentType, photoUploadLifetime)
+	if err != nil {
+		return PhotoTicket{}, fmt.Errorf("presign listing photo: %w", err)
+	}
+	return PhotoTicket{
+		UploadURL:   url,
+		PhotoKey:    key,
+		ContentType: contentType,
+		ExpiresIn:   int(photoUploadLifetime.Seconds()),
+		MaxBytes:    maxPhotoBytes,
+	}, nil
+}
+
+func (service *ListingService) AddPhoto(ctx context.Context, hostID, listingID uuid.UUID, key, altText string) (Setup, error) {
+	if service.objects == nil {
+		return Setup{}, ErrUploadsDisabled
+	}
+	if !validPhotoKey(key, listingID) {
+		return Setup{}, ErrInvalidPhotoKey
+	}
+	altText = strings.TrimSpace(altText)
+	if len(altText) > maxAltTextLength {
+		return Setup{}, invalidListing("photo description must be %d characters or fewer", maxAltTextLength)
+	}
+	if _, err := service.media.Setup(ctx, hostID.String(), listingID); err != nil {
+		return Setup{}, err
+	}
+	info, err := service.objects.Stat(ctx, key)
+	if err != nil {
+		return Setup{}, ErrPhotoNotUploaded
+	}
+	if _, allowed := allowedPhotoTypes[info.ContentType]; !allowed || info.Size <= 0 || info.Size > maxPhotoBytes {
+		service.discard(ctx, key)
+		return Setup{}, ErrPhotoRejected
+	}
+	photo := ListingPhoto{ID: service.newID(), ObjectKey: key, AltText: altText}
+	if err := service.media.AddPhoto(ctx, hostID.String(), listingID, photo); err != nil {
+		return Setup{}, err
+	}
+	return service.Setup(ctx, hostID, listingID)
+}
+
+func (service *ListingService) RemovePhoto(ctx context.Context, hostID, listingID, photoID uuid.UUID) (Setup, error) {
+	key, err := service.media.RemovePhoto(ctx, hostID.String(), listingID, photoID)
+	if err != nil {
+		return Setup{}, err
+	}
+	if validPhotoKey(key, listingID) {
+		service.discard(ctx, key)
+	}
+	return service.Setup(ctx, hostID, listingID)
+}
+
+func (service *ListingService) SetPrice(ctx context.Context, hostID, listingID uuid.UUID, nightlyCents int) (Setup, error) {
+	if nightlyCents < minNightlyCents || nightlyCents > maxNightlyCents {
+		return Setup{}, ErrInvalidPrice
+	}
+	if err := service.media.SetPrice(ctx, hostID.String(), listingID, nightlyCents); err != nil {
+		return Setup{}, err
+	}
+	return service.Setup(ctx, hostID, listingID)
+}
+
+func (service *ListingService) discard(ctx context.Context, key string) {
+	if service.objects == nil {
+		return
+	}
+	if err := service.objects.Remove(ctx, key); err != nil {
+		slog.Warn("Remove listing photo", "error", err)
+	}
 }

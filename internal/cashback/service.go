@@ -24,8 +24,10 @@ var (
 	ErrSubmissionNotFound = errors.New("submission not found")
 	ErrNotHost            = errors.New("only the listing host can review")
 	ErrNotAwaitingReview  = errors.New("submission is not awaiting review")
-	ErrInvalidDecision    = errors.New("decision must be approve or retake")
-	ErrRetakeNeedsNote    = errors.New("a retake needs a note")
+	ErrInvalidDecision    = errors.New("decision must be approve or reject")
+	ErrRejectNeedsNote    = errors.New("a rejection needs a note")
+	ErrPhotoWindowClosed  = errors.New("photos are open from checkout day until 24 hours after checkout")
+	ErrReviewClosed       = errors.New("the review window for this stay has closed")
 )
 
 const (
@@ -87,14 +89,44 @@ func bundleForTask(taskKey string) (Bundle, bool) {
 type CashbackService struct {
 	store    Store
 	verified VerificationChecker
-	refunds  Refunder
 	objects  ObjectStore
 	now      func() time.Time
 	newID    func() uuid.UUID
 }
 
-func NewCashbackService(store Store, verified VerificationChecker, refunds Refunder, objects ObjectStore) *CashbackService {
-	return &CashbackService{store: store, verified: verified, refunds: refunds, objects: objects, now: time.Now, newID: uuid.New}
+func NewCashbackService(store Store, verified VerificationChecker, objects ObjectStore) *CashbackService {
+	return &CashbackService{store: store, verified: verified, objects: objects, now: time.Now, newID: uuid.New}
+}
+
+func ScheduleFor(endsOn time.Time) Schedule {
+	day := time.Date(endsOn.Year(), endsOn.Month(), endsOn.Day(), 0, 0, 0, 0, time.UTC)
+	checkout := day.Add(CheckoutHourUTC * time.Hour)
+	return Schedule{PhotosOpenAt: day, PhotosCloseAt: checkout.Add(PhotoWindow), SettlesAt: checkout.Add(SettlementDelay)}
+}
+
+func LatestSettleableEndsOn(now time.Time) time.Time {
+	last := now.UTC().Add(-(SettlementDelay + CheckoutHourUTC*time.Hour))
+	return time.Date(last.Year(), last.Month(), last.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+func CapCents(paidCents int) int {
+	return paidCents * CapPercent / 100
+}
+
+func EarnableCents(acceptedTaskKeys []string, paidCents int) int {
+	earned := 0
+	for _, bundle := range catalog {
+		if bundleComplete(bundle, acceptedTaskKeys) {
+			earned += BundleRefundCents
+		}
+	}
+	return min(earned, CapCents(paidCents))
+}
+
+func (service *CashbackService) photosOpen(endsOn time.Time) bool {
+	schedule := ScheduleFor(endsOn)
+	now := service.now()
+	return !now.Before(schedule.PhotosOpenAt) && now.Before(schedule.PhotosCloseAt)
 }
 
 func (service *CashbackService) RequestUpload(ctx context.Context, guestID, bookingID uuid.UUID, taskKey, contentType string, sizeBytes int64) (UploadTicket, error) {
@@ -139,6 +171,9 @@ func (service *CashbackService) requireEarning(ctx context.Context, guestID, boo
 	}
 	if !isEarning(state) {
 		return ErrBookingNotEarning
+	}
+	if !service.photosOpen(state.EndsOn) {
+		return ErrPhotoWindowClosed
 	}
 	return nil
 }
@@ -201,85 +236,35 @@ func (service *CashbackService) signedAll(ctx context.Context, submissions []Sub
 	return signed
 }
 
-func (service *CashbackService) Review(ctx context.Context, hostID, submissionID uuid.UUID, decision Decision, note string) (Submission, *Refund, error) {
+func (service *CashbackService) Review(ctx context.Context, hostID, submissionID uuid.UUID, decision Decision, note string) (Submission, error) {
 	status, err := statusForDecision(decision, note)
 	if err != nil {
-		return Submission{}, nil, err
+		return Submission{}, err
 	}
 	target, err := service.store.LoadReviewTarget(ctx, hostID, submissionID)
 	if err != nil {
-		return Submission{}, nil, err
+		return Submission{}, err
 	}
 	if target.HostID != hostID {
-		return Submission{}, nil, ErrNotHost
+		return Submission{}, ErrNotHost
 	}
 	if target.Submission.Status != TaskChecking {
-		return Submission{}, nil, ErrNotAwaitingReview
+		return Submission{}, ErrNotAwaitingReview
 	}
 
 	reviewedAt := service.now().UTC()
+	if !reviewedAt.Before(ScheduleFor(target.EndsOn).SettlesAt) {
+		return Submission{}, ErrReviewClosed
+	}
 	trimmed := strings.TrimSpace(note)
 	if err := service.store.ApplyReview(ctx, hostID, submissionID, status, trimmed, reviewedAt); err != nil {
-		return Submission{}, nil, err
+		return Submission{}, err
 	}
 	reviewed := service.signed(ctx, target.Submission)
 	reviewed.Status = status
 	reviewed.Note = trimmed
 	reviewed.ReviewedAt = &reviewedAt
-
-	if status != TaskApproved {
-		return reviewed, nil, nil
-	}
-	refund, err := service.refundIfBundleComplete(ctx, hostID, target)
-	if err != nil {
-		return reviewed, nil, err
-	}
-	return reviewed, refund, nil
-}
-
-func (service *CashbackService) refundIfBundleComplete(ctx context.Context, hostID uuid.UUID, target ReviewTarget) (*Refund, error) {
-	bundle, ok := bundleForTask(target.Submission.TaskKey)
-	if !ok {
-		return nil, ErrUnknownTask
-	}
-	approved, err := service.store.ApprovedTaskKeys(ctx, hostID, target.Submission.BookingID)
-	if err != nil {
-		return nil, fmt.Errorf("load approved tasks: %w", err)
-	}
-	if !bundleComplete(bundle, approved) {
-		return nil, nil
-	}
-
-	now := service.now().UTC()
-	reserved, created, err := service.store.ReserveRefund(ctx, hostID, Refund{
-		ID:          service.newID(),
-		BookingID:   target.Submission.BookingID,
-		GuestID:     target.Submission.GuestID,
-		BundleKey:   bundle.Key,
-		AmountCents: BundleRefundCents,
-		Status:      RefundPending,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("reserve refund: %w", err)
-	}
-	if !created && reserved.Status != RefundFailed {
-		return &reserved, nil
-	}
-
-	key := fmt.Sprintf("cashback-%s-%s", reserved.BookingID, reserved.BundleKey)
-	stripeRefundID, err := service.refunds.RefundPayment(ctx, target.PaymentIntentID, reserved.AmountCents, key)
-	if err != nil {
-		_ = service.store.SettleRefund(ctx, hostID, reserved.ID, RefundFailed, "", service.now().UTC())
-		return nil, fmt.Errorf("issue refund: %w", err)
-	}
-	if err := service.store.SettleRefund(ctx, hostID, reserved.ID, RefundSucceeded, stripeRefundID, service.now().UTC()); err != nil {
-		return nil, fmt.Errorf("record refund: %w", err)
-	}
-	reserved.Status = RefundSucceeded
-	reserved.StripeRefundID = stripeRefundID
-	return &reserved, nil
+	return reviewed, nil
 }
 
 func (service *CashbackService) Trip(ctx context.Context, guestID, bookingID uuid.UUID) (TripView, error) {
@@ -299,7 +284,30 @@ func (service *CashbackService) Trip(ctx context.Context, guestID, bookingID uui
 	if err != nil {
 		return TripView{}, err
 	}
-	return buildTrip(bookingID, verified && isEarning(state), verified, service.signedAll(ctx, submissions), refunds), nil
+	settlement, err := service.store.Settlement(ctx, guestID, bookingID)
+	if err != nil {
+		return TripView{}, err
+	}
+	canEarn := verified && isEarning(state) && service.photosOpen(state.EndsOn)
+	view := buildTrip(bookingID, canEarn, verified, service.signedAll(ctx, submissions), refunds)
+	view.EarnedCents += settlement.RefundedCents
+	view.Money = moneyFor(state.EndsOn, state.AmountCents, submissions, settlement)
+	return view, nil
+}
+
+func moneyFor(endsOn time.Time, paidCents int, submissions []Submission, settlement SettlementState) Money {
+	accepted := []string{}
+	for _, submission := range submissions {
+		if submission.Status == TaskChecking || submission.Status == TaskApproved {
+			accepted = append(accepted, submission.TaskKey)
+		}
+	}
+	return Money{
+		Schedule:         ScheduleFor(endsOn),
+		CapCents:         CapCents(paidCents),
+		ExpectedCents:    EarnableCents(accepted, paidCents),
+		SettlementStatus: settlement.Status,
+	}
 }
 
 func (service *CashbackService) HostTrip(ctx context.Context, hostID, bookingID uuid.UUID) (HostTripView, error) {
@@ -315,18 +323,24 @@ func (service *CashbackService) HostTrip(ctx context.Context, hostID, bookingID 
 	if err != nil {
 		return HostTripView{}, err
 	}
+	settlement, err := service.store.Settlement(ctx, hostID, bookingID)
+	if err != nil {
+		return HostTripView{}, err
+	}
 	trip := buildTrip(bookingID, false, false, service.signedAll(ctx, submissions), refunds)
 	return HostTripView{
 		BookingID:    bookingID,
 		GuestID:      booking.GuestID,
 		ListingTitle: booking.ListingTitle,
-		EarnedCents:  trip.EarnedCents,
+		EarnedCents:  trip.EarnedCents + settlement.RefundedCents,
 		Bundles:      trip.Bundles,
+		Money:        moneyFor(booking.EndsOn, booking.AmountCents, submissions, settlement),
 	}, nil
 }
 
 func (service *CashbackService) PendingForHost(ctx context.Context, hostID uuid.UUID) ([]PendingSubmission, error) {
-	submissions, err := service.store.ListPendingForHost(ctx, hostID)
+	earliestOpen := LatestSettleableEndsOn(service.now()).AddDate(0, 0, 1)
+	submissions, err := service.store.ListPendingForHost(ctx, hostID, earliestOpen)
 	if err != nil {
 		return nil, err
 	}
@@ -388,24 +402,24 @@ func buildTrip(bookingID uuid.UUID, canEarn, verified bool, submissions []Submis
 }
 
 func bundleStatus(statuses []TaskStatus) TaskStatus {
-	approved, checking, retake := 0, 0, 0
+	approved, checking, rejected := 0, 0, 0
 	for _, status := range statuses {
 		switch status {
 		case TaskApproved:
 			approved++
 		case TaskChecking:
 			checking++
-		case TaskRetake:
-			retake++
+		case TaskRejected, TaskRetake:
+			rejected++
 		}
 	}
 	switch {
 	case approved == len(statuses):
 		return TaskApproved
+	case rejected > 0:
+		return TaskRejected
 	case checking > 0:
 		return TaskChecking
-	case retake > 0:
-		return TaskRetake
 	}
 	return TaskTodo
 }
@@ -431,15 +445,15 @@ func statusForDecision(decision Decision, note string) (TaskStatus, error) {
 	switch decision {
 	case DecisionApprove:
 		return TaskApproved, nil
-	case DecisionRetake:
+	case DecisionReject:
 		trimmed := strings.TrimSpace(note)
 		if trimmed == "" {
-			return "", ErrRetakeNeedsNote
+			return "", ErrRejectNeedsNote
 		}
 		if len(trimmed) > maxNoteLength {
 			return "", fmt.Errorf("note must be %d characters or fewer", maxNoteLength)
 		}
-		return TaskRetake, nil
+		return TaskRejected, nil
 	}
 	return "", ErrInvalidDecision
 }

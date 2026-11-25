@@ -64,6 +64,7 @@ type IntentParams struct {
 	GuestID        uuid.UUID
 	IdempotencyKey string
 	ManualCapture  bool
+	CustomerID     string
 }
 
 type Intent struct {
@@ -76,6 +77,7 @@ type CheckoutResult struct {
 	ClientSecret    string `json:"client_secret"`
 	AmountCents     int    `json:"amount_cents"`
 	Currency        string `json:"currency"`
+	CustomerSession string `json:"customer_session_client_secret,omitempty"`
 }
 
 type Event struct {
@@ -111,6 +113,16 @@ type PaymentHold struct {
 type IntentController interface {
 	Capture(ctx context.Context, intentID string) error
 	Cancel(ctx context.Context, intentID string) error
+}
+
+type Wallet interface {
+	CreateCustomer(ctx context.Context, accountID uuid.UUID) (string, error)
+	CreateCustomerSession(ctx context.Context, customerID string) (string, error)
+}
+
+type CustomerStore interface {
+	CustomerID(ctx context.Context, accountID uuid.UUID) (string, bool, error)
+	SaveCustomerID(ctx context.Context, accountID uuid.UUID, customerID string) (string, error)
 }
 
 type Publisher interface {

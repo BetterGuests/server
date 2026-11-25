@@ -64,15 +64,27 @@ func approveProof(t *testing.T, ctx context.Context, listing Listing) {
 	}
 }
 
+func priceAndPicture(t *testing.T, ctx context.Context, service *ListingService, listing Listing) {
+	t.Helper()
+	store := service.store.(*PostgresListingStore)
+	if err := store.SetPrice(ctx, listing.HostID.String(), listing.ID, 12000); err != nil {
+		t.Fatal(err)
+	}
+	photo := ListingPhoto{ID: uuid.New(), ObjectKey: ownKey(listing.ID)}
+	if err := store.AddPhoto(ctx, listing.HostID.String(), listing.ID, photo); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func draftAt(t *testing.T, ctx context.Context, service *ListingService, hostID uuid.UUID, line1, line2, postalCode string) Listing {
 	t.Helper()
 	input := validCreateInput()
 	input.Address = Address{Line1: line1, Line2: line2, City: "Phoenix", PostalCode: postalCode, CountryCode: "US", Latitude: 33.4, Longitude: -112.1}
-	input.Photos = nil
 	listing, err := service.CreateListing(ctx, hostID, input)
 	if err != nil {
 		t.Fatal(err)
 	}
+	priceAndPicture(t, ctx, service, listing)
 	approveProof(t, ctx, listing)
 	return listing
 }
@@ -167,7 +179,6 @@ func TestPublishRequiresApprovedProof(t *testing.T) {
 	ctx, service := publishFixture(t)
 	input := validCreateInput()
 	input.Address = Address{Line1: "2" + uuid.NewString()[:6] + " Proofless Rd", City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1}
-	input.Photos = nil
 	listing, err := service.CreateListing(ctx, uuid.New(), input)
 	if err != nil {
 		t.Fatal(err)
@@ -209,5 +220,64 @@ func TestPublishDateIsWhenTheListingWentLiveAndSurvivesRepublishing(t *testing.T
 	}
 	if second := publishedAt(t, ctx, service, listing.ID); !second.Equal(first) {
 		t.Fatalf("publish date moved from %v to %v", first, second)
+	}
+}
+
+func TestPublishRequiresAPriceThenAPhoto(t *testing.T) {
+	ctx, service := publishFixture(t)
+	store := service.store.(*PostgresListingStore)
+	input := validCreateInput()
+	input.Address = Address{Line1: "6" + uuid.NewString()[:6] + " Bare Rd", City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1}
+	listing, err := service.CreateListing(ctx, uuid.New(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approveProof(t, ctx, listing)
+	host := listing.HostID.String()
+
+	if err := service.PublishListing(ctx, listing.HostID, listing.ID); !errors.Is(err, ErrPriceRequired) {
+		t.Fatalf("expected ErrPriceRequired, got %v", err)
+	}
+	if err := store.SetPrice(ctx, host, listing.ID, 9900); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.PublishListing(ctx, listing.HostID, listing.ID); !errors.Is(err, ErrPhotoRequired) {
+		t.Fatalf("expected ErrPhotoRequired, got %v", err)
+	}
+	first := ListingPhoto{ID: uuid.New(), ObjectKey: ownKey(listing.ID)}
+	if err := store.AddPhoto(ctx, host, listing.ID, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddPhoto(ctx, host, listing.ID, ListingPhoto{ID: uuid.New(), ObjectKey: first.ObjectKey}); !errors.Is(err, ErrPhotoAlreadyAdded) {
+		t.Fatalf("duplicate error = %v", err)
+	}
+	if err := service.PublishListing(ctx, listing.HostID, listing.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RemovePhoto(ctx, host, listing.ID, first.ID); !errors.Is(err, ErrLastPhoto) {
+		t.Fatalf("last photo error = %v", err)
+	}
+
+	second := ListingPhoto{ID: uuid.New(), ObjectKey: ownKey(listing.ID)}
+	if err := store.AddPhoto(ctx, host, listing.ID, second); err != nil {
+		t.Fatal(err)
+	}
+	if key, err := store.RemovePhoto(ctx, host, listing.ID, first.ID); err != nil || key != first.ObjectKey {
+		t.Fatalf("key = %q, err = %v", key, err)
+	}
+	setup, err := store.Setup(ctx, host, listing.ID)
+	if err != nil || setup.NightlyPriceCents != 9900 || len(setup.Photos) != 1 || setup.Photos[0].Position != 1 {
+		t.Fatalf("setup = %+v, err = %v", setup, err)
+	}
+
+	stranger := uuid.NewString()
+	if _, err := store.Setup(ctx, stranger, listing.ID); !errors.Is(err, ErrNotListingOwner) {
+		t.Fatalf("stranger setup error = %v", err)
+	}
+	if err := store.SetPrice(ctx, stranger, listing.ID, 100); !errors.Is(err, ErrNotListingOwner) {
+		t.Fatalf("stranger price error = %v", err)
+	}
+	if _, err := store.RemovePhoto(ctx, stranger, listing.ID, second.ID); !errors.Is(err, ErrNotListingOwner) {
+		t.Fatalf("stranger remove error = %v", err)
 	}
 }

@@ -9,6 +9,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stripe/stripe-go/v82"
+	"github.com/stripe/stripe-go/v82/customer"
+	"github.com/stripe/stripe-go/v82/customersession"
 	"github.com/stripe/stripe-go/v82/paymentintent"
 	"github.com/stripe/stripe-go/v82/webhook"
 )
@@ -35,6 +37,9 @@ func (gateway *StripeGateway) CreateIntent(ctx context.Context, params IntentPar
 			Enabled: stripe.Bool(true),
 		}
 	}
+	if params.CustomerID != "" {
+		request.Customer = stripe.String(params.CustomerID)
+	}
 	request.Context = ctx
 	request.AddMetadata(MetadataBookingID, params.BookingID.String())
 	request.AddMetadata(MetadataGuestID, params.GuestID.String())
@@ -46,6 +51,47 @@ func (gateway *StripeGateway) CreateIntent(ctx context.Context, params IntentPar
 		return Intent{}, fmt.Errorf("stripe create payment intent: %w", err)
 	}
 	return Intent{ID: intent.ID, ClientSecret: intent.ClientSecret}, nil
+}
+
+func (gateway *StripeGateway) CreateCustomer(ctx context.Context, accountID uuid.UUID) (string, error) {
+	params := &stripe.CustomerParams{}
+	params.Context = ctx
+	params.AddMetadata(MetadataGuestID, accountID.String())
+	params.SetIdempotencyKey("customer-" + accountID.String())
+	client := customer.Client{B: stripe.GetBackend(stripe.APIBackend), Key: gateway.secretKey}
+	created, err := client.New(params)
+	if err != nil {
+		return "", fmt.Errorf("stripe create customer: %w", err)
+	}
+	return created.ID, nil
+}
+
+func (gateway *StripeGateway) CreateCustomerSession(ctx context.Context, customerID string) (string, error) {
+	params := customerSessionParams(customerID)
+	params.Context = ctx
+	client := customersession.Client{B: stripe.GetBackend(stripe.APIBackend), Key: gateway.secretKey}
+	session, err := client.New(params)
+	if err != nil {
+		return "", fmt.Errorf("stripe create customer session: %w", err)
+	}
+	return session.ClientSecret, nil
+}
+
+func customerSessionParams(customerID string) *stripe.CustomerSessionParams {
+	return &stripe.CustomerSessionParams{
+		Customer: stripe.String(customerID),
+		Components: &stripe.CustomerSessionComponentsParams{
+			PaymentElement: &stripe.CustomerSessionComponentsPaymentElementParams{
+				Enabled: stripe.Bool(true),
+				Features: &stripe.CustomerSessionComponentsPaymentElementFeaturesParams{
+					PaymentMethodRedisplay: stripe.String(string(stripe.CustomerSessionComponentsPaymentElementFeaturesPaymentMethodRedisplayEnabled)),
+					PaymentMethodRemove:    stripe.String(string(stripe.CustomerSessionComponentsPaymentElementFeaturesPaymentMethodRemoveEnabled)),
+					PaymentMethodSave:      stripe.String(string(stripe.CustomerSessionComponentsPaymentElementFeaturesPaymentMethodSaveEnabled)),
+					PaymentMethodSaveUsage: stripe.String(string(stripe.CustomerSessionComponentsPaymentElementFeaturesPaymentMethodSaveUsageOnSession)),
+				},
+			},
+		},
+	}
 }
 
 func (gateway *StripeGateway) client() paymentintent.Client {

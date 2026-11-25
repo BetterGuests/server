@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 
+	"github.com/BetterGuests/BetterGuests-Server/internal/availability"
 	"github.com/BetterGuests/BetterGuests-Server/internal/bookings"
 	"github.com/BetterGuests/BetterGuests-Server/internal/cashback"
 	"github.com/BetterGuests/BetterGuests-Server/internal/compliance"
@@ -15,6 +16,7 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/proofs"
 	"github.com/BetterGuests/BetterGuests-Server/internal/realtime"
 	"github.com/BetterGuests/BetterGuests-Server/internal/reviews"
+	"github.com/BetterGuests/BetterGuests-Server/internal/settlements"
 	"github.com/BetterGuests/BetterGuests-Server/internal/verification"
 	"github.com/BetterGuests/BetterGuests-Server/internal/waitlist"
 	"github.com/go-chi/cors"
@@ -32,11 +34,13 @@ type routeDeps struct {
 	cashback     *cashback.HTTPHandler
 	verification *verification.HTTPHandler
 	payments     *payments.HTTPHandler
+	payouts      *settlements.HTTPHandler
 	compliance   *compliance.HTTPHandler
 	profiles     *profiles.HTTPHandler
 	messages     *messages.HTTPHandler
 	realtime     *realtime.HTTPHandler
 	waitlist     *waitlist.HTTPHandler
+	availability *availability.HTTPHandler
 }
 
 func routes(deps routeDeps) http.Handler {
@@ -47,6 +51,7 @@ func routes(deps routeDeps) http.Handler {
 	deps.mountPayments(mux)
 	deps.mountPublicListings(mux)
 	deps.mountNearby(mux)
+	deps.mountAvailability(mux)
 	deps.mountRealtime(mux)
 	deps.mountWaitlist(mux)
 	deps.mountAuthenticatedAPI(mux)
@@ -87,6 +92,13 @@ func (deps routeDeps) mountNearby(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/listings/{listing_id}/nearby", deps.nearby.Search)
 }
 
+func (deps routeDeps) mountAvailability(mux *http.ServeMux) {
+	if deps.availability == nil {
+		return
+	}
+	mux.HandleFunc("GET /api/v1/listings/{listing_id}/booked-dates", deps.availability.ListBookedDates)
+}
+
 func (deps routeDeps) mountRealtime(mux *http.ServeMux) {
 	if deps.realtime == nil {
 		return
@@ -114,6 +126,11 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.Handle("POST /api/v1/listings/{listing_id}/proof/uploads", deps.compliance.RequireAdult(http.HandlerFunc(deps.proofs.RequestUpload)))
 	api.Handle("POST /api/v1/listings/{listing_id}/proof", deps.compliance.RequireAdult(http.HandlerFunc(deps.proofs.Submit)))
 	api.HandleFunc("GET /api/v1/listings/{listing_id}/proof", deps.proofs.Status)
+	api.HandleFunc("GET /api/v1/listings/{listing_id}/setup", deps.listings.GetSetup)
+	api.Handle("POST /api/v1/listings/{listing_id}/photos/uploads", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.RequestPhotoUpload)))
+	api.Handle("POST /api/v1/listings/{listing_id}/photos", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.AddPhoto)))
+	api.Handle("DELETE /api/v1/listings/{listing_id}/photos/{photo_id}", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.RemovePhoto)))
+	api.Handle("PUT /api/v1/listings/{listing_id}/price", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.SetPrice)))
 	api.HandleFunc("GET /api/v1/admin/me", deps.proofs.Me)
 	api.HandleFunc("GET /api/v1/admin/property-proofs", deps.proofs.ListSubmitted)
 	api.HandleFunc("POST /api/v1/admin/property-proofs/{proof_id}/decision", deps.proofs.Decide)
@@ -136,6 +153,8 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.HandleFunc("POST /api/v1/bookings/{booking_id}/cashback/tasks/{task_key}/photo", deps.cashback.SubmitPhoto)
 	api.HandleFunc("GET /api/v1/hosting/bookings/{booking_id}/cashback", deps.cashback.GetHostTrip)
 	api.HandleFunc("GET /api/v1/hosting/cashback/pending", deps.cashback.ListPending)
+	api.HandleFunc("GET /api/v1/hosting/payouts", deps.payouts.GetPayouts)
+	api.Handle("POST /api/v1/hosting/payouts/onboarding", deps.compliance.RequireAdult(http.HandlerFunc(deps.payouts.StartOnboarding)))
 	api.HandleFunc("GET /api/v1/profile/banner", deps.profiles.GetBanner)
 	api.HandleFunc("POST /api/v1/profile/banner/upload", deps.profiles.RequestUpload)
 	api.HandleFunc("PUT /api/v1/profile/banner", deps.profiles.SaveBanner)

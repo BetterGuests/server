@@ -58,7 +58,7 @@ func TestMoneyBackWorkflowAgainstPostgres(t *testing.T) {
 		if _, err := tx.Exec(ctx, `INSERT INTO app.accounts (id) VALUES ($1)`, guestID); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO app.bookings (id, listing_id, guest_id, status, starts_on, ends_on) VALUES ($1,$2,$3,'requested',CURRENT_DATE + 10,CURRENT_DATE + 12)`, bookingID, listing.ID, guestID)
+		_, err := tx.Exec(ctx, `INSERT INTO app.bookings (id, listing_id, guest_id, status, starts_on, ends_on) VALUES ($1,$2,$3,'requested',CURRENT_DATE - 2,CURRENT_DATE)`, bookingID, listing.ID, guestID)
 		return err
 	}); err != nil {
 		t.Fatal(err)
@@ -74,8 +74,7 @@ func TestMoneyBackWorkflowAgainstPostgres(t *testing.T) {
 	paymentStore := payments.NewPostgresPaymentStore(pool)
 	paymentService := payments.NewPaymentService(paymentStore, scriptedIntents{intentID: intentID}, nil, payments.Config{})
 	verificationStore := verification.NewPostgresVerificationStore(pool)
-	refunder := &fakeRefunder{}
-	service := NewCashbackService(NewPostgresCashbackStore(pool), verificationStore, refunder, newFakeObjects())
+	service := NewCashbackService(NewPostgresCashbackStore(pool), verificationStore, newFakeObjects())
 	photo := func(task string) string { return photoKeyPrefix(bookingID, task) + uuid.NewString() + ".jpg" }
 
 	t.Run("checkout charges nights times nightly price", func(t *testing.T) {
@@ -209,64 +208,42 @@ func TestMoneyBackWorkflowAgainstPostgres(t *testing.T) {
 		if _, err := service.Trip(ctx, strangerID, bookingID); !errors.Is(err, ErrBookingNotFound) {
 			t.Fatalf("trip error = %v", err)
 		}
-		if _, _, err := service.Review(ctx, strangerID, submissions["run_dishwasher"].ID, DecisionApprove, ""); !errors.Is(err, ErrSubmissionNotFound) {
+		if _, err := service.Review(ctx, strangerID, submissions["run_dishwasher"].ID, DecisionApprove, ""); !errors.Is(err, ErrSubmissionNotFound) {
 			t.Fatalf("review error = %v", err)
 		}
 	})
 
 	t.Run("guest cannot approve their own photo", func(t *testing.T) {
-		if _, _, err := service.Review(ctx, guestID, submissions["run_dishwasher"].ID, DecisionApprove, ""); !errors.Is(err, ErrNotHost) {
+		if _, err := service.Review(ctx, guestID, submissions["run_dishwasher"].ID, DecisionApprove, ""); !errors.Is(err, ErrNotHost) {
 			t.Fatalf("error = %v", err)
 		}
 	})
 
-	t.Run("host approves two and asks for a retake on the third", func(t *testing.T) {
+	t.Run("host approves two and rejects the third for good", func(t *testing.T) {
 		for _, task := range []string{"run_dishwasher", "empty_fridge"} {
-			if _, refund, err := service.Review(ctx, hostID, submissions[task].ID, DecisionApprove, ""); err != nil || refund != nil {
-				t.Fatalf("%s: refund = %+v, err = %v", task, refund, err)
+			if _, err := service.Review(ctx, hostID, submissions[task].ID, DecisionApprove, ""); err != nil {
+				t.Fatalf("%s: err = %v", task, err)
 			}
 		}
-		reviewed, refund, err := service.Review(ctx, hostID, submissions["wipe_counters"].ID, DecisionRetake, "Counters still wet")
-		if err != nil || refund != nil || reviewed.Status != TaskRetake {
-			t.Fatalf("reviewed = %+v, refund = %+v, err = %v", reviewed, refund, err)
+		reviewed, err := service.Review(ctx, hostID, submissions["wipe_counters"].ID, DecisionReject, "Counters still wet")
+		if err != nil || reviewed.Status != TaskRejected {
+			t.Fatalf("reviewed = %+v, err = %v", reviewed, err)
 		}
-		if len(refunder.calls) != 0 {
-			t.Fatal("refund issued before the bundle was complete")
+		if _, err := service.SubmitPhoto(ctx, guestID, bookingID, "wipe_counters", photo("wipe_counters")); !errors.Is(err, ErrSubmissionLocked) {
+			t.Fatalf("resubmit error = %v", err)
 		}
 	})
 
 	t.Run("duplicate review is rejected", func(t *testing.T) {
-		if _, _, err := service.Review(ctx, hostID, submissions["run_dishwasher"].ID, DecisionApprove, ""); !errors.Is(err, ErrNotAwaitingReview) {
+		if _, err := service.Review(ctx, hostID, submissions["run_dishwasher"].ID, DecisionApprove, ""); !errors.Is(err, ErrNotAwaitingReview) {
 			t.Fatalf("error = %v", err)
 		}
 	})
 
-	t.Run("guest retakes the photo and the host approval pays fifty dollars", func(t *testing.T) {
-		retaken, err := service.SubmitPhoto(ctx, guestID, bookingID, "wipe_counters", photo("wipe_counters"))
-		if err != nil || retaken.Status != TaskChecking {
-			t.Fatalf("retaken = %+v, err = %v", retaken, err)
-		}
-		_, refund, err := service.Review(ctx, hostID, retaken.ID, DecisionApprove, "")
-		if err != nil || refund == nil || refund.Status != RefundSucceeded || refund.AmountCents != 5000 {
-			t.Fatalf("refund = %+v, err = %v", refund, err)
-		}
-		if len(refunder.calls) != 1 || refunder.calls[0].intentID != intentID || refunder.calls[0].amount != 5000 {
-			t.Fatalf("calls = %+v", refunder.calls)
-		}
-	})
-
-	t.Run("guest sees the money earned back", func(t *testing.T) {
+	t.Run("nothing is earned before settlement", func(t *testing.T) {
 		trip, err := service.Trip(ctx, guestID, bookingID)
-		if err != nil || trip.EarnedCents != 5000 || trip.Bundles[0].Status != TaskApproved || trip.Bundles[0].RefundStatus != RefundSucceeded {
+		if err != nil || trip.EarnedCents != 0 || trip.ExpectedCents != 0 || trip.CapCents != 6000 || trip.Bundles[0].Status != TaskRejected {
 			t.Fatalf("trip = %+v, err = %v", trip, err)
-		}
-	})
-
-	t.Run("a completed bundle cannot be paid twice", func(t *testing.T) {
-		refundStore := NewPostgresCashbackStore(pool)
-		again, created, err := refundStore.ReserveRefund(ctx, hostID, Refund{ID: uuid.New(), BookingID: bookingID, GuestID: guestID, BundleKey: "kitchen", AmountCents: 5000, Status: RefundPending, CreatedAt: time.Now(), UpdatedAt: time.Now()})
-		if err != nil || created || again.Status != RefundSucceeded {
-			t.Fatalf("again = %+v, created = %v, err = %v", again, created, err)
 		}
 	})
 }

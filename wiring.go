@@ -11,6 +11,7 @@ import (
 
 	"github.com/BetterGuests/BetterGuests-Server/internal/accounts"
 	"github.com/BetterGuests/BetterGuests-Server/internal/auth"
+	"github.com/BetterGuests/BetterGuests-Server/internal/availability"
 	"github.com/BetterGuests/BetterGuests-Server/internal/bookings"
 	"github.com/BetterGuests/BetterGuests-Server/internal/cashback"
 	"github.com/BetterGuests/BetterGuests-Server/internal/compliance"
@@ -23,6 +24,7 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/proofs"
 	"github.com/BetterGuests/BetterGuests-Server/internal/realtime"
 	"github.com/BetterGuests/BetterGuests-Server/internal/reviews"
+	"github.com/BetterGuests/BetterGuests-Server/internal/settlements"
 	"github.com/BetterGuests/BetterGuests-Server/internal/verification"
 	"github.com/BetterGuests/BetterGuests-Server/internal/waitlist"
 	"github.com/google/uuid"
@@ -77,7 +79,9 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		return routeDeps{}, fmt.Errorf("stripe configuration: %w", err)
 	}
 	stripeGateway := payments.NewStripeGateway(paymentConfig)
-	paymentService := payments.NewPaymentService(payments.NewPostgresPaymentStore(pool), stripeGateway, stripeGateway, paymentConfig).
+	paymentStore := payments.NewPostgresPaymentStore(pool)
+	paymentService := payments.NewPaymentService(paymentStore, stripeGateway, stripeGateway, paymentConfig).
+		WithSavedCards(stripeGateway, paymentStore).
 		WithController(stripeGateway).
 		WithPublisher(realtimeService)
 
@@ -95,12 +99,24 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 	cashbackService := cashback.NewCashbackService(
 		cashback.NewPostgresCashbackStore(pool),
 		verificationStore,
-		cashback.NewStripeRefunder(paymentConfig.SecretKey),
 		objectStore,
 	)
 
+	settlementConfig, err := settlements.ConfigFromEnv()
+	if err != nil {
+		return routeDeps{}, fmt.Errorf("settlement configuration: %w", err)
+	}
+	payoutService := settlements.NewPayoutService(
+		settlements.NewPostgresSettlementStore(pool),
+		settlements.NewStripeGateway(paymentConfig.SecretKey),
+		accountEmails{accounts: accountStore, fetcher: nameFetcher},
+		settlementConfig,
+	)
+
 	listingStore := listings.NewPostgresListingStore(pool)
-	listingService := listings.NewListingService(listingStore).WithPublishing(listingStore, verificationStore)
+	listingService := listings.NewListingService(listingStore).
+		WithPublishing(listingStore, verificationStore).
+		WithMedia(listingStore, listingObjectsFrom(objectStore))
 
 	proofService := proofs.NewProofService(proofs.NewPostgresProofStore(pool), proofObjectsFrom(objectStore))
 
@@ -112,6 +128,7 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		authenticate: authenticator.Middleware,
 		listings: listings.NewHTTPHandler(listingService).
 			WithPublisher(listingService).
+			WithMedia(listingService).
 			WithPublicReader(listings.NewPublicListingService(listingStore, objectStore)),
 		proofs:       proofs.NewHTTPHandler(proofService, proofService, proofService, proofService, proofService),
 		nearby:       buildNearbyHandler(listingStore),
@@ -122,9 +139,11 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		cashback:     cashback.NewHTTPHandler(cashbackService, cashbackService, cashbackService, cashbackService, cashbackService),
 		verification: verification.NewHTTPHandler(verificationService, verificationService).WithStatusReader(verificationStore).WithCurrentChecker(currentVerifier).WithDeletion(deletionService),
 		payments:     payments.NewHTTPHandler(paymentService, paymentService),
+		payouts:      settlements.NewHTTPHandler(payoutService, payoutService),
 		compliance:   compliance.NewHTTPHandler(complianceService, complianceService, complianceService),
 		profiles:     profiles.NewHTTPHandler(profileService, profileService, profileService, profileService),
 		waitlist:     waitlist.NewHTTPHandler(waitlist.NewWaitlistService(waitlist.NewPostgresWaitlistStore(pool))),
+		availability: availability.NewHTTPHandler(availability.NewAvailabilityService(availability.NewPostgresAvailabilityStore(pool))),
 	}, nil
 }
 
@@ -242,6 +261,55 @@ func (objects proofObjects) Remove(ctx context.Context, key string) error {
 		return nil
 	}
 	return remover.Remove(ctx, key)
+}
+
+type listingObjects struct{ store cashback.ObjectStore }
+
+func listingObjectsFrom(store cashback.ObjectStore) listings.PhotoObjects {
+	if store == nil {
+		return nil
+	}
+	return listingObjects{store: store}
+}
+
+func (objects listingObjects) PresignUpload(ctx context.Context, key, contentType string, expires time.Duration) (string, error) {
+	return objects.store.PresignUpload(ctx, key, contentType, expires)
+}
+
+func (objects listingObjects) PresignDownload(ctx context.Context, key string, expires time.Duration) (string, error) {
+	return objects.store.PresignDownload(ctx, key, expires)
+}
+
+func (objects listingObjects) Stat(ctx context.Context, key string) (listings.ObjectInfo, error) {
+	info, err := objects.store.Stat(ctx, key)
+	if err != nil {
+		return listings.ObjectInfo{}, err
+	}
+	return listings.ObjectInfo{Size: info.Size, ContentType: info.ContentType}, nil
+}
+
+func (objects listingObjects) Remove(ctx context.Context, key string) error {
+	remover, ok := objects.store.(objectRemover)
+	if !ok {
+		return nil
+	}
+	return remover.Remove(ctx, key)
+}
+
+func buildSettlementService(pool *pgxpool.Pool) (*settlements.SettlementService, error) {
+	paymentConfig, err := payments.ConfigFromEnv()
+	if err != nil {
+		return nil, fmt.Errorf("stripe configuration: %w", err)
+	}
+	settlementConfig, err := settlements.ConfigFromEnv()
+	if err != nil {
+		return nil, fmt.Errorf("settlement configuration: %w", err)
+	}
+	return settlements.NewSettlementService(
+		settlements.NewPostgresSettlementStore(pool),
+		settlements.NewStripeGateway(paymentConfig.SecretKey),
+		settlementConfig,
+	), nil
 }
 
 func buildRedactionService(pool *pgxpool.Pool) (*verification.RedactionService, error) {

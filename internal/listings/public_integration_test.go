@@ -35,7 +35,6 @@ func TestPublicReadsReturnOnlyPublishedListingsWithoutAUser(t *testing.T) {
 		Type:    EntirePlace, PropertyType: Cabin, MaxGuests: 4,
 		MinimumAgeToBook: 21, Bedrooms: 2, Beds: 2, Bathrooms: 1.5,
 		Amenities: []Amenity{WiFi},
-		Photos:    []CreateListingPhotoInput{{ObjectKey: "listings/test/0.jpg", Position: 0}},
 	}
 	draft, err := service.CreateListing(ctx, hostID, input)
 	if err != nil {
@@ -43,6 +42,9 @@ func TestPublicReadsReturnOnlyPublishedListingsWithoutAUser(t *testing.T) {
 	}
 	published, err := service.CreateListing(ctx, hostID, input)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AddPhoto(ctx, hostID.String(), published.ID, ListingPhoto{ID: uuid.New(), ObjectKey: "listings/test/0.jpg"}); err != nil {
 		t.Fatal(err)
 	}
 	err = db.WithUserTx(ctx, pool, hostID.String(), func(tx pgx.Tx) error {

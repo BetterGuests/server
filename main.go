@@ -49,9 +49,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	settlement, err := buildSettlementService(pool)
+	if err != nil {
+		return err
+	}
 	jobs, stopJobs := context.WithCancel(context.Background())
 	defer stopJobs()
 	go redaction.Run(jobs)
+	go settlement.Run(jobs)
 
 	server, err := createServer(routes(deps))
 	if err != nil {

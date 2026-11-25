@@ -272,3 +272,36 @@ type PublicListingReader interface {
 	ListPublished(ctx context.Context) ([]PublicListing, error)
 	GetPublished(ctx context.Context, id uuid.UUID) (PublicListing, error)
 }
+
+type Setup struct {
+	Status            ListingStatus  `json:"status"`
+	NightlyPriceCents int            `json:"nightly_price_cents"`
+	Photos            []ListingPhoto `json:"photos"`
+}
+
+type PhotoTicket struct {
+	UploadURL   string `json:"upload_url"`
+	PhotoKey    string `json:"photo_key"`
+	ContentType string `json:"content_type"`
+	ExpiresIn   int    `json:"expires_in_seconds"`
+	MaxBytes    int64  `json:"max_bytes"`
+}
+
+type ObjectInfo struct {
+	Size        int64
+	ContentType string
+}
+
+type PhotoObjects interface {
+	PresignUpload(ctx context.Context, key, contentType string, expires time.Duration) (string, error)
+	PresignDownload(ctx context.Context, key string, expires time.Duration) (string, error)
+	Stat(ctx context.Context, key string) (ObjectInfo, error)
+	Remove(ctx context.Context, key string) error
+}
+
+type MediaStore interface {
+	Setup(ctx context.Context, userID string, listingID uuid.UUID) (Setup, error)
+	AddPhoto(ctx context.Context, userID string, listingID uuid.UUID, photo ListingPhoto) error
+	RemovePhoto(ctx context.Context, userID string, listingID, photoID uuid.UUID) (string, error)
+	SetPrice(ctx context.Context, userID string, listingID uuid.UUID, nightlyCents int) error
+}

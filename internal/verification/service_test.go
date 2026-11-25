@@ -35,10 +35,11 @@ func (fake *fakeInquiries) CreateHandoffInquiry(_ context.Context, templateID, r
 }
 
 type fakeStore struct {
-	rows      map[string]*Verification
-	completed bool
-	createErr error
-	applied   int
+	rows        map[string]*Verification
+	completed   bool
+	createErr   error
+	applied     int
+	syncedNames []IDName
 }
 
 func newFakeStore() *fakeStore { return &fakeStore{rows: map[string]*Verification{}} }
@@ -67,6 +68,11 @@ func (store *fakeStore) ApplyStatus(_ context.Context, accountID uuid.UUID, inqu
 	row.Status = status
 	row.LastEventAt = occurredAt
 	store.applied++
+	return nil
+}
+
+func (store *fakeStore) SyncIDName(_ context.Context, _ uuid.UUID, _ string, name IDName) error {
+	store.syncedNames = append(store.syncedNames, name)
 	return nil
 }
 

@@ -56,6 +56,10 @@ type ReviewItem struct {
 	Region       string `json:"region,omitempty"`
 	PostalCode   string `json:"postal_code,omitempty"`
 	CountryCode  string `json:"country_code"`
+	IDFirstName  string `json:"id_first_name,omitempty"`
+	IDMiddleName string `json:"id_middle_name,omitempty"`
+	IDLastName   string `json:"id_last_name,omitempty"`
+	IDNameSuffix string `json:"id_name_suffix,omitempty"`
 	DocumentURL  string `json:"document_url,omitempty"`
 }
 

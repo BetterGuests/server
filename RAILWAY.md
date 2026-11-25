@@ -107,11 +107,19 @@ Create a second Railway service from the same repo.
     three are required; the server refuses to start without them. The API key
     must be allowed to redact inquiries, because the server deletes ID data
     through Persona's redact call.
+  - The Persona webhook must include related objects in its payload. The server
+    saves the host's name from the passed `verification/government-id` entry and
+    shows it to proof reviewers. Without it, reviewers see "No ID name on file".
   - `ID_RETENTION_DAYS` (default 30), `ID_HOLD_CAP_DAYS` (default 1095),
     `ID_PURGE_INTERVAL` (default 6h), `ID_PURGE_BATCH` (default 50),
     `ID_PURGE_ENABLED` (default true) — the ID deletion job. Do not also turn on
     Persona's organization-wide auto redaction: it cannot skip a held ID.
   - `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`
+  - Settlement (cashback refunds and host payouts), off by default:
+    `SETTLEMENT_ENABLED`, `SETTLEMENT_STARTS_ON` (required when enabled; stays
+    that ended earlier are never settled), `PLATFORM_FEE_PERCENT` (default 12),
+    `SETTLEMENT_INTERVAL` (default 1h), `SETTLEMENT_BATCH` (default 50) and
+    `PAYOUTS_WEB_URL` (the web origin hosts return to after Stripe onboarding)
   - `S3_ENDPOINT`, `S3_BUCKET`, `S3_REGION`, `S3_ACCESS_KEY_ID`,
     `S3_SECRET_ACCESS_KEY` — listing photos and cashback photos; optional
     `S3_URL_STYLE=path` for path-style buckets. Profile banners upload from the
@@ -124,8 +132,9 @@ Create a second Railway service from the same repo.
     public (rounded) coordinates. Without the key the route is not mounted
     and the server logs a warning at startup; the web app then falls back to
     name search. The free plan allows 3,000 credits a day and requires
-    Geoapify and OpenStreetMap attribution next to the results. Answers are
-    cached in memory for 24 hours per stay and category.
+    Geoapify and OpenStreetMap attribution; the web app shows both under the
+    map's info button. Answers are cached in memory for 24 hours per stay and
+    category.
   - `PORT`, optional `LOG_LEVEL`
   - Firebase variables and `BASE_URL` are no longer read and must not be set.
 - **Health checks:** point Railway's healthcheck at `GET /ready` (checks the
@@ -231,3 +240,30 @@ Railway. Each migration's `-- +goose Down` block exists for local
 development only; in an emergency, write and test the compensating forward
 migration against the disposable test database (`go run ./cmd/dev test`),
 then ship it through the migrate service like any other change.
+
+## Settlement
+
+A stay settles 72 hours after checkout, taken as 18:00 UTC on `ends_on`. The job
+refunds the guest's cashback, then transfers the charge minus the platform fee
+and cashback to the host. Fee and amounts are fixed the first time a booking is
+processed.
+
+Before turning it on:
+
+- Enable Connect in the Stripe Dashboard and test the whole flow in a sandbox.
+- Keep enough platform balance for refunds, for example by using manual payouts.
+- Ask Stripe how long the platform may hold funds for bookings made far ahead.
+
+A booking with status `awaiting_host` has refunded the guest and is waiting for
+the host to finish Stripe onboarding. It is retried on every run.
+
+A booking with status `blocked` needs a person: the payment is disputed, was
+refunded by hand, or its refund failed. `reason` says which. Nothing retries it
+until the row is fixed with the migration role:
+
+```sql
+SELECT booking_id, reason FROM app.booking_settlements WHERE status = 'blocked';
+```
+
+Not handled automatically: disputes or refund failures that arrive after a
+booking is `settled`, and cancellations after the guest has been charged.

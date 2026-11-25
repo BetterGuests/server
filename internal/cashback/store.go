@@ -25,12 +25,12 @@ func (store *PostgresCashbackStore) BookingState(ctx context.Context, actingID, 
 	state := BookingState{BookingID: bookingID}
 	err := db.WithUserTx(ctx, store.DB, actingID.String(), func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx,
-			`SELECT b.status, COALESCE(p.stripe_payment_intent_id, ''), COALESCE(p.status, '')
+			`SELECT b.status, COALESCE(p.stripe_payment_intent_id, ''), COALESCE(p.status, ''), COALESCE(p.amount_cents, 0), b.ends_on
 			 FROM app.bookings b
 			 LEFT JOIN app.payments p ON p.booking_id = b.id
 			 WHERE b.id = $1 AND b.guest_id = $2`,
 			bookingID, actingID,
-		).Scan(&state.BookingStatus, &state.PaymentIntentID, &state.PaymentStatus)
+		).Scan(&state.BookingStatus, &state.PaymentIntentID, &state.PaymentStatus, &state.AmountCents, &state.EndsOn)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return BookingState{}, ErrBookingNotFound
@@ -124,12 +124,13 @@ func (store *PostgresCashbackStore) HostBooking(ctx context.Context, hostID, boo
 	booking := HostBooking{BookingID: bookingID}
 	err := db.WithUserTx(ctx, store.DB, hostID.String(), func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx,
-			`SELECT b.guest_id, l.title
+			`SELECT b.guest_id, l.title, b.ends_on, COALESCE(p.amount_cents, 0)
 			 FROM app.bookings b
 			 JOIN app.listings l ON l.id = b.listing_id
+			 LEFT JOIN app.payments p ON p.booking_id = b.id AND p.status = 'succeeded'
 			 WHERE b.id = $1 AND l.host_id = $2`,
 			bookingID, hostID,
-		).Scan(&booking.GuestID, &booking.ListingTitle)
+		).Scan(&booking.GuestID, &booking.ListingTitle, &booking.EndsOn, &booking.AmountCents)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return HostBooking{}, ErrBookingNotFound
@@ -140,7 +141,7 @@ func (store *PostgresCashbackStore) HostBooking(ctx context.Context, hostID, boo
 	return booking, nil
 }
 
-func (store *PostgresCashbackStore) ListPendingForHost(ctx context.Context, hostID uuid.UUID) ([]Submission, error) {
+func (store *PostgresCashbackStore) ListPendingForHost(ctx context.Context, hostID uuid.UUID, earliestEndsOn time.Time) ([]Submission, error) {
 	submissions := []Submission{}
 	err := db.WithUserTx(ctx, store.DB, hostID.String(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
@@ -148,10 +149,10 @@ func (store *PostgresCashbackStore) ListPendingForHost(ctx context.Context, host
 			 FROM app.booking_task_submissions s
 			 JOIN app.bookings b ON b.id = s.booking_id
 			 JOIN app.listings l ON l.id = b.listing_id
-			 WHERE s.status = 'checking' AND l.host_id = $1
+			 WHERE s.status = 'checking' AND l.host_id = $1 AND b.ends_on >= $2
 			 ORDER BY s.created_at
 			 LIMIT 200`,
-			hostID)
+			hostID, earliestEndsOn)
 		if err != nil {
 			return err
 		}
@@ -176,16 +177,15 @@ func (store *PostgresCashbackStore) LoadReviewTarget(ctx context.Context, acting
 	err := db.WithUserTx(ctx, store.DB, actingID.String(), func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx,
 			`SELECT s.id, s.booking_id, s.guest_id, s.task_key, s.photo_url, s.status, COALESCE(s.note, ''), s.reviewed_at,
-			        s.created_at, s.updated_at, l.host_id, COALESCE(p.stripe_payment_intent_id, '')
+			        s.created_at, s.updated_at, l.host_id, b.ends_on
 			 FROM app.booking_task_submissions s
 			 JOIN app.bookings b ON b.id = s.booking_id
 			 JOIN app.listings l ON l.id = b.listing_id
-			 LEFT JOIN app.payments p ON p.booking_id = b.id AND p.status = 'succeeded'
 			 WHERE s.id = $1`,
 			submissionID,
 		).Scan(&target.Submission.ID, &target.Submission.BookingID, &target.Submission.GuestID, &target.Submission.TaskKey,
 			&target.Submission.PhotoURL, &target.Submission.Status, &target.Submission.Note, &target.Submission.ReviewedAt,
-			&target.Submission.CreatedAt, &target.Submission.UpdatedAt, &target.HostID, &target.PaymentIntentID)
+			&target.Submission.CreatedAt, &target.Submission.UpdatedAt, &target.HostID, &target.EndsOn)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ReviewTarget{}, ErrSubmissionNotFound
@@ -213,68 +213,23 @@ func (store *PostgresCashbackStore) ApplyReview(ctx context.Context, actingID, s
 	})
 }
 
-func (store *PostgresCashbackStore) ApprovedTaskKeys(ctx context.Context, actingID, bookingID uuid.UUID) ([]string, error) {
-	var keys []string
+func (store *PostgresCashbackStore) Settlement(ctx context.Context, actingID, bookingID uuid.UUID) (SettlementState, error) {
+	var state SettlementState
 	err := db.WithUserTx(ctx, store.DB, actingID.String(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx,
-			`SELECT task_key FROM app.booking_task_submissions WHERE booking_id = $1 AND status = 'approved'`, bookingID)
-		if err != nil {
-			return err
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var key string
-			if err := rows.Scan(&key); err != nil {
-				return err
-			}
-			keys = append(keys, key)
-		}
-		return rows.Err()
-	})
-	if err != nil {
-		return nil, fmt.Errorf("approved task keys: %w", err)
-	}
-	return keys, nil
-}
-
-func (store *PostgresCashbackStore) ReserveRefund(ctx context.Context, actingID uuid.UUID, refund Refund) (Refund, bool, error) {
-	var reserved Refund
-	created := true
-	err := db.WithUserTx(ctx, store.DB, actingID.String(), func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx,
-			`INSERT INTO app.booking_bundle_refunds (id, booking_id, guest_id, bundle_key, amount_cents, status, created_at, updated_at)
-			 VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7)
-			 ON CONFLICT (booking_id, bundle_key) DO NOTHING`,
-			refund.ID, refund.BookingID, refund.GuestID, refund.BundleKey, refund.AmountCents, refund.CreatedAt, refund.UpdatedAt)
-		if err != nil {
-			return fmt.Errorf("insert refund: %w", err)
-		}
-		created = tag.RowsAffected() == 1
 		return tx.QueryRow(ctx,
-			`SELECT id, booking_id, guest_id, bundle_key, amount_cents, status, COALESCE(stripe_refund_id, ''), created_at, updated_at
-			 FROM app.booking_bundle_refunds WHERE booking_id = $1 AND bundle_key = $2`,
-			refund.BookingID, refund.BundleKey,
-		).Scan(&reserved.ID, &reserved.BookingID, &reserved.GuestID, &reserved.BundleKey, &reserved.AmountCents,
-			&reserved.Status, &reserved.StripeRefundID, &reserved.CreatedAt, &reserved.UpdatedAt)
+			`SELECT status,
+			        CASE WHEN stripe_refund_id IS NOT NULL AND status <> 'blocked' THEN refund_due_cents ELSE 0 END
+			 FROM app.booking_settlements WHERE booking_id = $1`,
+			bookingID,
+		).Scan(&state.Status, &state.RefundedCents)
 	})
-	if err != nil {
-		return Refund{}, false, err
+	if errors.Is(err, pgx.ErrNoRows) {
+		return SettlementState{}, nil
 	}
-	return reserved, created, nil
-}
-
-func (store *PostgresCashbackStore) SettleRefund(ctx context.Context, actingID, refundID uuid.UUID, status RefundStatus, stripeRefundID string, at time.Time) error {
-	return db.WithUserTx(ctx, store.DB, actingID.String(), func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx,
-			`UPDATE app.booking_bundle_refunds
-			 SET status = $2, stripe_refund_id = NULLIF($3, ''), updated_at = $4
-			 WHERE id = $1 AND status <> 'succeeded'`,
-			refundID, string(status), stripeRefundID, at)
-		if err != nil {
-			return fmt.Errorf("settle refund: %w", err)
-		}
-		return nil
-	})
+	if err != nil {
+		return SettlementState{}, fmt.Errorf("load settlement: %w", err)
+	}
+	return state, nil
 }
 
 func scanSubmission(submission *Submission) []any {

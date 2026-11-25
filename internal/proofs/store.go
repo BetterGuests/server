@@ -120,9 +120,17 @@ func (s *PostgresProofStore) ListSubmitted(ctx context.Context, adminID uuid.UUI
 		rows, err := tx.Query(ctx, `
 			SELECT `+proofColumns+`,
 				l.title, coalesce(l.address_line1, ''), coalesce(l.address_line2, ''), l.city,
-				coalesce(l.region, ''), coalesce(l.postal_code, ''), l.country_code
+				coalesce(l.region, ''), coalesce(l.postal_code, ''), l.country_code,
+				coalesce(n.first_name, ''), coalesce(n.middle_name, ''), coalesce(n.last_name, ''), coalesce(n.suffix, '')
 			FROM app.property_proofs p
 			JOIN app.listings l ON l.id = p.listing_id
+			LEFT JOIN LATERAL (
+				SELECT first_name, middle_name, last_name, suffix
+				FROM app.identity_names
+				WHERE account_id = p.host_id
+				ORDER BY verified_at DESC, verification_id
+				LIMIT 1
+			) n ON true
 			WHERE p.status = 'submitted'
 			ORDER BY p.created_at, p.id
 			LIMIT 200`)
@@ -134,7 +142,8 @@ func (s *PostgresProofStore) ListSubmitted(ctx context.Context, adminID uuid.UUI
 			var item ReviewItem
 			proof, err := scanProof(rows,
 				&item.ListingTitle, &item.AddressLine1, &item.AddressLine2, &item.City,
-				&item.Region, &item.PostalCode, &item.CountryCode)
+				&item.Region, &item.PostalCode, &item.CountryCode,
+				&item.IDFirstName, &item.IDMiddleName, &item.IDLastName, &item.IDNameSuffix)
 			if err != nil {
 				return fmt.Errorf("scan submitted proof: %w", err)
 			}

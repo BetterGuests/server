@@ -10,16 +10,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// PostgresAccountStore provisions rows in app.accounts.
 type PostgresAccountStore struct{ DB *pgxpool.Pool }
 
-// NewPostgresAccountStore returns an account store backed by pool.
 func NewPostgresAccountStore(pool *pgxpool.Pool) *PostgresAccountStore {
 	return &PostgresAccountStore{DB: pool}
 }
 
-// Ensure creates the account row for an already-verified identity. It is
-// idempotent because every authenticated request calls it before a handler runs.
 func (store *PostgresAccountStore) Ensure(ctx context.Context, account Account) error {
 	return db.WithUserTx(ctx, store.DB, account.ID.String(), func(tx pgx.Tx) error {
 		if _, err := tx.Exec(
@@ -47,4 +43,17 @@ func (store *PostgresAccountStore) Remember(ctx context.Context, accountID uuid.
 		}
 		return nil
 	})
+}
+
+func (store *PostgresAccountStore) ClerkUserID(ctx context.Context, accountID uuid.UUID) (string, error) {
+	var clerkUserID string
+	err := db.WithUserTx(ctx, store.DB, accountID.String(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT COALESCE(clerk_user_id, '') FROM app.accounts WHERE id = $1`, accountID,
+		).Scan(&clerkUserID)
+	})
+	if err != nil {
+		return "", fmt.Errorf("look up clerk user id: %w", err)
+	}
+	return clerkUserID, nil
 }

@@ -18,6 +18,10 @@ const (
 
 var ErrNoDisplayName = errors.New("clerk user has no name")
 
+var ErrNoVerifiedEmail = errors.New("clerk user has no verified primary email")
+
+const verifiedStatus = "verified"
+
 type userGetter interface {
 	Get(ctx context.Context, id string) (*clerk.User, error)
 }
@@ -44,6 +48,20 @@ func (fetcher *ClerkNameFetcher) DisplayName(ctx context.Context, clerkUserID st
 		return namePlaceholder, ErrNoDisplayName
 	}
 	return name, nil
+}
+
+func (fetcher *ClerkNameFetcher) VerifiedEmail(ctx context.Context, clerkUserID string) (string, error) {
+	profile, err := fetcher.users.Get(ctx, clerkUserID)
+	if err != nil {
+		return "", fmt.Errorf("fetch clerk user: %w", err)
+	}
+	primary := deref(profile.PrimaryEmailAddressID)
+	for _, address := range profile.EmailAddresses {
+		if address.ID == primary && address.Verification != nil && address.Verification.Status == verifiedStatus {
+			return address.EmailAddress, nil
+		}
+	}
+	return "", ErrNoVerifiedEmail
 }
 
 func PublicName(first, last string) string {

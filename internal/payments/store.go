@@ -133,3 +133,40 @@ func (store *PostgresPaymentStore) HoldForBooking(ctx context.Context, actorID, 
 	}
 	return hold, true, nil
 }
+
+func (store *PostgresPaymentStore) CustomerID(ctx context.Context, accountID uuid.UUID) (string, bool, error) {
+	var customerID string
+	err := db.WithUserTx(ctx, store.DB, accountID.String(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT stripe_customer_id FROM app.stripe_customers WHERE account_id = $1`, accountID,
+		).Scan(&customerID)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("select stripe customer: %w", err)
+	}
+	return customerID, true, nil
+}
+
+func (store *PostgresPaymentStore) SaveCustomerID(ctx context.Context, accountID uuid.UUID, customerID string) (string, error) {
+	var saved string
+	err := db.WithUserTx(ctx, store.DB, accountID.String(), func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO app.accounts (id) VALUES ($1) ON CONFLICT (id) DO NOTHING`, accountID); err != nil {
+			return fmt.Errorf("ensure account: %w", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO app.stripe_customers (account_id, stripe_customer_id) VALUES ($1, $2)
+			 ON CONFLICT (account_id) DO NOTHING`, accountID, customerID); err != nil {
+			return fmt.Errorf("insert stripe customer: %w", err)
+		}
+		return tx.QueryRow(ctx,
+			`SELECT stripe_customer_id FROM app.stripe_customers WHERE account_id = $1`, accountID,
+		).Scan(&saved)
+	})
+	if err != nil {
+		return "", fmt.Errorf("save stripe customer: %w", err)
+	}
+	return saved, nil
+}

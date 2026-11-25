@@ -103,6 +103,34 @@ func (store *PostgresVerificationStore) ApplyStatus(ctx context.Context, account
 	})
 }
 
+func (store *PostgresVerificationStore) SyncIDName(ctx context.Context, accountID uuid.UUID, inquiryID string, name IDName) error {
+	return db.WithUserTx(ctx, store.DB, accountID.String(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`DELETE FROM app.identity_names n USING app.identity_verifications v
+			 WHERE n.verification_id = v.id AND v.account_id = $1 AND v.persona_inquiry_id = $2 AND v.status <> 'completed'`,
+			accountID, inquiryID)
+		if err != nil {
+			return fmt.Errorf("remove ID name: %w", err)
+		}
+		if name.First == "" && name.Last == "" {
+			return nil
+		}
+		_, err = tx.Exec(ctx,
+			`INSERT INTO app.identity_names (verification_id, account_id, first_name, middle_name, last_name, suffix, verified_at)
+			 SELECT v.id, v.account_id, $3, $4, $5, $6, COALESCE(v.last_event_at, v.updated_at)
+			 FROM app.identity_verifications v
+			 WHERE v.account_id = $1 AND v.persona_inquiry_id = $2 AND v.status = 'completed' AND v.deletion_requested_at IS NULL AND v.redacted_at IS NULL
+			 ON CONFLICT (verification_id) DO UPDATE
+			 SET first_name = EXCLUDED.first_name, middle_name = EXCLUDED.middle_name, last_name = EXCLUDED.last_name,
+			     suffix = EXCLUDED.suffix, verified_at = EXCLUDED.verified_at, updated_at = now()`,
+			accountID, inquiryID, name.First, name.Middle, name.Last, name.Suffix)
+		if err != nil {
+			return fmt.Errorf("save ID name: %w", err)
+		}
+		return nil
+	})
+}
+
 func (store *PostgresVerificationStore) ListDueForRedaction(ctx context.Context, retentionDays, holdCapDays, batchSize int) ([]DueVerification, error) {
 	rows, err := store.DB.Query(ctx,
 		`SELECT id, account_id, persona_inquiry_id FROM app.identity_verifications_due_for_redaction($1, $2, $3)`,

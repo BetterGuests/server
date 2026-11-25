@@ -1,9 +1,11 @@
 package listings
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -181,6 +183,61 @@ func TestPublicGetHTTPReturnsSignedListing(t *testing.T) {
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "sig=1") {
 		t.Fatalf("expected 200 with signed photo, got %d: %s", response.Code, response.Body.String())
 	}
+}
+
+func TestListingHTTPLogsCauseOfServerErrorsWithoutExposingIt(t *testing.T) {
+	cause := errors.New("column l.published_at does not exist")
+	failing := &publishedReaderStub{err: cause}
+	id := uuid.New().String()
+
+	cases := map[string]func(*HTTPHandler, http.ResponseWriter){
+		"list published listings": func(handler *HTTPHandler, w http.ResponseWriter) {
+			handler.ListListings(w, httptest.NewRequest(http.MethodGet, "/api/v1/listings", nil))
+		},
+		"get published listing": func(handler *HTTPHandler, w http.ResponseWriter) {
+			request := httptest.NewRequest(http.MethodGet, "/api/v1/listings/"+id, nil)
+			request.SetPathValue("listing_id", id)
+			handler.GetListing(w, request)
+		},
+		"create listing": func(handler *HTTPHandler, w http.ResponseWriter) {
+			handler.CreateListing(w, listingRequest("{}"))
+		},
+	}
+
+	for operation, call := range cases {
+		t.Run(operation, func(t *testing.T) {
+			logs := captureLogs(t)
+			handler := NewHTTPHandler(failingCreatorStub{err: cause}).WithPublicReader(failing)
+			response := httptest.NewRecorder()
+
+			call(handler, response)
+
+			if response.Code != http.StatusInternalServerError {
+				t.Fatalf("expected 500, got %d: %s", response.Code, response.Body.String())
+			}
+			if strings.Contains(response.Body.String(), cause.Error()) {
+				t.Fatalf("response exposed the cause: %s", response.Body.String())
+			}
+			if !strings.Contains(logs.String(), operation) || !strings.Contains(logs.String(), cause.Error()) {
+				t.Fatalf("expected %q and its cause in the log, got %q", operation, logs.String())
+			}
+		})
+	}
+}
+
+type failingCreatorStub struct{ err error }
+
+func (stub failingCreatorStub) CreateListing(context.Context, uuid.UUID, CreateListingInput) (Listing, error) {
+	return Listing{}, stub.err
+}
+
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	buffer := &bytes.Buffer{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buffer, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return buffer
 }
 
 func publicHandler(reader PublicListingReader) *HTTPHandler {

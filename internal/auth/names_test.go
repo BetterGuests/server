@@ -68,3 +68,28 @@ func TestDisplayNameWrapsClerkFailures(t *testing.T) {
 		t.Fatalf("expected wrapped clerk error, got %v", err)
 	}
 }
+
+func TestVerifiedEmailReturnsOnlyAVerifiedPrimaryAddress(t *testing.T) {
+	primary := "idn_1"
+	address := func(id, status string) *clerk.EmailAddress {
+		return &clerk.EmailAddress{ID: id, EmailAddress: id + "@example.com", Verification: &clerk.Verification{Status: status}}
+	}
+	cases := map[string]struct {
+		addresses []*clerk.EmailAddress
+		want      string
+	}{
+		"verified primary":            {[]*clerk.EmailAddress{address("idn_2", "verified"), address("idn_1", "verified")}, "idn_1@example.com"},
+		"unverified primary":          {[]*clerk.EmailAddress{address("idn_1", "unverified"), address("idn_2", "verified")}, ""},
+		"primary without a check":     {[]*clerk.EmailAddress{{ID: "idn_1", EmailAddress: "a@example.com"}}, ""},
+		"no addresses on the profile": {nil, ""},
+	}
+	for name, test := range cases {
+		t.Run(name, func(t *testing.T) {
+			fetcher := &ClerkNameFetcher{users: userGetterStub{user: &clerk.User{PrimaryEmailAddressID: &primary, EmailAddresses: test.addresses}}}
+			email, err := fetcher.VerifiedEmail(context.Background(), "user_1")
+			if email != test.want || (test.want == "") != errors.Is(err, ErrNoVerifiedEmail) {
+				t.Fatalf("email = %q, err = %v", email, err)
+			}
+		})
+	}
+}

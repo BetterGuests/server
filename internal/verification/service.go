@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -21,6 +22,9 @@ const (
 	BiometricConsentKind  = "biometric"
 	DefaultPersonaBaseURL = "https://api.withpersona.com"
 	SignatureTolerance    = 5 * time.Minute
+	governmentIDType      = "verification/government-id"
+	passedCheckStatus     = "passed"
+	maxNamePartLength     = 200
 )
 
 var (
@@ -155,6 +159,12 @@ func (service *VerificationService) HandleWebhook(ctx context.Context, signature
 	if err != nil {
 		return fmt.Errorf("apply %s: %w", event.Name, err)
 	}
+	if status == StatusCompleted && event.IDName == (IDName{}) {
+		slog.Warn("Persona event has no government ID name", "event", event.Name, "inquiry_id", event.InquiryID)
+	}
+	if err := service.store.SyncIDName(ctx, event.AccountID, event.InquiryID, event.IDName); err != nil {
+		return fmt.Errorf("sync ID name for %s: %w", event.Name, err)
+	}
 	return nil
 }
 
@@ -203,6 +213,50 @@ func parseSignatureHeader(header string) (string, []string) {
 	return timestamp, signatures
 }
 
+type includedObject struct {
+	Type       string          `json:"type"`
+	Attributes json.RawMessage `json:"attributes"`
+}
+
+type governmentIDAttributes struct {
+	Status string `json:"status"`
+	First  string `json:"name-first"`
+	Middle string `json:"name-middle"`
+	Last   string `json:"name-last"`
+	Suffix string `json:"name-suffix"`
+}
+
+func governmentIDName(included []includedObject) IDName {
+	var name IDName
+	for _, object := range included {
+		if object.Type != governmentIDType {
+			continue
+		}
+		var attributes governmentIDAttributes
+		if json.Unmarshal(object.Attributes, &attributes) != nil || attributes.Status != passedCheckStatus {
+			continue
+		}
+		candidate := IDName{
+			First:  namePart(attributes.First),
+			Middle: namePart(attributes.Middle),
+			Last:   namePart(attributes.Last),
+			Suffix: namePart(attributes.Suffix),
+		}
+		if candidate.First != "" || candidate.Last != "" {
+			name = candidate
+		}
+	}
+	return name
+}
+
+func namePart(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if utf8.RuneCountInString(trimmed) > maxNamePartLength {
+		return ""
+	}
+	return trimmed
+}
+
 type webhookEnvelope struct {
 	Data struct {
 		Attributes struct {
@@ -216,6 +270,7 @@ type webhookEnvelope struct {
 						ReferenceID string `json:"reference-id"`
 					} `json:"attributes"`
 				} `json:"data"`
+				Included []includedObject `json:"included"`
 			} `json:"payload"`
 		} `json:"attributes"`
 	} `json:"data"`
@@ -248,6 +303,9 @@ func parseWebhookEvent(body []byte, signedAt time.Time) (WebhookEvent, error) {
 	}
 	event.InquiryID = inquiry.ID
 	event.AccountID = accountID
+	if eventStatuses[attributes.Name] == StatusCompleted {
+		event.IDName = governmentIDName(attributes.Payload.Included)
+	}
 	return event, nil
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -41,6 +42,8 @@ type PaymentService struct {
 	parser     EventParser
 	controller IntentController
 	publisher  Publisher
+	wallet     Wallet
+	customers  CustomerStore
 	currency   string
 	now        func() time.Time
 	newID      func() uuid.UUID
@@ -87,6 +90,41 @@ func (service *PaymentService) WithPublisher(publisher Publisher) *PaymentServic
 	return service
 }
 
+func (service *PaymentService) WithSavedCards(wallet Wallet, customers CustomerStore) *PaymentService {
+	service.wallet = wallet
+	service.customers = customers
+	return service
+}
+
+func (service *PaymentService) savedCards(ctx context.Context, accountID uuid.UUID) (customerID, session string) {
+	if service.wallet == nil || service.customers == nil {
+		return "", ""
+	}
+	customerID, err := service.customerFor(ctx, accountID)
+	if err != nil {
+		slog.Warn("Saved cards are unavailable", "error", err)
+		return "", ""
+	}
+	session, err = service.wallet.CreateCustomerSession(ctx, customerID)
+	if err != nil {
+		slog.Warn("Saved cards are unavailable", "error", err)
+		return customerID, ""
+	}
+	return customerID, session
+}
+
+func (service *PaymentService) customerFor(ctx context.Context, accountID uuid.UUID) (string, error) {
+	existing, found, err := service.customers.CustomerID(ctx, accountID)
+	if err != nil || found {
+		return existing, err
+	}
+	created, err := service.wallet.CreateCustomer(ctx, accountID)
+	if err != nil {
+		return "", err
+	}
+	return service.customers.SaveCustomerID(ctx, accountID, created)
+}
+
 func (service *PaymentService) Capture(ctx context.Context, actorID, bookingID uuid.UUID) error {
 	hold, found, err := service.store.HoldForBooking(ctx, actorID, bookingID)
 	if err != nil {
@@ -131,13 +169,15 @@ func (service *PaymentService) StartCheckout(ctx context.Context, guestID, booki
 	}
 
 	amount := quote.Nights * quote.NightlyPriceCents
+	customerID, customerSession := service.savedCards(ctx, guestID)
 	intent, err := service.intents.CreateIntent(ctx, IntentParams{
 		AmountCents:    amount,
 		Currency:       service.currency,
 		BookingID:      bookingID,
 		GuestID:        guestID,
-		IdempotencyKey: "booking-" + bookingID.String() + "-" + fmt.Sprint(amount) + "-" + fmt.Sprint(holdOnly),
+		IdempotencyKey: "booking-" + bookingID.String() + "-" + fmt.Sprint(amount) + "-" + fmt.Sprint(holdOnly) + customerID,
 		ManualCapture:  holdOnly,
+		CustomerID:     customerID,
 	})
 	if err != nil {
 		return CheckoutResult{}, fmt.Errorf("create payment intent: %w", err)
@@ -167,6 +207,7 @@ func (service *PaymentService) StartCheckout(ctx context.Context, guestID, booki
 		ClientSecret:    intent.ClientSecret,
 		AmountCents:     amount,
 		Currency:        service.currency,
+		CustomerSession: customerSession,
 	}, nil
 }
 

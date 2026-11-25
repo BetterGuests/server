@@ -68,6 +68,9 @@ func (s *PostgresListingStore) Publish(ctx context.Context, userID string, listi
 		if err := requireApprovedProof(ctx, tx, listingID); err != nil {
 			return err
 		}
+		if err := requirePriceAndPhoto(ctx, tx, listingID); err != nil {
+			return err
+		}
 		_, err = tx.Exec(ctx, `UPDATE app.listings SET status = 'published', published_at = coalesce(published_at, now()), updated_at = now() WHERE id = $1`, listingID)
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolationCode {
@@ -442,4 +445,153 @@ func attachRules(ctx context.Context, tx pgx.Tx, listings []PublicListing, ids [
 		listings[index].Rules = append(listings[index].Rules, rule)
 	}
 	return rows.Err()
+}
+
+func requirePriceAndPhoto(ctx context.Context, tx pgx.Tx, listingID uuid.UUID) error {
+	var priced, pictured bool
+	err := tx.QueryRow(ctx, `
+		SELECT l.nightly_price_cents IS NOT NULL,
+		       EXISTS (SELECT 1 FROM app.listing_photos p WHERE p.listing_id = l.id)
+		FROM app.listings l WHERE l.id = $1 FOR UPDATE`, listingID).Scan(&priced, &pictured)
+	if err != nil {
+		return fmt.Errorf("check price and photos: %w", err)
+	}
+	if !priced {
+		return ErrPriceRequired
+	}
+	if !pictured {
+		return ErrPhotoRequired
+	}
+	return nil
+}
+
+func requireOwnedListing(ctx context.Context, tx pgx.Tx, userID string, listingID uuid.UUID) (Setup, error) {
+	var hostID uuid.UUID
+	setup := Setup{Photos: []ListingPhoto{}}
+	err := tx.QueryRow(ctx,
+		`SELECT host_id, status, COALESCE(nightly_price_cents, 0) FROM app.listings WHERE id = $1`, listingID,
+	).Scan(&hostID, &setup.Status, &setup.NightlyPriceCents)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Setup{}, ErrListingNotFound
+	}
+	if err != nil {
+		return Setup{}, fmt.Errorf("find listing: %w", err)
+	}
+	if hostID.String() != userID {
+		return Setup{}, ErrNotListingOwner
+	}
+	return setup, nil
+}
+
+func lockOwnedListing(ctx context.Context, tx pgx.Tx, userID string, listingID uuid.UUID) (ListingStatus, error) {
+	if _, err := requireOwnedListing(ctx, tx, userID, listingID); err != nil {
+		return "", err
+	}
+	var status ListingStatus
+	if err := tx.QueryRow(ctx, `SELECT status FROM app.listings WHERE id = $1 FOR UPDATE`, listingID).Scan(&status); err != nil {
+		return "", fmt.Errorf("lock listing: %w", err)
+	}
+	return status, nil
+}
+
+func (s *PostgresListingStore) Setup(ctx context.Context, userID string, listingID uuid.UUID) (Setup, error) {
+	var setup Setup
+	err := db.WithUserTx(ctx, s.DB, userID, func(tx pgx.Tx) error {
+		found, err := requireOwnedListing(ctx, tx, userID, listingID)
+		if err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, `
+			SELECT id, object_key, coalesce(alt_text, ''), position
+			FROM app.listing_photos WHERE listing_id = $1 ORDER BY position`, listingID)
+		if err != nil {
+			return fmt.Errorf("query listing photos: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var photo ListingPhoto
+			if err := rows.Scan(&photo.ID, &photo.ObjectKey, &photo.AltText, &photo.Position); err != nil {
+				return fmt.Errorf("scan listing photo: %w", err)
+			}
+			found.Photos = append(found.Photos, photo)
+		}
+		setup = found
+		return rows.Err()
+	})
+	if err != nil {
+		return Setup{}, err
+	}
+	return setup, nil
+}
+
+func (s *PostgresListingStore) AddPhoto(ctx context.Context, userID string, listingID uuid.UUID, photo ListingPhoto) error {
+	return db.WithUserTx(ctx, s.DB, userID, func(tx pgx.Tx) error {
+		if _, err := lockOwnedListing(ctx, tx, userID, listingID); err != nil {
+			return err
+		}
+		var count, next int
+		var duplicate bool
+		if err := tx.QueryRow(ctx, `
+			SELECT count(*), coalesce(max(position) + 1, 0), coalesce(bool_or(object_key = $2), false)
+			FROM app.listing_photos WHERE listing_id = $1`, listingID, photo.ObjectKey,
+		).Scan(&count, &next, &duplicate); err != nil {
+			return fmt.Errorf("count listing photos: %w", err)
+		}
+		if duplicate {
+			return ErrPhotoAlreadyAdded
+		}
+		if count >= maxPhotos {
+			return ErrTooManyPhotos
+		}
+		photo.Position = next
+		return insertListingPhotos(ctx, tx, listingID, []ListingPhoto{photo})
+	})
+}
+
+func (s *PostgresListingStore) RemovePhoto(ctx context.Context, userID string, listingID, photoID uuid.UUID) (string, error) {
+	var key string
+	err := db.WithUserTx(ctx, s.DB, userID, func(tx pgx.Tx) error {
+		status, err := lockOwnedListing(ctx, tx, userID, listingID)
+		if err != nil {
+			return err
+		}
+		err = tx.QueryRow(ctx,
+			`DELETE FROM app.listing_photos WHERE id = $1 AND listing_id = $2 RETURNING object_key`, photoID, listingID,
+		).Scan(&key)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrPhotoNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("delete listing photo: %w", err)
+		}
+		if status != Published {
+			return nil
+		}
+		var remaining int
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM app.listing_photos WHERE listing_id = $1`, listingID).Scan(&remaining); err != nil {
+			return fmt.Errorf("count listing photos: %w", err)
+		}
+		if remaining == 0 {
+			return ErrLastPhoto
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return key, nil
+}
+
+func (s *PostgresListingStore) SetPrice(ctx context.Context, userID string, listingID uuid.UUID, nightlyCents int) error {
+	return db.WithUserTx(ctx, s.DB, userID, func(tx pgx.Tx) error {
+		if _, err := lockOwnedListing(ctx, tx, userID, listingID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE app.listings SET nightly_price_cents = $2, updated_at = now() WHERE id = $1`, listingID, nightlyCents,
+		); err != nil {
+			return fmt.Errorf("set nightly price: %w", err)
+		}
+		return nil
+	})
 }

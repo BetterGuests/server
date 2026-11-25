@@ -47,6 +47,13 @@ type Verification struct {
 	UpdatedAt        time.Time `json:"updated_at"`
 }
 
+type IDName struct {
+	First  string
+	Middle string
+	Last   string
+	Suffix string
+}
+
 type Inquiry struct {
 	ID           string
 	SessionToken string
@@ -65,6 +72,7 @@ type WebhookEvent struct {
 	InquiryID  string
 	AccountID  uuid.UUID
 	OccurredAt time.Time
+	IDName     IDName
 }
 
 type InquiryCreator interface {
@@ -83,6 +91,7 @@ type Store interface {
 	HasCompleted(ctx context.Context, accountID uuid.UUID) (bool, error)
 	Create(ctx context.Context, verification Verification) error
 	ApplyStatus(ctx context.Context, accountID uuid.UUID, inquiryID string, status Status, occurredAt time.Time) error
+	SyncIDName(ctx context.Context, accountID uuid.UUID, inquiryID string, name IDName) error
 }
 
 type StatusResponse struct {

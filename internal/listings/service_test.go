@@ -23,7 +23,7 @@ func (store *listingStoreStub) Create(_ context.Context, userID string, listing 
 }
 
 func validCreateInput() CreateListingInput {
-	return CreateListingInput{Title: "Desert House", Description: "A quiet and comfortable desert house.", Address: Address{Line1: "1 Main St", City: "Phoenix", CountryCode: "us", Latitude: 33.45, Longitude: -112.07}, Type: EntirePlace, PropertyType: House, MaxGuests: 4, MinimumAgeToBook: 21, Bedrooms: 2, Beds: 2, Bathrooms: 1.5, Amenities: []Amenity{WiFi, KitchenAmenity, WiFi}, Photos: []CreateListingPhotoInput{{ObjectKey: "listing/photo.jpg", Position: 0}}, Rules: []HouseRule{{Title: "No smoking"}}}
+	return CreateListingInput{Title: "Desert House", Description: "A quiet and comfortable desert house.", Address: Address{Line1: "1 Main St", City: "Phoenix", CountryCode: "us", Latitude: 33.45, Longitude: -112.07}, Type: EntirePlace, PropertyType: House, MaxGuests: 4, MinimumAgeToBook: 21, Bedrooms: 2, Beds: 2, Bathrooms: 1.5, Amenities: []Amenity{WiFi, KitchenAmenity, WiFi}, Rules: []HouseRule{{Title: "No smoking"}}}
 }
 
 func TestCreateListing(t *testing.T) {
@@ -31,8 +31,7 @@ func TestCreateListing(t *testing.T) {
 	service := NewListingService(store)
 	hostID := uuid.MustParse("11111111-1111-4111-8111-111111111111")
 	listingID := uuid.MustParse("22222222-2222-4222-8222-222222222222")
-	photoID := uuid.MustParse("33333333-3333-4333-8333-333333333333")
-	ids := []uuid.UUID{listingID, photoID}
+	ids := []uuid.UUID{listingID}
 	service.newID = func() uuid.UUID { id := ids[0]; ids = ids[1:]; return id }
 	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.FixedZone("test", -7*60*60))
 	service.now = func() time.Time { return now }
@@ -50,7 +49,7 @@ func TestCreateListing(t *testing.T) {
 	if !reflect.DeepEqual(listing.Amenities, []Amenity{WiFi, KitchenAmenity}) {
 		t.Fatalf("unexpected amenities: %#v", listing.Amenities)
 	}
-	if len(listing.Photos) != 1 || listing.Photos[0].ID != photoID {
+	if len(listing.Photos) != 0 {
 		t.Fatalf("unexpected photos: %#v", listing.Photos)
 	}
 	if store.userID != hostID.String() || store.saved.ID != listing.ID {
@@ -76,5 +75,3 @@ func TestCreateListingReturnsStoreError(t *testing.T) {
 		t.Fatalf("expected store error, got %v", err)
 	}
 }
-
-// WE need all the other tests and functions here for listin.

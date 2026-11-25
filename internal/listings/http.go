@@ -24,10 +24,19 @@ type ListingPublisher interface {
 	PublishListing(ctx context.Context, hostID, listingID uuid.UUID) error
 }
 
+type MediaManager interface {
+	Setup(ctx context.Context, hostID, listingID uuid.UUID) (Setup, error)
+	RequestPhotoUpload(ctx context.Context, hostID, listingID uuid.UUID, contentType string, sizeBytes int64) (PhotoTicket, error)
+	AddPhoto(ctx context.Context, hostID, listingID uuid.UUID, key, altText string) (Setup, error)
+	RemovePhoto(ctx context.Context, hostID, listingID, photoID uuid.UUID) (Setup, error)
+	SetPrice(ctx context.Context, hostID, listingID uuid.UUID, nightlyCents int) (Setup, error)
+}
+
 type HTTPHandler struct {
 	listingCreator ListingCreator
 	publisher      ListingPublisher
 	publicReader   PublicListingReader
+	manager        MediaManager
 }
 
 func NewHTTPHandler(listingCreator ListingCreator) *HTTPHandler {
@@ -54,7 +63,8 @@ func (handler *HTTPHandler) PublishListing(w http.ResponseWriter, r *http.Reques
 	switch {
 	case errors.Is(err, ErrListingNotFound):
 		writeListingError(w, http.StatusNotFound, "listing not found")
-	case errors.Is(err, ErrNotListingOwner), errors.Is(err, ErrVerificationRequired), errors.Is(err, ErrProofRequired):
+	case errors.Is(err, ErrNotListingOwner), errors.Is(err, ErrVerificationRequired), errors.Is(err, ErrProofRequired),
+		errors.Is(err, ErrPriceRequired), errors.Is(err, ErrPhotoRequired):
 		writeListingError(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, ErrDuplicateListing):
 		writeListingError(w, http.StatusConflict, err.Error())
@@ -135,6 +145,7 @@ func (handler *HTTPHandler) CreateListing(w http.ResponseWriter, r *http.Request
 	}
 
 	if err != nil {
+		slog.Error("create listing", "error", err)
 		writeListingError(w, http.StatusInternalServerError, "could not create listing")
 		return
 	}
@@ -154,6 +165,7 @@ func writeListingError(w http.ResponseWriter, status int, message string) {
 func (handler *HTTPHandler) ListListings(w http.ResponseWriter, r *http.Request) {
 	listings, err := handler.publicReader.ListPublished(r.Context())
 	if err != nil {
+		slog.Error("list published listings", "error", err)
 		writeListingError(w, http.StatusInternalServerError, "could not load listings")
 		return
 	}
@@ -172,6 +184,7 @@ func (handler *HTTPHandler) GetListing(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
+		slog.Error("get published listing", "error", err, "listing_id", id)
 		writeListingError(w, http.StatusInternalServerError, "could not load listing")
 		return
 	}
@@ -181,6 +194,143 @@ func (handler *HTTPHandler) GetListing(w http.ResponseWriter, r *http.Request) {
 func writePublicJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=60")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+func (handler *HTTPHandler) WithMedia(manager MediaManager) *HTTPHandler {
+	handler.manager = manager
+	return handler
+}
+
+func (handler *HTTPHandler) GetSetup(w http.ResponseWriter, r *http.Request) {
+	hostID, listingID, ok := hostAndListing(w, r)
+	if !ok {
+		return
+	}
+	setup, err := handler.manager.Setup(r.Context(), hostID, listingID)
+	writeMediaResult(w, http.StatusOK, setup, err)
+}
+
+func (handler *HTTPHandler) RequestPhotoUpload(w http.ResponseWriter, r *http.Request) {
+	hostID, listingID, ok := hostAndListing(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		ContentType string `json:"content_type"`
+		SizeBytes   int64  `json:"size_bytes"`
+	}
+	if !decodeMediaBody(w, r, &request) {
+		return
+	}
+	ticket, err := handler.manager.RequestPhotoUpload(r.Context(), hostID, listingID, request.ContentType, request.SizeBytes)
+	writeMediaResult(w, http.StatusCreated, ticket, err)
+}
+
+func (handler *HTTPHandler) AddPhoto(w http.ResponseWriter, r *http.Request) {
+	hostID, listingID, ok := hostAndListing(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		PhotoKey string `json:"photo_key"`
+		AltText  string `json:"alt_text"`
+	}
+	if !decodeMediaBody(w, r, &request) {
+		return
+	}
+	setup, err := handler.manager.AddPhoto(r.Context(), hostID, listingID, request.PhotoKey, request.AltText)
+	writeMediaResult(w, http.StatusCreated, setup, err)
+}
+
+func (handler *HTTPHandler) RemovePhoto(w http.ResponseWriter, r *http.Request) {
+	hostID, listingID, ok := hostAndListing(w, r)
+	if !ok {
+		return
+	}
+	photoID, err := uuid.Parse(r.PathValue("photo_id"))
+	if err != nil {
+		writeListingError(w, http.StatusNotFound, ErrPhotoNotFound.Error())
+		return
+	}
+	setup, err := handler.manager.RemovePhoto(r.Context(), hostID, listingID, photoID)
+	writeMediaResult(w, http.StatusOK, setup, err)
+}
+
+func (handler *HTTPHandler) SetPrice(w http.ResponseWriter, r *http.Request) {
+	hostID, listingID, ok := hostAndListing(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		NightlyCents int `json:"nightly_cents"`
+	}
+	if !decodeMediaBody(w, r, &request) {
+		return
+	}
+	setup, err := handler.manager.SetPrice(r.Context(), hostID, listingID, request.NightlyCents)
+	writeMediaResult(w, http.StatusOK, setup, err)
+}
+
+func hostAndListing(w http.ResponseWriter, r *http.Request) (uuid.UUID, uuid.UUID, bool) {
+	hostID, ok := accounts.UserID(r.Context())
+	if !ok {
+		writeListingError(w, http.StatusUnauthorized, "authentication required")
+		return uuid.Nil, uuid.Nil, false
+	}
+	listingID, err := uuid.Parse(r.PathValue("listing_id"))
+	if err != nil {
+		writeListingError(w, http.StatusNotFound, "listing not found")
+		return uuid.Nil, uuid.Nil, false
+	}
+	return hostID, listingID, true
+}
+
+func decodeMediaBody(w http.ResponseWriter, r *http.Request, into any) bool {
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(into); err != nil {
+		writeListingError(w, http.StatusBadRequest, "invalid JSON request")
+		return false
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		writeListingError(w, http.StatusBadRequest, "request body must contain one JSON object")
+		return false
+	}
+	return true
+}
+
+func mediaErrorStatus(err error) int {
+	switch {
+	case errors.Is(err, ErrListingNotFound), errors.Is(err, ErrPhotoNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, ErrNotListingOwner):
+		return http.StatusForbidden
+	case errors.Is(err, ErrPhotoAlreadyAdded), errors.Is(err, ErrTooManyPhotos), errors.Is(err, ErrLastPhoto):
+		return http.StatusConflict
+	case errors.Is(err, ErrPhotoRejected), errors.Is(err, ErrInvalidPhotoKey), errors.Is(err, ErrPhotoNotUploaded),
+		errors.Is(err, ErrInvalidPrice), errors.Is(err, ErrInvalidListing):
+		return http.StatusBadRequest
+	case errors.Is(err, ErrUploadsDisabled):
+		return http.StatusServiceUnavailable
+	}
+	return http.StatusInternalServerError
+}
+
+func writeMediaResult(w http.ResponseWriter, status int, body any, err error) {
+	if err != nil {
+		code := mediaErrorStatus(err)
+		message := err.Error()
+		if code == http.StatusInternalServerError {
+			slog.Error("listing media", "error", err)
+			message = "could not complete request"
+		}
+		writeListingError(w, code, message)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
 }

@@ -14,6 +14,7 @@ const (
 	TaskChecking TaskStatus = "checking"
 	TaskApproved TaskStatus = "approved"
 	TaskRetake   TaskStatus = "retake"
+	TaskRejected TaskStatus = "rejected"
 )
 
 type RefundStatus string
@@ -28,10 +29,16 @@ type Decision string
 
 const (
 	DecisionApprove Decision = "approve"
-	DecisionRetake  Decision = "retake"
+	DecisionReject  Decision = "reject"
 )
 
-const BundleRefundCents = 5000
+const (
+	BundleRefundCents = 5000
+	CapPercent        = 25
+	CheckoutHourUTC   = 18
+	PhotoWindow       = 24 * time.Hour
+	SettlementDelay   = 72 * time.Hour
+)
 
 type Task struct {
 	Key   string
@@ -75,12 +82,25 @@ type BookingState struct {
 	BookingStatus   string
 	PaymentIntentID string
 	PaymentStatus   string
+	AmountCents     int
+	EndsOn          time.Time
 }
 
 type ReviewTarget struct {
-	Submission      Submission
-	HostID          uuid.UUID
-	PaymentIntentID string
+	Submission Submission
+	HostID     uuid.UUID
+	EndsOn     time.Time
+}
+
+type SettlementState struct {
+	Status        string
+	RefundedCents int
+}
+
+type Schedule struct {
+	PhotosOpenAt  time.Time `json:"photos_open_at"`
+	PhotosCloseAt time.Time `json:"photos_close_at"`
+	SettlesAt     time.Time `json:"settles_at"`
 }
 
 type TaskView struct {
@@ -108,6 +128,14 @@ type TripView struct {
 	CanEarn     bool         `json:"can_earn"`
 	EarnedCents int          `json:"earned_cents"`
 	Bundles     []BundleView `json:"bundles"`
+	Money
+}
+
+type Money struct {
+	Schedule
+	CapCents         int    `json:"cap_cents"`
+	ExpectedCents    int    `json:"expected_cents"`
+	SettlementStatus string `json:"settlement_status,omitempty"`
 }
 
 type PendingSubmission struct {
@@ -122,6 +150,7 @@ type HostTripView struct {
 	ListingTitle string       `json:"listing_title"`
 	EarnedCents  int          `json:"earned_cents"`
 	Bundles      []BundleView `json:"bundles"`
+	Money
 }
 
 type StorageConfig struct {
@@ -161,28 +190,24 @@ type VerificationChecker interface {
 	HasCompleted(ctx context.Context, accountID uuid.UUID) (bool, error)
 }
 
-type Refunder interface {
-	RefundPayment(ctx context.Context, paymentIntentID string, amountCents int, idempotencyKey string) (string, error)
-}
-
 type Store interface {
 	BookingState(ctx context.Context, actingID, bookingID uuid.UUID) (BookingState, error)
 	SaveSubmission(ctx context.Context, submission Submission) (Submission, error)
 	ListSubmissions(ctx context.Context, actingID, bookingID uuid.UUID) ([]Submission, error)
 	ListRefunds(ctx context.Context, actingID, bookingID uuid.UUID) ([]Refund, error)
 	HostBooking(ctx context.Context, hostID, bookingID uuid.UUID) (HostBooking, error)
-	ListPendingForHost(ctx context.Context, hostID uuid.UUID) ([]Submission, error)
+	ListPendingForHost(ctx context.Context, hostID uuid.UUID, earliestEndsOn time.Time) ([]Submission, error)
 	LoadReviewTarget(ctx context.Context, actingID, submissionID uuid.UUID) (ReviewTarget, error)
 	ApplyReview(ctx context.Context, actingID, submissionID uuid.UUID, status TaskStatus, note string, reviewedAt time.Time) error
-	ApprovedTaskKeys(ctx context.Context, actingID, bookingID uuid.UUID) ([]string, error)
-	ReserveRefund(ctx context.Context, actingID uuid.UUID, refund Refund) (Refund, bool, error)
-	SettleRefund(ctx context.Context, actingID, refundID uuid.UUID, status RefundStatus, stripeRefundID string, at time.Time) error
+	Settlement(ctx context.Context, actingID, bookingID uuid.UUID) (SettlementState, error)
 }
 
 type HostBooking struct {
 	BookingID    uuid.UUID
 	GuestID      uuid.UUID
 	ListingTitle string
+	AmountCents  int
+	EndsOn       time.Time
 }
 
 type HostReader interface {
@@ -199,5 +224,5 @@ type PhotoSubmitter interface {
 }
 
 type Reviewer interface {
-	Review(ctx context.Context, hostID, submissionID uuid.UUID, decision Decision, note string) (Submission, *Refund, error)
+	Review(ctx context.Context, hostID, submissionID uuid.UUID, decision Decision, note string) (Submission, error)
 }
