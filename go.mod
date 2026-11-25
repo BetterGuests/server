@@ -1,6 +1,6 @@
 module github.com/BetterGuests/BetterGuests-Server
 
-go 1.26.10
+go 1.26.11
 
 require (
 	github.com/clerk/clerk-sdk-go/v2 v2.8.0
