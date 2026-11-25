@@ -102,3 +102,55 @@ func (store *PostgresVerificationStore) ApplyStatus(ctx context.Context, account
 		return nil
 	})
 }
+
+func (store *PostgresVerificationStore) ListDueForRedaction(ctx context.Context, retentionDays, holdCapDays, batchSize int) ([]DueVerification, error) {
+	rows, err := store.DB.Query(ctx,
+		`SELECT id, account_id, persona_inquiry_id FROM app.identity_verifications_due_for_redaction($1, $2, $3)`,
+		retentionDays, holdCapDays, batchSize)
+	if err != nil {
+		return nil, fmt.Errorf("list verifications due for redaction: %w", err)
+	}
+	defer rows.Close()
+	var due []DueVerification
+	for rows.Next() {
+		var item DueVerification
+		if err := rows.Scan(&item.ID, &item.AccountID, &item.InquiryID); err != nil {
+			return nil, fmt.Errorf("scan verification due for redaction: %w", err)
+		}
+		due = append(due, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read verifications due for redaction: %w", err)
+	}
+	return due, nil
+}
+
+func (store *PostgresVerificationStore) MarkRedacted(ctx context.Context, id uuid.UUID) error {
+	if _, err := store.DB.Exec(ctx, `SELECT app.mark_identity_verification_redacted($1)`, id); err != nil {
+		return fmt.Errorf("mark verification redacted: %w", err)
+	}
+	return nil
+}
+
+func (store *PostgresVerificationStore) RequestDeletion(ctx context.Context, accountID uuid.UUID) ([]RequestedDeletion, error) {
+	var requested []RequestedDeletion
+	err := db.WithUserTx(ctx, store.DB, accountID.String(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT id, persona_inquiry_id, held FROM app.request_identity_data_deletion()`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item RequestedDeletion
+			if err := rows.Scan(&item.ID, &item.InquiryID, &item.Held); err != nil {
+				return err
+			}
+			requested = append(requested, item)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("request ID deletion: %w", err)
+	}
+	return requested, nil
+}

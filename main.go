@@ -45,6 +45,14 @@ func run() error {
 		return err
 	}
 
+	redaction, err := buildRedactionService(pool)
+	if err != nil {
+		return err
+	}
+	jobs, stopJobs := context.WithCancel(context.Background())
+	defer stopJobs()
+	go redaction.Run(jobs)
+
 	server, err := createServer(routes(deps))
 	if err != nil {
 		return fmt.Errorf("server creation: %w", err)

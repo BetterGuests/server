@@ -59,11 +59,13 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		return routeDeps{}, fmt.Errorf("persona configuration: %w", err)
 	}
 	verificationStore := verification.NewPostgresVerificationStore(pool)
+	personaClient := verification.NewPersonaClient(personaConfig, nil)
 	verificationService := verification.NewVerificationService(
 		verificationStore,
-		verification.NewPersonaClient(personaConfig, nil),
+		personaClient,
 		personaConfig,
 	).WithConsents(complianceService)
+	deletionService := verification.NewDeletionService(verificationStore, personaClient)
 
 	currentVerifier := verification.NewCurrentVerifier(verificationStore)
 
@@ -117,7 +119,7 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		messages:     messages.NewHTTPHandler(messageService, messageService, messageService),
 		realtime:     realtime.NewHTTPHandler(realtimeService, authService, origins),
 		cashback:     cashback.NewHTTPHandler(cashbackService, cashbackService, cashbackService, cashbackService, cashbackService),
-		verification: verification.NewHTTPHandler(verificationService, verificationService).WithStatusReader(verificationStore).WithCurrentChecker(currentVerifier),
+		verification: verification.NewHTTPHandler(verificationService, verificationService).WithStatusReader(verificationStore).WithCurrentChecker(currentVerifier).WithDeletion(deletionService),
 		payments:     payments.NewHTTPHandler(paymentService, paymentService),
 		compliance:   compliance.NewHTTPHandler(complianceService, complianceService, complianceService),
 		profiles:     profiles.NewHTTPHandler(profileService, profileService, profileService, profileService),
@@ -238,4 +240,20 @@ func (objects proofObjects) Remove(ctx context.Context, key string) error {
 		return nil
 	}
 	return remover.Remove(ctx, key)
+}
+
+func buildRedactionService(pool *pgxpool.Pool) (*verification.RedactionService, error) {
+	personaConfig, err := verification.ConfigFromEnv()
+	if err != nil {
+		return nil, fmt.Errorf("persona configuration: %w", err)
+	}
+	redactionConfig, err := verification.RedactionConfigFromEnv()
+	if err != nil {
+		return nil, fmt.Errorf("ID retention configuration: %w", err)
+	}
+	return verification.NewRedactionService(
+		verification.NewPostgresVerificationStore(pool),
+		verification.NewPersonaClient(personaConfig, nil),
+		redactionConfig,
+	), nil
 }

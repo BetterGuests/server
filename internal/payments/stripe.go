@@ -26,12 +26,14 @@ func (gateway *StripeGateway) CreateIntent(ctx context.Context, params IntentPar
 	request := &stripe.PaymentIntentParams{
 		Amount:   stripe.Int64(int64(params.AmountCents)),
 		Currency: stripe.String(params.Currency),
-		AutomaticPaymentMethods: &stripe.PaymentIntentAutomaticPaymentMethodsParams{
-			Enabled: stripe.Bool(true),
-		},
 	}
 	if params.ManualCapture {
 		request.CaptureMethod = stripe.String(string(stripe.PaymentIntentCaptureMethodManual))
+		request.PaymentMethodTypes = stripe.StringSlice([]string{string(stripe.PaymentMethodTypeCard)})
+	} else {
+		request.AutomaticPaymentMethods = &stripe.PaymentIntentAutomaticPaymentMethodsParams{
+			Enabled: stripe.Bool(true),
+		}
 	}
 	request.Context = ctx
 	request.AddMetadata(MetadataBookingID, params.BookingID.String())

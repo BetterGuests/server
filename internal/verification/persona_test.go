@@ -136,3 +136,78 @@ func TestPersonaClientHonorsCancelledContext(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestPersonaClientRedactInquiry(t *testing.T) {
+	var gotMethod, gotPath, gotAuth, gotVersion string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod, gotPath = r.Method, r.URL.Path
+		gotAuth, gotVersion = r.Header.Get("Authorization"), r.Header.Get("Persona-Version")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+	client := NewPersonaClient(Config{APIKey: "k", BaseURL: server.URL}, nil)
+	if err := client.RedactInquiry(context.Background(), "inq_abc123"); err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != http.MethodDelete || gotPath != "/api/v1/inquiries/inq_abc123" || gotAuth != "Bearer k" || gotVersion != personaVersion {
+		t.Fatalf("request = %s %s auth %q version %q", gotMethod, gotPath, gotAuth, gotVersion)
+	}
+}
+
+func TestPersonaClientRedactInquiryTreatsMissingInquiryAsDone(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusAccepted, http.StatusNoContent, http.StatusNotFound} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+		}))
+		client := NewPersonaClient(Config{APIKey: "k", BaseURL: server.URL}, nil)
+		if err := client.RedactInquiry(context.Background(), "inq_gone"); err != nil {
+			t.Fatalf("status %d: %v", status, err)
+		}
+		server.Close()
+	}
+}
+
+func TestPersonaClientRedactInquiryFailures(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusConflict, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"errors":[{"title":"nope"}]}`))
+		}))
+		client := NewPersonaClient(Config{APIKey: "k", BaseURL: server.URL}, nil)
+		if err := client.RedactInquiry(context.Background(), "inq_abc"); !errors.Is(err, ErrPersonaRequest) {
+			t.Fatalf("status %d: err = %v", status, err)
+		}
+		server.Close()
+	}
+}
+
+func TestPersonaClientRedactInquiryRejectsMalformedIDsWithoutSendingARequest(t *testing.T) {
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		called = true
+	}))
+	defer server.Close()
+	client := NewPersonaClient(Config{APIKey: "k", BaseURL: server.URL}, nil)
+	for _, id := range []string{"", "abc", "inq_", "inq_../accounts/acct_1", "inq_a/b", "inq_a?x=1", "inq_ a", "INQ_abc", "inq_abc\n"} {
+		if err := client.RedactInquiry(context.Background(), id); !errors.Is(err, ErrPersonaRequest) {
+			t.Fatalf("id %q: err = %v", id, err)
+		}
+	}
+	if called {
+		t.Fatal("a malformed inquiry id must never reach Persona")
+	}
+}
+
+func TestPersonaClientRedactInquiryHonorsCancelledContext(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	client := NewPersonaClient(Config{APIKey: "k", BaseURL: server.URL}, nil)
+	if err := client.RedactInquiry(ctx, "inq_abc"); !errors.Is(err, ErrPersonaRequest) {
+		t.Fatalf("err = %v", err)
+	}
+}

@@ -227,3 +227,48 @@ func TestListingLocationsMapNotFoundAndKeepPublicCoordinates(t *testing.T) {
 		t.Fatalf("unexpected point %+v", point)
 	}
 }
+
+type stubIDDeleter struct{ calls int }
+
+func (stub *stubIDDeleter) DeleteIDData(context.Context, uuid.UUID) (verification.DeletionResult, error) {
+	stub.calls++
+	return verification.DeletionResult{}, nil
+}
+
+func TestDeleteIDDataRouteRequiresAuthentication(t *testing.T) {
+	stub := &stubVerification{}
+	deleter := &stubIDDeleter{}
+	handler := routes(routeDeps{
+		database:     stubPinger{},
+		origins:      []string{"http://localhost:3000"},
+		verification: verification.NewHTTPHandler(stub, stub).WithDeletion(deleter),
+		authenticate: rejectAll,
+	})
+	request := httptest.NewRequest(http.MethodDelete, "/api/v1/verification/data", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusUnauthorized || deleter.calls != 0 {
+		t.Fatalf("status = %d, calls = %d", response.Code, deleter.calls)
+	}
+}
+
+func TestDeleteIDDataRouteIsReachedOnlyByDelete(t *testing.T) {
+	stub := &stubVerification{}
+	deleter := &stubIDDeleter{}
+	handler := routes(routeDeps{
+		database:     stubPinger{},
+		origins:      []string{"http://localhost:3000"},
+		verification: verification.NewHTTPHandler(stub, stub).WithDeletion(deleter),
+		authenticate: func(next http.Handler) http.Handler { return next },
+	})
+	for _, method := range []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch} {
+		request := httptest.NewRequest(method, "/api/v1/verification/data", nil)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code == http.StatusOK || deleter.calls != 0 {
+			t.Fatalf("%s status = %d calls = %d", method, response.Code, deleter.calls)
+		}
+	}
+}

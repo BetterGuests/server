@@ -55,6 +55,7 @@ func (deps routeDeps) mountVerification(mux *http.ServeMux) {
 		return
 	}
 	mux.HandleFunc("POST /api/v1/webhooks/persona", deps.verification.PersonaWebhook)
+	mux.Handle("DELETE /api/v1/verification/data", deps.authenticate(http.HandlerFunc(deps.verification.DeleteIDData)))
 	mux.Handle("POST /api/v1/verification/inquiries", deps.authenticate(deps.compliance.RequireAdult(http.HandlerFunc(deps.verification.StartVerification))))
 }
 

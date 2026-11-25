@@ -1,6 +1,7 @@
 package verification
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -24,6 +25,38 @@ type HTTPHandler struct {
 	processor WebhookProcessor
 	status    StatusReader
 	current   CurrentChecker
+	deletion  IDDeleter
+}
+
+type IDDeleter interface {
+	DeleteIDData(ctx context.Context, accountID uuid.UUID) (DeletionResult, error)
+}
+
+func (handler *HTTPHandler) WithDeletion(deleter IDDeleter) *HTTPHandler {
+	handler.deletion = deleter
+	return handler
+}
+
+func (handler *HTTPHandler) DeleteIDData(w http.ResponseWriter, r *http.Request) {
+	accountID, ok := accounts.UserID(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if handler.deletion == nil {
+		writeError(w, http.StatusNotFound, "ID data deletion is not available")
+		return
+	}
+	result, err := handler.deletion.DeleteIDData(r.Context(), accountID)
+	if err != nil {
+		slog.Error("Delete ID data", "error", err)
+		writeError(w, http.StatusInternalServerError, "could not delete ID data")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(result)
 }
 
 func NewHTTPHandler(starter Starter, processor WebhookProcessor) *HTTPHandler {

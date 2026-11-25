@@ -104,7 +104,13 @@ Create a second Railway service from the same repo.
   - `ALLOWED_ORIGINS` — JSON array of the web origins allowed to call the API
   - `CLERK_SECRET_KEY`
   - `PERSONA_API_KEY`, `PERSONA_TEMPLATE_ID`, `PERSONA_WEBHOOK_SECRET` — all
-    three are required; the server refuses to start without them
+    three are required; the server refuses to start without them. The API key
+    must be allowed to redact inquiries, because the server deletes ID data
+    through Persona's redact call.
+  - `ID_RETENTION_DAYS` (default 30), `ID_HOLD_CAP_DAYS` (default 1095),
+    `ID_PURGE_INTERVAL` (default 6h), `ID_PURGE_BATCH` (default 50),
+    `ID_PURGE_ENABLED` (default true) — the ID deletion job. Do not also turn on
+    Persona's organization-wide auto redaction: it cannot skip a held ID.
   - `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`
   - `S3_ENDPOINT`, `S3_BUCKET`, `S3_REGION`, `S3_ACCESS_KEY_ID`,
     `S3_SECRET_ACCESS_KEY` — listing photos and cashback photos; optional

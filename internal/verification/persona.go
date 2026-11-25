@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -107,4 +108,29 @@ func (client *PersonaClient) createInquiry(ctx context.Context, templateID, refe
 		return Inquiry{}, fmt.Errorf("%w: response missing session token", ErrPersonaRequest)
 	}
 	return Inquiry{ID: decoded.Data.ID, SessionToken: decoded.Meta.SessionToken, OneTimeLink: decoded.Meta.OneTimeLink}, nil
+}
+
+var inquiryIDPattern = regexp.MustCompile(`^inq_[A-Za-z0-9]+$`)
+
+func (client *PersonaClient) RedactInquiry(ctx context.Context, inquiryID string) error {
+	if !inquiryIDPattern.MatchString(inquiryID) {
+		return fmt.Errorf("%w: malformed inquiry id", ErrPersonaRequest)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodDelete, client.baseURL+"/api/v1/inquiries/"+inquiryID, nil)
+	if err != nil {
+		return fmt.Errorf("build redact request: %w", err)
+	}
+	request.Header.Set("Authorization", "Bearer "+client.apiKey)
+	request.Header.Set("Persona-Version", personaVersion)
+	request.Header.Set("Accept", "application/json")
+	response, err := client.http.Do(request)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrPersonaRequest, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusNotFound || (response.StatusCode >= 200 && response.StatusCode <= 299) {
+		return nil
+	}
+	detail, _ := io.ReadAll(io.LimitReader(response.Body, personaErrorDetailBytes))
+	return fmt.Errorf("%w: status %d: %s", ErrPersonaRequest, response.StatusCode, strings.TrimSpace(string(detail)))
 }
