@@ -177,3 +177,37 @@ func TestPublishRequiresApprovedProof(t *testing.T) {
 		t.Fatalf("expected ErrProofRequired, got %v", err)
 	}
 }
+
+func publishedAt(t *testing.T, ctx context.Context, service *ListingService, listingID uuid.UUID) time.Time {
+	t.Helper()
+	store := service.store.(*PostgresListingStore)
+	found, err := store.GetPublished(ctx, listingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found.PublishedAt == nil {
+		t.Fatal("a published listing must carry its publish date")
+	}
+	return *found.PublishedAt
+}
+
+func TestPublishDateIsWhenTheListingWentLiveAndSurvivesRepublishing(t *testing.T) {
+	ctx, service := publishFixture(t)
+	listing := draftAt(t, ctx, service, uuid.New(), "4"+uuid.NewString()[:6]+" Fresh Ct", "", "85001")
+	beforePublish := time.Now().Add(-time.Second)
+
+	if err := service.PublishListing(ctx, listing.HostID, listing.ID); err != nil {
+		t.Fatal(err)
+	}
+	first := publishedAt(t, ctx, service, listing.ID)
+	if first.Before(beforePublish) {
+		t.Fatalf("publish date %v predates publishing at %v", first, beforePublish)
+	}
+
+	if err := service.PublishListing(ctx, listing.HostID, listing.ID); err != nil {
+		t.Fatal(err)
+	}
+	if second := publishedAt(t, ctx, service, listing.ID); !second.Equal(first) {
+		t.Fatalf("publish date moved from %v to %v", first, second)
+	}
+}

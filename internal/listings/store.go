@@ -68,7 +68,7 @@ func (s *PostgresListingStore) Publish(ctx context.Context, userID string, listi
 		if err := requireApprovedProof(ctx, tx, listingID); err != nil {
 			return err
 		}
-		_, err = tx.Exec(ctx, `UPDATE app.listings SET status = 'published', updated_at = now() WHERE id = $1`, listingID)
+		_, err = tx.Exec(ctx, `UPDATE app.listings SET status = 'published', published_at = coalesce(published_at, now()), updated_at = now() WHERE id = $1`, listingID)
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolationCode {
 			return ErrDuplicateListing
@@ -269,7 +269,7 @@ const publicListingColumns = `
 	l.latitude, l.longitude, l.listing_type, l.property_type, l.max_guests,
 	l.bedrooms, l.beds, l.bathrooms::float8, l.minimum_nights,
 	l.nightly_price_cents, l.cleaning_fee_cents, l.currency,
-	l.rating_avg::float8, l.rating_count, l.created_at`
+	l.rating_avg::float8, l.rating_count, l.created_at, l.published_at`
 
 func (s *PostgresListingStore) ListPublished(ctx context.Context) ([]PublicListing, error) {
 	var listings []PublicListing
@@ -349,7 +349,7 @@ func scanPublicListing(rows pgx.Rows) (PublicListing, error) {
 		&listing.Location.Latitude, &listing.Location.Longitude, &listing.Type, &listing.PropertyType, &listing.MaxGuests,
 		&listing.Bedrooms, &listing.Beds, &listing.Bathrooms, &listing.MinimumNights,
 		&nightly, &cleaning, &currency,
-		&ratingAverage, &ratingCount, &listing.CreatedAt,
+		&ratingAverage, &ratingCount, &listing.CreatedAt, &listing.PublishedAt,
 	); err != nil {
 		return PublicListing{}, fmt.Errorf("scan published listing: %w", err)
 	}

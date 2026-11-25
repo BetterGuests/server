@@ -317,14 +317,14 @@ func insertListingRow(ctx context.Context, tx pgx.Tx, plan plannedListing) error
 			listing_type, property_type, max_guests, minimum_age_to_book,
 			bedrooms, beds, bathrooms, status,
 			nightly_price_cents, minimum_nights, currency,
-			created_at, updated_at
+			created_at, updated_at, published_at
 		) VALUES (
 			$1, $2, $3, $4, NULLIF($5, ''), $6, $7,
 			$8, NULLIF($9, ''), $10, $11, $12,
 			'entire_place', $13, $14, $15,
 			$16, $17, $18, 'published',
 			$19, $20, 'USD',
-			$21, now()
+			$21, now(), $21
 		)`,
 		plan.listingID, plan.hostID, item.Title, item.Description, item.Summary, item.Slug, item.HostName,
 		item.City, item.Region, plan.countryCode, item.Latitude, item.Longitude,
