@@ -16,11 +16,6 @@ const (
 	propertyAddressField     = "property_address"
 )
 
-type documentFile struct {
-	Filename string `json:"filename"`
-	URL      string `json:"url"`
-}
-
 type extraction struct {
 	FieldName string `json:"field-name"`
 	Results   []struct {
@@ -29,10 +24,9 @@ type extraction struct {
 }
 
 type documentResult struct {
-	Status      string         `json:"status"`
-	CreatedAt   string         `json:"created-at"`
-	Files       []documentFile `json:"files"`
-	Extractions []extraction   `json:"extraction-responses"`
+	Status      string       `json:"status"`
+	CreatedAt   string       `json:"created-at"`
+	Extractions []extraction `json:"extraction-responses"`
 	Checks      []struct {
 		Name   string `json:"name"`
 		Status string `json:"status"`
@@ -64,9 +58,7 @@ func chosenDocument(body []byte) (documentResult, bool, error) {
 		if err := json.Unmarshal(object.Attributes, &document); err != nil {
 			return documentResult{}, false, fmt.Errorf("decode document verification: %w", err)
 		}
-		if len(document.Files) > 0 {
-			documents = append(documents, document)
-		}
+		documents = append(documents, document)
 	}
 	if len(documents) == 0 {
 		return documentResult{}, false, nil

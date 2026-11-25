@@ -44,9 +44,8 @@ type Proof struct {
 	ReviewedAt      *time.Time   `json:"reviewed_at,omitempty"`
 	CreatedAt       time.Time    `json:"created_at"`
 	UpdatedAt       time.Time    `json:"updated_at"`
+	InquiryID       string       `json:"persona_inquiry_id,omitempty"`
 	ObjectKey       string       `json:"-"`
-	ExtraObjectKeys []string     `json:"-"`
-	InquiryID       string       `json:"-"`
 	AddressKey      *string      `json:"-"`
 	UnitKey         *string      `json:"-"`
 }
@@ -65,8 +64,6 @@ type ReviewItem struct {
 	IDLastName   string `json:"id_last_name,omitempty"`
 	IDNameSuffix string `json:"id_name_suffix,omitempty"`
 	DocumentURL  string `json:"document_url,omitempty"`
-
-	ExtraDocumentURLs []string `json:"extra_document_urls,omitempty"`
 }
 
 type UploadTicket struct {
@@ -86,7 +83,6 @@ type ObjectStore interface {
 	PresignUpload(ctx context.Context, key, contentType string, expires time.Duration) (string, error)
 	PresignDownload(ctx context.Context, key string, expires time.Duration) (string, error)
 	Stat(ctx context.Context, key string) (ObjectInfo, error)
-	Write(ctx context.Context, key, contentType string, data []byte) error
 	Remove(ctx context.Context, key string) error
 }
 
@@ -181,10 +177,6 @@ type InquiryStarter interface {
 
 type IDChecker interface {
 	HasCurrentID(ctx context.Context, accountID uuid.UUID) (bool, error)
-}
-
-type FileFetcher interface {
-	Fetch(ctx context.Context, url string, maxBytes int64) ([]byte, error)
 }
 
 type CheckStarter interface {

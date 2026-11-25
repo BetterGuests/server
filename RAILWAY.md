@@ -111,8 +111,8 @@ Create a second Railway service from the same repo.
     saves the host's name from the passed `verification/government-id` entry and
     shows it to proof reviewers. Without it, reviewers see "No ID name on file".
   - Optional `PERSONA_PROPERTY_TEMPLATE_ID` turns on automatic ownership
-    document checks (S3 storage must also be set). Without it hosts upload and
-    an admin reviews. In the Persona dashboard:
+    document checks. Without it hosts upload and an admin reviews. Checked files
+    stay in Persona and are never copied to our storage. In the Persona dashboard:
     1. Create an inquiry template that only collects a document (Document
        Verification), limited to utility bills, deeds, leases and property tax
        bills, with the fraud and recency checks you want turned on.

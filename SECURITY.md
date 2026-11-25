@@ -199,7 +199,12 @@ equally deep. A few are worth reading before you trust them blindly:
   address. `app.approve_persona_property_proof` is `SECURITY DEFINER` and limited
   to that host's submitted proof while the listing address is unchanged. It
   trusts the API to have verified the webhook first.
-- Document files are fetched only over HTTPS from `withpersona.com` and copied to
-  our storage.
-- Open gap: the ID deletion job and the host's "delete ID data" action do not
-  redact document inquiries held by Persona.
+- Checked document files stay in Persona. We store the result and the inquiry ID.
+  Admins open the inquiry in the Persona dashboard. Manual uploads are still kept
+  in our storage.
+- The ID deletion job redacts rejected document inquiries, inquiries that never
+  produced a result after `ID_RETENTION_DAYS`, and unapproved ones when a host
+  asks to delete ID data.
+- Approved document inquiries are kept 90 days after approval for disputes, then
+  redacted. A host's deletion request does not shorten this, and identity holds do
+  not extend it. The listing stays approved.

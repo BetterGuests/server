@@ -146,17 +146,16 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 	proofStore := proofs.NewPostgresProofStore(pool)
 	proofService := proofs.NewProofService(proofStore, proofObjectsFrom(objectStore))
 	proofHandler := proofs.NewHTTPHandler(proofService, proofService, proofService, proofService, proofService)
-	checksEnabled := personaConfig.PropertyTemplateID != "" && objectStore != nil
+	checksEnabled := personaConfig.PropertyTemplateID != ""
 	var checkInquiries proofs.InquiryStarter
 	if checksEnabled {
 		checkInquiries = propertyInquiries{client: personaClient, templateID: personaConfig.PropertyTemplateID}
 	}
-	checkService := proofs.NewCheckService(proofStore, checkInquiries, currentIDs{checker: currentVerifier},
-		proofObjectsFrom(objectStore), proofs.NewPersonaFileFetcher(nil))
+	checkService := proofs.NewCheckService(proofStore, checkInquiries, currentIDs{checker: currentVerifier})
 	if checksEnabled {
 		proofHandler.WithChecks(checkService)
 	} else {
-		slog.Warn("listing documents are reviewed by hand: PERSONA_PROPERTY_TEMPLATE_ID and S3 storage are both needed")
+		slog.Warn("listing documents are reviewed by hand: PERSONA_PROPERTY_TEMPLATE_ID is not set")
 	}
 	verificationService.WithOtherInquiries(propertyEvents{checks: checkService})
 
@@ -316,14 +315,6 @@ func (objects proofObjects) Stat(ctx context.Context, key string) (proofs.Object
 		return proofs.ObjectInfo{}, err
 	}
 	return proofs.ObjectInfo{Size: info.Size, ContentType: info.ContentType}, nil
-}
-
-func (objects proofObjects) Write(ctx context.Context, key, contentType string, data []byte) error {
-	content, ok := objects.store.(objectContent)
-	if !ok {
-		return errors.New("storage cannot write objects")
-	}
-	return content.Write(ctx, key, contentType, data)
 }
 
 func (objects proofObjects) Remove(ctx context.Context, key string) error {

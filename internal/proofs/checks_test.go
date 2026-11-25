@@ -80,17 +80,6 @@ func (verified idStub) HasCurrentID(context.Context, uuid.UUID) (bool, error) {
 	return bool(verified), nil
 }
 
-type filesStub struct {
-	data []byte
-	err  error
-}
-
-func (files filesStub) Fetch(context.Context, string, int64) ([]byte, error) {
-	return files.data, files.err
-}
-
-var pdfBytes = []byte("%PDF-1.7 test document")
-
 func checkStore(hostID uuid.UUID) *checkStoreStub {
 	return &checkStoreStub{
 		storeStub: ownedBy(hostID),
@@ -117,7 +106,6 @@ func (p payload) body(t *testing.T) []byte {
 		"included": []any{map[string]any{"type": "verification/document", "attributes": map[string]any{
 			"status":               p.status,
 			"checks":               []any{map[string]any{"name": "document_type_detection", "status": p.check}},
-			"files":                []any{map[string]any{"filename": "bill.pdf", "url": "https://files.withpersona.com/bill.pdf"}},
 			"extraction-responses": []any{extracted("owner-name", p.name), extracted("property_address", p.address)},
 		}}},
 	}}}})
@@ -127,7 +115,7 @@ func (p payload) body(t *testing.T) []byte {
 	return body
 }
 
-func TestProcessKeepsEveryDocumentAndApprovesOnlyCleanMatches(t *testing.T) {
+func TestProcessRecordsEveryResultAndApprovesOnlyCleanMatches(t *testing.T) {
 	cases := []struct {
 		name     string
 		event    string
@@ -148,7 +136,7 @@ func TestProcessKeepsEveryDocumentAndApprovesOnlyCleanMatches(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			hostID := uuid.New()
 			store := checkStore(hostID)
-			service := NewCheckService(store, &starterStub{}, idStub(true), &objectsStub{}, filesStub{data: pdfBytes})
+			service := NewCheckService(store, &starterStub{}, idStub(true))
 			document := goodPayload()
 			testCase.change(&document)
 
@@ -157,7 +145,7 @@ func TestProcessKeepsEveryDocumentAndApprovesOnlyCleanMatches(t *testing.T) {
 			if err != nil || !claimed {
 				t.Fatalf("claimed %v, error %v", claimed, err)
 			}
-			if len(store.kept) != 1 || store.kept[0].ContentType != "application/pdf" || store.approved != testCase.approved {
+			if len(store.kept) != 1 || store.kept[0].ObjectKey != "" || store.kept[0].InquiryID != "inq_doc" || store.approved != testCase.approved {
 				t.Fatalf("kept %+v, approved %d", store.kept, store.approved)
 			}
 		})
@@ -167,7 +155,7 @@ func TestProcessKeepsEveryDocumentAndApprovesOnlyCleanMatches(t *testing.T) {
 func TestProcessLeavesIdentityInquiriesAlone(t *testing.T) {
 	store := checkStore(uuid.New())
 	store.inquiry = nil
-	service := NewCheckService(store, nil, idStub(true), nil, filesStub{})
+	service := NewCheckService(store, nil, idStub(true))
 
 	claimed, err := service.Process(context.Background(), CheckEvent{Name: "inquiry.completed"})
 
@@ -176,27 +164,16 @@ func TestProcessLeavesIdentityInquiriesAlone(t *testing.T) {
 	}
 }
 
-func TestProcessAsksPersonaToRetryWhenTheDownloadFails(t *testing.T) {
+func TestProcessAsksPersonaToRetryWhenSavingFails(t *testing.T) {
 	hostID := uuid.New()
 	store := checkStore(hostID)
-	service := NewCheckService(store, nil, idStub(true), &objectsStub{}, filesStub{err: errors.New("offline")})
+	store.keepErr = errors.New("offline")
+	service := NewCheckService(store, nil, idStub(true))
 
 	_, err := service.Process(context.Background(), CheckEvent{AccountID: hostID, Name: "inquiry.completed", Body: goodPayload().body(t)})
 
-	if err == nil || len(store.kept) != 0 || store.approved != 0 {
-		t.Fatalf("error %v, kept %d", err, len(store.kept))
-	}
-}
-
-func TestProcessDropsFilesThatAreNotDocuments(t *testing.T) {
-	hostID := uuid.New()
-	store := checkStore(hostID)
-	service := NewCheckService(store, nil, idStub(true), &objectsStub{}, filesStub{data: []byte("<html></html>")})
-
-	_, err := service.Process(context.Background(), CheckEvent{AccountID: hostID, Name: "inquiry.completed", Body: goodPayload().body(t)})
-
-	if err != nil || len(store.kept) != 0 || store.approved != 0 {
-		t.Fatalf("error %v, kept %d", err, len(store.kept))
+	if err == nil || store.approved != 0 {
+		t.Fatalf("error %v, approved %d", err, store.approved)
 	}
 }
 
@@ -221,7 +198,7 @@ func TestStart(t *testing.T) {
 			store := checkStore(hostID)
 			testCase.change(store)
 			starter := &starterStub{}
-			service := NewCheckService(store, starter, idStub(testCase.verified), &objectsStub{}, filesStub{})
+			service := NewCheckService(store, starter, idStub(testCase.verified))
 
 			_, err := service.Start(context.Background(), hostID, uuid.New(), UtilityBill)
 
@@ -249,13 +226,5 @@ func TestMatching(t *testing.T) {
 	}
 	if nameMatches("Jordan Rivera Jr", IDName{First: "Jordan", Last: "Rivera"}) {
 		t.Fatal("a generation suffix on only one side must not match")
-	}
-}
-
-func TestFileFetcherRefusesOtherHosts(t *testing.T) {
-	for _, address := range []string{"http://files.withpersona.com/a", "https://example.com/a", "https://evilwithpersona.com/a"} {
-		if _, err := NewPersonaFileFetcher(nil).Fetch(context.Background(), address, 10); !errors.Is(err, ErrUntrustedFileURL) {
-			t.Fatalf("%s: %v", address, err)
-		}
 	}
 }

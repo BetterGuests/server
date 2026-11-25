@@ -65,9 +65,10 @@ func (s *PostgresProofStore) Save(ctx context.Context, proof Proof) error {
 }
 
 const proofColumns = `
-	p.id, p.listing_id, p.host_id, p.document_type, p.object_key, p.content_type, p.size_bytes,
+	p.id, p.listing_id, p.host_id, p.document_type, coalesce(p.object_key, ''), coalesce(p.content_type, ''),
+	coalesce(p.size_bytes, 0),
 	p.status, coalesce(p.rejection_reason, ''), p.reviewed_by, p.reviewed_at, p.created_at, p.updated_at,
-	p.extra_object_keys, p.address_key, p.unit_key`
+	coalesce(p.persona_inquiry_id, ''), p.address_key, p.unit_key`
 
 func scanProof(row pgx.Row, extra ...any) (Proof, error) {
 	var proof Proof
@@ -75,7 +76,7 @@ func scanProof(row pgx.Row, extra ...any) (Proof, error) {
 	destinations := append([]any{
 		&proof.ID, &proof.ListingID, &proof.HostID, &documentType, &proof.ObjectKey, &proof.ContentType,
 		&proof.SizeBytes, &status, &proof.RejectionReason, &proof.ReviewedBy, &proof.ReviewedAt,
-		&proof.CreatedAt, &proof.UpdatedAt, &proof.ExtraObjectKeys, &proof.AddressKey, &proof.UnitKey,
+		&proof.CreatedAt, &proof.UpdatedAt, &proof.InquiryID, &proof.AddressKey, &proof.UnitKey,
 	}, extra...)
 	if err := row.Scan(destinations...); err != nil {
 		return Proof{}, err
@@ -284,21 +285,17 @@ func (s *PostgresProofStore) HasProofForInquiry(ctx context.Context, hostID uuid
 }
 
 func (s *PostgresProofStore) SaveFromInquiry(ctx context.Context, proof Proof) error {
-	extra := proof.ExtraObjectKeys
-	if extra == nil {
-		extra = []string{}
-	}
 	return db.WithUserTx(ctx, s.DB, proof.HostID.String(), func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `
 			INSERT INTO app.property_proofs (
-				id, listing_id, host_id, document_type, object_key, content_type, size_bytes,
-				address_key, unit_key, status, created_at, updated_at, persona_inquiry_id, extra_object_keys
+				id, listing_id, host_id, document_type, address_key, unit_key, status,
+				created_at, updated_at, persona_inquiry_id
 			)
-			SELECT $1, l.id, l.host_id, $2, $3, $4, $5, $6, $7, 'submitted', $8, $8, $9, $10
+			SELECT $1, l.id, l.host_id, $2, $3, $4, 'submitted', $5, $5, $6
 			FROM app.listings l
-			WHERE l.id = $11 AND l.host_id = $12`,
-			proof.ID, string(proof.DocumentType), proof.ObjectKey, proof.ContentType, proof.SizeBytes,
-			proof.AddressKey, proof.UnitKey, proof.CreatedAt, proof.InquiryID, extra, proof.ListingID, proof.HostID)
+			WHERE l.id = $7 AND l.host_id = $8`,
+			proof.ID, string(proof.DocumentType), proof.AddressKey, proof.UnitKey, proof.CreatedAt,
+			proof.InquiryID, proof.ListingID, proof.HostID)
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolationCode {
 			return ErrProofPending

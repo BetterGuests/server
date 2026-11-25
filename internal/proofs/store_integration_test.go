@@ -452,7 +452,6 @@ func TestCheckedDocumentIsApprovedForItsOwnerOnly(t *testing.T) {
 		t.Fatalf("a stranger must not see the inquiry: %v %v", found, err)
 	}
 	proof := Proof{ID: uuid.New(), ListingID: listing.ID, HostID: listing.HostID, DocumentType: UtilityBill,
-		ObjectKey: keyPrefix(listing.ID) + uuid.NewString() + ".pdf", ContentType: "application/pdf", SizeBytes: 10,
 		InquiryID: inquiryID, AddressKey: subject.AddressKey, UnitKey: subject.UnitKey, CreatedAt: now}
 	if err := store.SaveFromInquiry(f.ctx, proof); err != nil {
 		t.Fatal(err)
@@ -465,5 +464,76 @@ func TestCheckedDocumentIsApprovedForItsOwnerOnly(t *testing.T) {
 	}
 	if err := f.listings.PublishListing(f.ctx, listing.HostID, listing.ID); err != nil {
 		t.Fatalf("an automatically approved proof must unlock publishing: %v", err)
+	}
+}
+
+func TestPersonaDocumentsAreDeletedWhenNoLongerNeeded(t *testing.T) {
+	f := newFixture(t)
+	store := NewPostgresProofStore(f.pool)
+	identity := verification.NewPostgresVerificationStore(f.pool)
+	adminID := f.makeAdmin(t)
+
+	check := func(decision Decision) (uuid.UUID, string) {
+		listing := f.draft(t, uuid.New())
+		subject, err := store.CheckSubject(f.ctx, listing.HostID, listing.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		inquiry := CheckInquiry{ID: uuid.New(), InquiryID: "inq_" + uuid.NewString(), ListingID: listing.ID, HostID: listing.HostID,
+			DocumentType: UtilityBill, AddressKey: subject.AddressKey, UnitKey: subject.UnitKey, CreatedAt: time.Now().UTC()}
+		if err := store.SaveInquiry(f.ctx, inquiry); err != nil {
+			t.Fatal(err)
+		}
+		proof := Proof{ID: uuid.New(), ListingID: listing.ID, HostID: listing.HostID, DocumentType: UtilityBill,
+			InquiryID: inquiry.InquiryID, AddressKey: subject.AddressKey, UnitKey: subject.UnitKey, CreatedAt: inquiry.CreatedAt}
+		if err := store.SaveFromInquiry(f.ctx, proof); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.proofs.Decide(f.ctx, adminID, proof.ID, decision, "Name does not match"); err != nil {
+			t.Fatal(err)
+		}
+		return inquiry.ID, inquiry.InquiryID
+	}
+	due := func() map[string]bool {
+		items, err := identity.ListDueForRedaction(f.ctx, 30, 1095, 500)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := map[string]bool{}
+		for _, item := range items {
+			found[item.InquiryID] = true
+		}
+		return found
+	}
+
+	rejectedID, rejected := check(Reject)
+	approvedID, approved := check(Approve)
+
+	if found := due(); !found[rejected] || found[approved] {
+		t.Fatalf("only the rejected document is due: %v", found)
+	}
+	if err := identity.MarkRedacted(f.ctx, rejectedID); err != nil {
+		t.Fatal(err)
+	}
+	if due()[rejected] {
+		t.Fatal("a deleted document must not be due again")
+	}
+	ageApproval := func(days int) {
+		if _, err := f.super.Exec(f.ctx,
+			`UPDATE app.property_proofs SET reviewed_at = now() - make_interval(days => $2) WHERE persona_inquiry_id = $1`,
+			approved, days); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ageApproval(89)
+	if due()[approved] {
+		t.Fatal("an approved document must be kept for 90 days")
+	}
+	ageApproval(91)
+	if !due()[approved] {
+		t.Fatal("an approved document older than 90 days must be due")
+	}
+	if err := identity.MarkRedacted(f.ctx, approvedID); err != nil {
+		t.Fatal(err)
 	}
 }

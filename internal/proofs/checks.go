@@ -5,9 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
-	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,8 +15,6 @@ var (
 	ErrIDRequired     = errors.New("verify your ID before checking a document")
 	ErrAlreadyProven  = errors.New("this listing already has an approved proof")
 )
-
-const maxDocumentFiles = 10
 
 var approvingEvents = map[string]bool{"inquiry.completed": true, "inquiry.approved": true}
 
@@ -32,18 +27,16 @@ type CheckService struct {
 	store     CheckStore
 	inquiries InquiryStarter
 	ids       IDChecker
-	objects   ObjectStore
-	files     FileFetcher
 	now       func() time.Time
 	newID     func() uuid.UUID
 }
 
-func NewCheckService(store CheckStore, inquiries InquiryStarter, ids IDChecker, objects ObjectStore, files FileFetcher) *CheckService {
-	return &CheckService{store: store, inquiries: inquiries, ids: ids, objects: objects, files: files, now: time.Now, newID: uuid.New}
+func NewCheckService(store CheckStore, inquiries InquiryStarter, ids IDChecker) *CheckService {
+	return &CheckService{store: store, inquiries: inquiries, ids: ids, now: time.Now, newID: uuid.New}
 }
 
 func (service *CheckService) Start(ctx context.Context, hostID, listingID uuid.UUID, documentType DocumentType) (CheckTicket, error) {
-	if service.inquiries == nil || service.objects == nil {
+	if service.inquiries == nil {
 		return CheckTicket{}, ErrChecksDisabled
 	}
 	if !documentTypes[documentType] {
@@ -136,15 +129,12 @@ func (service *CheckService) Process(ctx context.Context, event CheckEvent) (boo
 	if !reviewableEvents[event.Name] {
 		return true, nil
 	}
-	if service.objects == nil {
-		return true, ErrUploadsDisabled
-	}
 	document, present, err := chosenDocument(event.Body)
 	if err != nil {
 		return true, err
 	}
 	if !present {
-		slog.Warn("persona document event has no files; check that the webhook includes related objects",
+		slog.Warn("persona event has no document verification; check that the webhook includes related objects",
 			"event", event.Name, "inquiry_id", event.InquiryID)
 		return true, nil
 	}
@@ -153,8 +143,8 @@ func (service *CheckService) Process(ctx context.Context, event CheckEvent) (boo
 		return true, err
 	}
 	if !saved {
-		if err := service.keep(ctx, inquiry, document); err != nil {
-			return true, ignoreUnkeepable(err, inquiry.InquiryID)
+		if err := service.record(ctx, inquiry); err != nil {
+			return true, ignoreUnrecordable(err, inquiry.InquiryID)
 		}
 	}
 	if !approvingEvents[event.Name] {
@@ -163,75 +153,21 @@ func (service *CheckService) Process(ctx context.Context, event CheckEvent) (boo
 	return true, service.approveIfMatching(ctx, inquiry, document)
 }
 
-func ignoreUnkeepable(err error, inquiryID string) error {
-	if errors.Is(err, ErrDocumentRejected) || errors.Is(err, ErrProofPending) || errors.Is(err, ErrListingNotFound) {
-		slog.Warn("persona document was not kept", "inquiry_id", inquiryID, "error", err)
+func ignoreUnrecordable(err error, inquiryID string) error {
+	if errors.Is(err, ErrProofPending) || errors.Is(err, ErrListingNotFound) {
+		slog.Warn("persona document check was not recorded", "inquiry_id", inquiryID, "error", err)
 		return nil
 	}
 	return err
 }
 
-func (service *CheckService) keep(ctx context.Context, inquiry CheckInquiry, document documentResult) error {
-	if len(document.Files) > maxDocumentFiles {
-		return ErrDocumentRejected
-	}
+func (service *CheckService) record(ctx context.Context, inquiry CheckInquiry) error {
 	now := service.now().UTC()
-	proof := Proof{
+	return service.store.SaveFromInquiry(ctx, Proof{
 		ID: service.newID(), ListingID: inquiry.ListingID, HostID: inquiry.HostID,
 		DocumentType: inquiry.DocumentType, Status: Submitted, CreatedAt: now, UpdatedAt: now,
 		InquiryID: inquiry.InquiryID, AddressKey: inquiry.AddressKey, UnitKey: inquiry.UnitKey,
-	}
-	var written []string
-	for index, file := range document.Files {
-		data, err := service.files.Fetch(ctx, file.URL, maxDocumentBytes)
-		if err != nil {
-			service.discardAll(ctx, written)
-			return fmt.Errorf("download persona document: %w", err)
-		}
-		contentType, extension, allowed := documentKind(file.Filename, data)
-		if !allowed || len(data) == 0 {
-			service.discardAll(ctx, written)
-			return ErrDocumentRejected
-		}
-		key := keyPrefix(inquiry.ListingID) + service.newID().String() + extension
-		if err := service.objects.Write(ctx, key, contentType, data); err != nil {
-			service.discardAll(ctx, written)
-			return fmt.Errorf("store persona document: %w", err)
-		}
-		written = append(written, key)
-		if index == 0 {
-			proof.ObjectKey, proof.ContentType, proof.SizeBytes = key, contentType, int64(len(data))
-		}
-	}
-	proof.ExtraObjectKeys = written[1:]
-	if err := service.store.SaveFromInquiry(ctx, proof); err != nil {
-		service.discardAll(ctx, written)
-		return err
-	}
-	return nil
-}
-
-func (service *CheckService) discardAll(ctx context.Context, keys []string) {
-	for _, key := range keys {
-		if err := service.objects.Remove(ctx, key); err != nil {
-			slog.Warn("could not remove unkept document", "error", err)
-		}
-	}
-}
-
-func documentKind(filename string, data []byte) (string, string, bool) {
-	extension := strings.ToLower(filepath.Ext(filename))
-	if extension == ".jpeg" {
-		extension = ".jpg"
-	}
-	sniffed := http.DetectContentType(data)
-	if _, allowed := allowedContentTypes[sniffed]; allowed {
-		return sniffed, allowedContentTypes[sniffed], true
-	}
-	if extension == ".heic" && sniffed == "application/octet-stream" {
-		return "image/heic", extension, true
-	}
-	return "", "", false
+	})
 }
 
 func (service *CheckService) approveIfMatching(ctx context.Context, inquiry CheckInquiry, document documentResult) error {
