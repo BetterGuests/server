@@ -1,0 +1,287 @@
+package cancellations
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/BetterGuests/BetterGuests-Server/db"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+type PostgresCancellationStore struct{ DB *pgxpool.Pool }
+
+func NewPostgresCancellationStore(pool *pgxpool.Pool) *PostgresCancellationStore {
+	return &PostgresCancellationStore{DB: pool}
+}
+
+const reportColumns = `booking_id, guest_id, host_id, listing_title, details, amount_cents, payment_intent_id,
+	status, refund_cents, refund_status, COALESCE(resolution_note, ''), created_at`
+
+func scanReport(row pgx.Row) (Report, error) {
+	var report Report
+	err := row.Scan(
+		&report.BookingID, &report.GuestID, &report.HostID, &report.ListingTitle, &report.Details,
+		&report.AmountCents, &report.PaymentIntentID, &report.Status, &report.RefundCents,
+		&report.RefundStatus, &report.Note, &report.CreatedAt,
+	)
+	return report, err
+}
+
+func (store *PostgresCancellationStore) Booking(ctx context.Context, actorID, bookingID uuid.UUID) (Booking, error) {
+	var booking Booking
+	err := db.WithUserTx(ctx, store.DB, actorID.String(), func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx,
+			`SELECT b.id, b.listing_id, l.title, b.guest_id, l.host_id, b.status, b.starts_on,
+			        to_char(l.check_in_time, 'HH24:MI'), l.time_zone, b.decided_at,
+			        COALESCE(p.amount_cents, 0), COALESCE(p.currency, 'usd'), COALESCE(p.status, ''),
+			        COALESCE(p.stripe_payment_intent_id, '')
+			 FROM app.bookings b
+			 JOIN app.listings l ON l.id = b.listing_id
+			 LEFT JOIN app.payments p ON p.booking_id = b.id
+			 WHERE b.id = $1 AND (b.guest_id = $2 OR l.host_id = $2)`,
+			bookingID, actorID,
+		).Scan(
+			&booking.BookingID, &booking.ListingID, &booking.ListingTitle, &booking.GuestID, &booking.HostID,
+			&booking.Status, &booking.StartsOn, &booking.CheckInTime, &booking.TimeZone, &booking.ApprovedAt,
+			&booking.AmountCents, &booking.Currency, &booking.PaymentStatus, &booking.PaymentIntentID,
+		); err != nil {
+			return err
+		}
+		var cancellation Cancellation
+		err := tx.QueryRow(ctx,
+			`SELECT cancelled_by, refund_cents, refund_status FROM app.booking_cancellations WHERE booking_id = $1`,
+			bookingID,
+		).Scan(&cancellation.CancelledBy, &cancellation.RefundCents, &cancellation.RefundStatus)
+		switch {
+		case err == nil:
+			booking.Cancellation = &cancellation
+		case !errors.Is(err, pgx.ErrNoRows):
+			return fmt.Errorf("select cancellation: %w", err)
+		}
+		report, err := scanReport(tx.QueryRow(ctx, `SELECT `+reportColumns+` FROM app.stay_reports WHERE booking_id = $1`, bookingID))
+		switch {
+		case err == nil:
+			booking.Report = &report
+		case !errors.Is(err, pgx.ErrNoRows):
+			return fmt.Errorf("select report: %w", err)
+		}
+		return nil
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Booking{}, ErrBookingNotFound
+	}
+	if err != nil {
+		return Booking{}, fmt.Errorf("load booking: %w", err)
+	}
+	return booking, nil
+}
+
+func (store *PostgresCancellationStore) Cancel(ctx context.Context, actorID uuid.UUID, cancellation Cancellation, hostCancellationsSince time.Time) error {
+	return db.WithUserTx(ctx, store.DB, actorID.String(), func(tx pgx.Tx) error {
+		if err := insertCancellation(ctx, tx, cancellation); err != nil {
+			return err
+		}
+		if err := markCancelled(ctx, tx, cancellation.BookingID, statusConfirmed); err != nil {
+			return err
+		}
+		if cancellation.CancelledBy != ByHost {
+			return nil
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO app.listing_suspensions (listing_id, host_id, reason)
+			 SELECT $1, $2, $3
+			 WHERE (
+			     SELECT count(*) FROM app.booking_cancellations
+			     WHERE listing_id = $1 AND cancelled_by = 'host' AND created_at > $4
+			 ) >= $5
+			 ON CONFLICT (listing_id) DO NOTHING`,
+			cancellation.ListingID, cancellation.HostID, suspensionReason, hostCancellationsSince, HostCancellationLimit,
+		); err != nil {
+			return fmt.Errorf("pause listing: %w", err)
+		}
+		return nil
+	})
+}
+
+func (store *PostgresCancellationStore) ExpiredRequests(ctx context.Context, limit int) ([]ExpiredRequest, error) {
+	rows, err := store.DB.Query(ctx, `SELECT booking_id, guest_id FROM app.expired_booking_requests($1)`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query expired requests: %w", err)
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (ExpiredRequest, error) {
+		var request ExpiredRequest
+		err := row.Scan(&request.BookingID, &request.GuestID)
+		return request, err
+	})
+}
+
+func (store *PostgresCancellationStore) Expire(ctx context.Context, request ExpiredRequest) error {
+	return db.WithUserTx(ctx, store.DB, request.GuestID.String(), func(tx pgx.Tx) error {
+		cancellation := Cancellation{BookingID: request.BookingID, GuestID: request.GuestID, CancelledBy: ByExpired, RefundStatus: RefundNone}
+		if err := tx.QueryRow(ctx,
+			`SELECT b.listing_id, l.host_id FROM app.bookings b JOIN app.listings l ON l.id = b.listing_id
+			 WHERE b.id = $1 AND b.guest_id = $2`,
+			request.BookingID, request.GuestID,
+		).Scan(&cancellation.ListingID, &cancellation.HostID); err != nil {
+			return fmt.Errorf("select expiring booking: %w", err)
+		}
+		if err := insertCancellation(ctx, tx, cancellation); err != nil {
+			return err
+		}
+		return markCancelled(ctx, tx, request.BookingID, "requested")
+	})
+}
+
+func insertCancellation(ctx context.Context, tx pgx.Tx, cancellation Cancellation) error {
+	_, err := tx.Exec(ctx,
+		`INSERT INTO app.booking_cancellations
+		     (booking_id, guest_id, host_id, listing_id, cancelled_by, amount_cents, refund_cents, payment_intent_id, refund_status)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, NULLIF($8, ''), $9)`,
+		cancellation.BookingID, cancellation.GuestID, cancellation.HostID, cancellation.ListingID,
+		string(cancellation.CancelledBy), cancellation.AmountCents, cancellation.RefundCents,
+		cancellation.PaymentIntentID, string(cancellation.RefundStatus))
+	return uniqueAs(err, ErrNotCancellable, "insert cancellation")
+}
+
+func markCancelled(ctx context.Context, tx pgx.Tx, bookingID uuid.UUID, from string) error {
+	tag, err := tx.Exec(ctx, `UPDATE app.bookings SET status = 'cancelled' WHERE id = $1 AND status = $2`, bookingID, from)
+	if err != nil {
+		return fmt.Errorf("cancel booking: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrNotCancellable
+	}
+	return nil
+}
+
+func (store *PostgresCancellationStore) CreateReport(ctx context.Context, report Report) error {
+	return db.WithUserTx(ctx, store.DB, report.GuestID.String(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx,
+			`INSERT INTO app.stay_reports
+			     (booking_id, guest_id, host_id, listing_title, details, amount_cents, payment_intent_id, status)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, 'open')`,
+			report.BookingID, report.GuestID, report.HostID, report.ListingTitle, report.Details,
+			report.AmountCents, report.PaymentIntentID)
+		return uniqueAs(err, ErrAlreadyReported, "insert report")
+	})
+}
+
+func (store *PostgresCancellationStore) IsAdmin(ctx context.Context, accountID uuid.UUID) (bool, error) {
+	var admin bool
+	err := db.WithUserTx(ctx, store.DB, accountID.String(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT app.is_admin()`).Scan(&admin)
+	})
+	if err != nil {
+		return false, fmt.Errorf("check admin: %w", err)
+	}
+	return admin, nil
+}
+
+func (store *PostgresCancellationStore) OpenReports(ctx context.Context, adminID uuid.UUID, limit int) ([]Report, error) {
+	reports := []Report{}
+	err := db.WithUserTx(ctx, store.DB, adminID.String(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT `+reportColumns+` FROM app.stay_reports WHERE status = 'open' ORDER BY created_at LIMIT $1`, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			report, err := scanReport(rows)
+			if err != nil {
+				return err
+			}
+			reports = append(reports, report)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list reports: %w", err)
+	}
+	return reports, nil
+}
+
+func (store *PostgresCancellationStore) Resolve(ctx context.Context, adminID, bookingID uuid.UUID, decision Decision, at time.Time) (Report, error) {
+	var report Report
+	err := db.WithUserTx(ctx, store.DB, adminID.String(), func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO app.accounts (id) VALUES ($1) ON CONFLICT (id) DO NOTHING`, adminID); err != nil {
+			return fmt.Errorf("ensure account: %w", err)
+		}
+		current, err := scanReport(tx.QueryRow(ctx, `SELECT `+reportColumns+` FROM app.stay_reports WHERE booking_id = $1`, bookingID))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrBookingNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("select report: %w", err)
+		}
+		if current.Status != ReportOpen {
+			return ErrAlreadyDecided
+		}
+		if decision.RefundCents > current.AmountCents {
+			return fmt.Errorf("%w: the refund is more than the guest paid", ErrInvalidReport)
+		}
+		report, err = scanReport(tx.QueryRow(ctx,
+			`UPDATE app.stay_reports
+			 SET status = 'resolved', refund_cents = $2,
+			     refund_status = CASE WHEN $2 > 0 THEN 'pending' ELSE 'none' END,
+			     resolution_note = NULLIF($3, ''), resolved_by = $4, resolved_at = $5
+			 WHERE booking_id = $1 AND status = 'open'
+			 RETURNING `+reportColumns,
+			bookingID, decision.RefundCents, decision.Note, adminID, at))
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrAlreadyDecided
+		}
+		if err != nil {
+			return fmt.Errorf("resolve report: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return Report{}, err
+	}
+	return report, nil
+}
+
+func (store *PostgresCancellationStore) PendingRefunds(ctx context.Context, limit int) ([]PendingRefund, error) {
+	rows, err := store.DB.Query(ctx,
+		`SELECT booking_id, guest_id, source, payment_intent_id, amount_cents FROM app.pending_booking_refunds($1)`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query pending refunds: %w", err)
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (PendingRefund, error) {
+		var refund PendingRefund
+		err := row.Scan(&refund.BookingID, &refund.GuestID, &refund.Source, &refund.PaymentIntentID, &refund.AmountCents)
+		return refund, err
+	})
+}
+
+func (store *PostgresCancellationStore) MarkRefunded(ctx context.Context, refund PendingRefund, refundID string) error {
+	query := `UPDATE app.booking_cancellations SET refund_status = 'succeeded', stripe_refund_id = $2
+		WHERE booking_id = $1 AND refund_status = 'pending'`
+	if refund.Source == SourceReport {
+		query = `UPDATE app.stay_reports SET refund_status = 'succeeded', stripe_refund_id = $2
+			WHERE booking_id = $1 AND refund_status = 'pending'`
+	}
+	return db.WithUserTx(ctx, store.DB, refund.GuestID.String(), func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, query, refund.BookingID, refundID); err != nil {
+			return fmt.Errorf("record refund: %w", err)
+		}
+		return nil
+	})
+}
+
+func uniqueAs(err, conflict error, operation string) error {
+	var pgError *pgconn.PgError
+	switch {
+	case errors.As(err, &pgError) && pgError.Code == uniqueViolationCode:
+		return conflict
+	case err != nil:
+		return fmt.Errorf("%s: %w", operation, err)
+	}
+	return nil
+}

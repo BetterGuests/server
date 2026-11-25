@@ -35,6 +35,8 @@ type Config struct {
 	TemplateID    string
 	WebhookSecret string
 	BaseURL       string
+
+	PropertyTemplateID string
 }
 
 type Verification struct {
@@ -113,4 +115,15 @@ type WebhookProcessor interface {
 
 type ConsentChecker interface {
 	HasConsent(ctx context.Context, accountID uuid.UUID, kind string) (bool, error)
+}
+
+type OtherInquiry struct {
+	AccountID uuid.UUID
+	InquiryID string
+	EventName string
+	Body      []byte
+}
+
+type InquiryClaimer interface {
+	Claim(ctx context.Context, inquiry OtherInquiry) (bool, error)
 }

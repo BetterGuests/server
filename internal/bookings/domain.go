@@ -74,9 +74,15 @@ type BookingStore interface {
 type DetailStore interface {
 	Get(ctx context.Context, actorID, bookingID uuid.UUID) (Detail, error)
 	ListForGuest(ctx context.Context, guestID uuid.UUID) ([]Detail, error)
+	ListForHost(ctx context.Context, hostID uuid.UUID) ([]Detail, error)
 	ListRequestsForHost(ctx context.Context, hostID uuid.UUID) ([]Detail, error)
 	Decide(ctx context.Context, hostID, bookingID uuid.UUID, next Status, decidedAt time.Time) error
 	CancelByGuest(ctx context.Context, guestID, bookingID uuid.UUID) error
+	ListOverlapping(ctx context.Context, guestID uuid.UUID, startsOn, endsOn time.Time) ([]Detail, error)
+}
+
+type TripOverlapError struct {
+	Trip Detail
 }
 
 type Publisher interface {

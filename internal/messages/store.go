@@ -157,8 +157,9 @@ func (store *PostgresMessageStore) Messages(
 			return err
 		}
 		rows, err := tx.Query(ctx,
-			`SELECT m.id, m.conversation_id, m.sender_id,
-			        CASE WHEN m.sender_id = c.host_id THEN 'host' ELSE 'guest' END, m.body, m.created_at
+			`SELECT m.id, m.conversation_id, COALESCE(m.sender_id, '00000000-0000-0000-0000-000000000000'::uuid),
+			        CASE WHEN m.sender_id IS NULL THEN 'system' WHEN m.sender_id = c.host_id THEN 'host' ELSE 'guest' END,
+			        m.body, m.created_at, m.booking_id
 			 FROM app.messages m JOIN app.conversations c ON c.id = m.conversation_id
 			 WHERE m.conversation_id = $1 AND ($2::timestamptz IS NULL OR m.created_at < $2)
 			 ORDER BY m.created_at DESC, m.id DESC
@@ -169,7 +170,7 @@ func (store *PostgresMessageStore) Messages(
 		defer rows.Close()
 		for rows.Next() {
 			var message Message
-			if err := rows.Scan(&message.ID, &message.ConversationID, &message.SenderID, &message.SenderRole, &message.Body, &message.CreatedAt); err != nil {
+			if err := rows.Scan(&message.ID, &message.ConversationID, &message.SenderID, &message.SenderRole, &message.Body, &message.CreatedAt, &message.BookingID); err != nil {
 				return err
 			}
 			messages = append(messages, message)

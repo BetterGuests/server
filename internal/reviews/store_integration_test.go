@@ -47,9 +47,6 @@ func TestReviewStoreRequiresCompletedGuestBooking(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Each subtest below checks exactly one policy decision. Keeping them
-	// separate (rather than one function full of unrelated if-checks) means
-	// a failure names the behavior that broke instead of just a line number.
 	t.Run("guest cannot complete their own booking", func(t *testing.T) {
 		_ = completeBooking(ctx, pool, guestID, bookingID, 0)
 		var status string
@@ -63,20 +60,22 @@ func TestReviewStoreRequiresCompletedGuestBooking(t *testing.T) {
 		}
 	})
 
-	t.Run("host can complete the booking", func(t *testing.T) {
-		if err := completeBooking(ctx, pool, hostID, bookingID, 1); err != nil {
-			t.Fatalf("host could not complete booking: %v", err)
+	t.Run("host cannot mark a stay completed either", func(t *testing.T) {
+		if err := completeBooking(ctx, pool, hostID, bookingID, 0); err == nil {
+			t.Fatal("a host completed a booking and opened reviews early")
 		}
 	})
 
-	service := NewService(NewPostgresStore(pool))
+	finishAsAdministrator(t, ctx, bookingID)
+
+	service := NewReviewService(NewPostgresReviewStore(pool))
 
 	t.Run("guest can review their completed booking", func(t *testing.T) {
 		created, err := service.CreateReview(ctx, guestID, CreateReviewInput{BookingID: bookingID, Rating: 5, Comment: "Excellent stay"})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if created.ListingID != listing.ID || created.GuestID != guestID {
+		if created.ListingID != listing.ID || created.AuthorRole != RoleGuest {
 			t.Fatalf("review used wrong ownership: %+v", created)
 		}
 	})
@@ -111,10 +110,6 @@ func createRequestedBooking(ctx context.Context, pool *pgxpool.Pool, guestID, li
 	})
 }
 
-// completeBooking marks bookingID completed as actingUserID and fails unless
-// exactly wantRowsAffected rows were changed - RLS silently affects zero rows
-// instead of erroring, so the row count is the only way to tell "blocked by
-// policy" apart from "succeeded".
 func completeBooking(ctx context.Context, pool *pgxpool.Pool, actingUserID, bookingID uuid.UUID, wantRowsAffected int64) error {
 	return db.WithUserTx(ctx, pool, actingUserID.String(), func(tx pgx.Tx) error {
 		result, err := tx.Exec(ctx, `UPDATE app.bookings SET status = 'completed', completed_at = now() WHERE id = $1`, bookingID)
@@ -126,4 +121,16 @@ func completeBooking(ctx context.Context, pool *pgxpool.Pool, actingUserID, book
 		}
 		return nil
 	})
+}
+
+func finishAsAdministrator(t *testing.T, ctx context.Context, bookingID uuid.UUID) {
+	t.Helper()
+	admin, err := pgx.Connect(ctx, os.Getenv("TEST_SUPERUSER_DATABASE_URL"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = admin.Close(ctx) }()
+	if _, err := admin.Exec(ctx, `UPDATE app.bookings SET status = 'completed', completed_at = now() WHERE id = $1`, bookingID); err != nil {
+		t.Fatal(err)
+	}
 }

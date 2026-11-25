@@ -22,6 +22,12 @@ type detailStub struct {
 	guestList  []Detail
 	hostList   []Detail
 	listActors []uuid.UUID
+
+	overlapping []Detail
+}
+
+func (stub *detailStub) ListOverlapping(context.Context, uuid.UUID, time.Time, time.Time) ([]Detail, error) {
+	return stub.overlapping, nil
 }
 
 func (stub *detailStub) Get(context.Context, uuid.UUID, uuid.UUID) (Detail, error) {
@@ -31,6 +37,11 @@ func (stub *detailStub) Get(context.Context, uuid.UUID, uuid.UUID) (Detail, erro
 func (stub *detailStub) ListForGuest(_ context.Context, guestID uuid.UUID) ([]Detail, error) {
 	stub.listActors = append(stub.listActors, guestID)
 	return stub.guestList, nil
+}
+
+func (stub *detailStub) ListForHost(_ context.Context, hostID uuid.UUID) ([]Detail, error) {
+	stub.listActors = append(stub.listActors, hostID)
+	return stub.hostList, nil
 }
 
 func (stub *detailStub) ListRequestsForHost(_ context.Context, hostID uuid.UUID) ([]Detail, error) {
@@ -68,7 +79,7 @@ func (stub *publisherStub) Publish(userID uuid.UUID, kind string, payload any) {
 
 func approvalFixture() (*BookingService, *detailStub, *publisherStub, Detail) {
 	detail := Detail{
-		Booking: Booking{ID: uuid.New(), GuestID: uuid.New(), Status: StatusRequested},
+		Booking: Booking{ID: uuid.New(), GuestID: uuid.New(), Status: StatusRequested, StartsOn: time.Now().AddDate(0, 0, 7)},
 		HostID:  uuid.New(),
 		Role:    RoleHost,
 	}
@@ -208,8 +219,9 @@ func TestListRoutesReturnAnEmptyArrayNotNull(t *testing.T) {
 	handler := NewHTTPHandler(creatorStub{}).WithReader(readerStub{&detailStub{}})
 
 	for name, serve := range map[string]http.HandlerFunc{
-		"guest": handler.ListMyBookings,
-		"host":  handler.ListHostRequests,
+		"guest":         handler.ListMyBookings,
+		"host":          handler.ListHostRequests,
+		"host bookings": handler.ListHostBookings,
 	} {
 		response := httptest.NewRecorder()
 		serve(response, bookingRequest(http.MethodGet, "", true))
@@ -237,6 +249,7 @@ type holdStub struct {
 	captured   int
 	released   int
 	captureErr error
+	releaseErr error
 }
 
 func (stub *holdStub) Capture(context.Context, uuid.UUID, uuid.UUID) error {
@@ -246,7 +259,7 @@ func (stub *holdStub) Capture(context.Context, uuid.UUID, uuid.UUID) error {
 
 func (stub *holdStub) Release(context.Context, uuid.UUID, uuid.UUID) error {
 	stub.released++
-	return nil
+	return stub.releaseErr
 }
 
 func holdFixture(paymentStatus string) (*BookingService, *detailStub, *holdStub, Detail) {
@@ -312,15 +325,62 @@ func TestApproveByANonHostIsNotFound(t *testing.T) {
 }
 
 func TestDeclineAndCancelReleaseTheHeldCard(t *testing.T) {
-	service, _, hold, detail := holdFixture("authorized")
+	declining, _, declined, request := holdFixture("authorized")
+	if _, err := declining.Decline(context.Background(), request.HostID, request.ID); err != nil {
+		t.Fatal(err)
+	}
+	cancelling, _, cancelled, other := holdFixture("authorized")
+	if _, err := cancelling.Cancel(context.Background(), other.GuestID, other.ID); err != nil {
+		t.Fatal(err)
+	}
+	if declined.released != 1 || cancelled.released != 1 {
+		t.Fatalf("released %d and %d times, want 1 each", declined.released, cancelled.released)
+	}
+}
 
-	if _, err := service.Decline(context.Background(), detail.HostID, detail.ID); err != nil {
-		t.Fatal(err)
+func TestApproveRefusesAStayWhoseCheckInDateHasPassed(t *testing.T) {
+	service, details, hold, detail := holdFixture("authorized")
+	details.detail.StartsOn = time.Date(2026, 5, 20, 0, 0, 0, 0, time.UTC)
+
+	if _, err := service.Approve(context.Background(), detail.HostID, detail.ID); !errors.Is(err, ErrStayAlreadyStarted) {
+		t.Fatalf("want already started, got %v", err)
 	}
-	if _, err := service.Cancel(context.Background(), detail.GuestID, detail.ID); err != nil {
-		t.Fatal(err)
+	if hold.captured != 0 || details.decidedTo != "" {
+		t.Fatalf("a past stay was charged or approved: %+v", hold)
 	}
-	if hold.released != 2 {
-		t.Fatalf("released %d times, want 2", hold.released)
+}
+
+func TestAChargedBookingCannotBeCancelled(t *testing.T) {
+	service, details, hold, detail := holdFixture("succeeded")
+	details.detail.Status = StatusPending
+
+	if _, err := service.Cancel(context.Background(), detail.GuestID, detail.ID); !errors.Is(err, ErrNotCancellable) {
+		t.Fatalf("want not cancellable, got %v", err)
+	}
+	if details.cancelled || hold.released != 0 {
+		t.Fatal("a paid booking was cancelled without a refund")
+	}
+}
+
+func TestABookingStaysOpenWhenTheCardCannotBeReleased(t *testing.T) {
+	service, details, hold, detail := holdFixture("authorized")
+	hold.releaseErr = errors.New("already captured")
+
+	if _, err := service.Cancel(context.Background(), detail.GuestID, detail.ID); !errors.Is(err, ErrReleaseFailed) {
+		t.Fatalf("want release failed, got %v", err)
+	}
+	if details.cancelled {
+		t.Fatal("cancelled while the guest may still be charged")
+	}
+}
+
+func TestSomeoneElseCannotCancelOrReleaseABooking(t *testing.T) {
+	service, details, hold, detail := holdFixture("authorized")
+
+	if _, err := service.Cancel(context.Background(), detail.HostID, detail.ID); !errors.Is(err, ErrBookingNotFound) {
+		t.Fatalf("want not found, got %v", err)
+	}
+	if details.cancelled || hold.released != 0 {
+		t.Fatal("the host released the guest's card through cancel")
 	}
 }

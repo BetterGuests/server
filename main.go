@@ -57,6 +57,7 @@ func run() error {
 	defer stopJobs()
 	go redaction.Run(jobs)
 	go settlement.Run(jobs)
+	go deps.tripUpdates.Run(jobs)
 
 	server, err := createServer(routes(deps))
 	if err != nil {

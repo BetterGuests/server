@@ -19,6 +19,37 @@ type HTTPHandler struct {
 	status  StatusReader
 	admins  AdminChecker
 	queue   ReviewQueue
+	checks  CheckStarter
+}
+
+type checkRequest struct {
+	DocumentType DocumentType `json:"document_type"`
+}
+
+func (handler *HTTPHandler) WithChecks(checks CheckStarter) *HTTPHandler {
+	handler.checks = checks
+	return handler
+}
+
+func (handler *HTTPHandler) StartCheck(w http.ResponseWriter, r *http.Request) {
+	hostID, listingID, ok := hostAndListing(w, r)
+	if !ok {
+		return
+	}
+	if handler.checks == nil {
+		writeServiceError(w, ErrChecksDisabled)
+		return
+	}
+	var request checkRequest
+	if !decodeBody(w, r, &request) {
+		return
+	}
+	ticket, err := handler.checks.Start(r.Context(), hostID, listingID, request.DocumentType)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, ticket)
 }
 
 func NewHTTPHandler(uploads UploadRequester, submits Submitter, status StatusReader, admins AdminChecker, queue ReviewQueue) *HTTPHandler {
@@ -84,11 +115,11 @@ func (handler *HTTPHandler) Status(w http.ResponseWriter, r *http.Request) {
 		writeServiceError(w, err)
 		return
 	}
-	if !found {
-		writeJSON(w, http.StatusOK, map[string]any{"proof": nil})
-		return
+	response := map[string]any{"proof": nil, "persona_check": handler.checks != nil}
+	if found {
+		response["proof"] = proof
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"proof": proof})
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (handler *HTTPHandler) Me(w http.ResponseWriter, r *http.Request) {
@@ -190,6 +221,9 @@ var statusByError = []struct {
 	{ErrProofPending, http.StatusConflict},
 	{ErrNotAwaitingReview, http.StatusConflict},
 	{ErrUploadsDisabled, http.StatusServiceUnavailable},
+	{ErrChecksDisabled, http.StatusServiceUnavailable},
+	{ErrIDRequired, http.StatusForbidden},
+	{ErrAlreadyProven, http.StatusConflict},
 }
 
 func writeServiceError(w http.ResponseWriter, err error) {

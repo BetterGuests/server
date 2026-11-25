@@ -1,46 +1,58 @@
 package main
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/BetterGuests/BetterGuests-Server/internal/availability"
 	"github.com/BetterGuests/BetterGuests-Server/internal/bookings"
+	"github.com/BetterGuests/BetterGuests-Server/internal/cancellations"
 	"github.com/BetterGuests/BetterGuests-Server/internal/cashback"
 	"github.com/BetterGuests/BetterGuests-Server/internal/compliance"
 	"github.com/BetterGuests/BetterGuests-Server/internal/listings"
 	"github.com/BetterGuests/BetterGuests-Server/internal/messages"
 	"github.com/BetterGuests/BetterGuests-Server/internal/middleware"
 	"github.com/BetterGuests/BetterGuests-Server/internal/nearby"
+	"github.com/BetterGuests/BetterGuests-Server/internal/notifications"
 	"github.com/BetterGuests/BetterGuests-Server/internal/payments"
 	"github.com/BetterGuests/BetterGuests-Server/internal/profiles"
 	"github.com/BetterGuests/BetterGuests-Server/internal/proofs"
 	"github.com/BetterGuests/BetterGuests-Server/internal/realtime"
 	"github.com/BetterGuests/BetterGuests-Server/internal/reviews"
 	"github.com/BetterGuests/BetterGuests-Server/internal/settlements"
+	"github.com/BetterGuests/BetterGuests-Server/internal/stays"
 	"github.com/BetterGuests/BetterGuests-Server/internal/verification"
 	"github.com/BetterGuests/BetterGuests-Server/internal/waitlist"
 	"github.com/go-chi/cors"
 )
 
 type routeDeps struct {
-	database     databasePinger
-	origins      []string
-	authenticate func(http.Handler) http.Handler
-	listings     *listings.HTTPHandler
-	proofs       *proofs.HTTPHandler
-	nearby       *nearby.HTTPHandler
-	reviews      *reviews.HTTPHandler
-	bookings     *bookings.HTTPHandler
-	cashback     *cashback.HTTPHandler
-	verification *verification.HTTPHandler
-	payments     *payments.HTTPHandler
-	payouts      *settlements.HTTPHandler
-	compliance   *compliance.HTTPHandler
-	profiles     *profiles.HTTPHandler
-	messages     *messages.HTTPHandler
-	realtime     *realtime.HTTPHandler
-	waitlist     *waitlist.HTTPHandler
-	availability *availability.HTTPHandler
+	database      databasePinger
+	origins       []string
+	authenticate  func(http.Handler) http.Handler
+	listings      *listings.HTTPHandler
+	proofs        *proofs.HTTPHandler
+	nearby        *nearby.HTTPHandler
+	reviews       *reviews.HTTPHandler
+	bookings      *bookings.HTTPHandler
+	cashback      *cashback.HTTPHandler
+	verification  *verification.HTTPHandler
+	payments      *payments.HTTPHandler
+	payouts       *settlements.HTTPHandler
+	compliance    *compliance.HTTPHandler
+	profiles      *profiles.HTTPHandler
+	messages      *messages.HTTPHandler
+	realtime      *realtime.HTTPHandler
+	waitlist      *waitlist.HTTPHandler
+	availability  *availability.HTTPHandler
+	stays         *stays.HTTPHandler
+	inbox         *notifications.HTTPHandler
+	tripUpdates   backgroundJob
+	cancellations *cancellations.HTTPHandler
+}
+
+type backgroundJob interface {
+	Run(ctx context.Context)
 }
 
 func routes(deps routeDeps) http.Handler {
@@ -54,6 +66,7 @@ func routes(deps routeDeps) http.Handler {
 	deps.mountAvailability(mux)
 	deps.mountRealtime(mux)
 	deps.mountWaitlist(mux)
+	deps.mountListingReviews(mux)
 	deps.mountAuthenticatedAPI(mux)
 	return withMiddleware(mux, deps.origins)
 }
@@ -99,6 +112,13 @@ func (deps routeDeps) mountAvailability(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/listings/{listing_id}/booked-dates", deps.availability.ListBookedDates)
 }
 
+func (deps routeDeps) mountListingReviews(mux *http.ServeMux) {
+	if deps.reviews == nil {
+		return
+	}
+	mux.HandleFunc("GET /api/v1/listings/{listing_id}/reviews", deps.reviews.ListingReviews)
+}
+
 func (deps routeDeps) mountRealtime(mux *http.ServeMux) {
 	if deps.realtime == nil {
 		return
@@ -126,20 +146,41 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.Handle("POST /api/v1/listings/{listing_id}/proof/uploads", deps.compliance.RequireAdult(http.HandlerFunc(deps.proofs.RequestUpload)))
 	api.Handle("POST /api/v1/listings/{listing_id}/proof", deps.compliance.RequireAdult(http.HandlerFunc(deps.proofs.Submit)))
 	api.HandleFunc("GET /api/v1/listings/{listing_id}/proof", deps.proofs.Status)
+	api.Handle("POST /api/v1/listings/{listing_id}/proof/inquiries", deps.compliance.RequireAdult(http.HandlerFunc(deps.proofs.StartCheck)))
 	api.HandleFunc("GET /api/v1/listings/{listing_id}/setup", deps.listings.GetSetup)
 	api.Handle("POST /api/v1/listings/{listing_id}/photos/uploads", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.RequestPhotoUpload)))
 	api.Handle("POST /api/v1/listings/{listing_id}/photos", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.AddPhoto)))
 	api.Handle("DELETE /api/v1/listings/{listing_id}/photos/{photo_id}", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.RemovePhoto)))
 	api.Handle("PUT /api/v1/listings/{listing_id}/price", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.SetPrice)))
+	api.Handle("DELETE /api/v1/listings/{listing_id}", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.DeleteListing)))
 	api.HandleFunc("GET /api/v1/admin/me", deps.proofs.Me)
 	api.HandleFunc("GET /api/v1/admin/property-proofs", deps.proofs.ListSubmitted)
 	api.HandleFunc("POST /api/v1/admin/property-proofs/{proof_id}/decision", deps.proofs.Decide)
 	api.HandleFunc("POST /api/v1/reviews", deps.reviews.CreateReview)
+	api.HandleFunc("GET /api/v1/reviews/pending", deps.reviews.PendingReviews)
+	api.HandleFunc("GET /api/v1/reviews/about-me", deps.reviews.ReviewsAboutMe)
+	api.HandleFunc("GET /api/v1/bookings/{booking_id}/reviews", deps.reviews.BookingReviews)
+	api.HandleFunc("GET /api/v1/hosting/bookings/{booking_id}/guest-reviews", deps.reviews.BookingGuestReviews)
+	api.HandleFunc("GET /api/v1/bookings/{booking_id}/stay", deps.stays.GetStay)
+	api.HandleFunc("POST /api/v1/bookings/{booking_id}/check-in", deps.stays.CheckIn)
+	api.HandleFunc("POST /api/v1/bookings/{booking_id}/check-out", deps.stays.CheckOut)
+	api.HandleFunc("GET /api/v1/listings/{listing_id}/arrival-guide", deps.stays.GetGuide)
+	api.Handle("PUT /api/v1/listings/{listing_id}/arrival-guide", deps.compliance.RequireAdult(http.HandlerFunc(deps.stays.SaveGuide)))
+	api.HandleFunc("GET /api/v1/bookings/{booking_id}/cancellation", deps.cancellations.Options)
+	api.HandleFunc("POST /api/v1/bookings/{booking_id}/cancellation", deps.cancellations.Cancel)
+	api.HandleFunc("POST /api/v1/bookings/{booking_id}/report", deps.cancellations.Report)
+	api.HandleFunc("GET /api/v1/admin/stay-reports", deps.cancellations.OpenReports)
+	api.HandleFunc("POST /api/v1/admin/stay-reports/{booking_id}/decision", deps.cancellations.Resolve)
+	api.HandleFunc("GET /api/v1/notifications", deps.inbox.List)
+	api.HandleFunc("POST /api/v1/notifications/read", deps.inbox.MarkAllRead)
+	api.HandleFunc("POST /api/v1/notifications/{notification_id}/read", deps.inbox.MarkRead)
 	api.Handle("POST /api/v1/bookings", deps.compliance.RequireAdult(http.HandlerFunc(deps.bookings.CreateBooking)))
 	api.HandleFunc("GET /api/v1/bookings", deps.bookings.ListMyBookings)
 	api.HandleFunc("GET /api/v1/bookings/{booking_id}", deps.bookings.GetBooking)
 	api.HandleFunc("POST /api/v1/bookings/{booking_id}/cancel", deps.bookings.CancelBooking)
 	api.HandleFunc("GET /api/v1/hosting/booking-requests", deps.bookings.ListHostRequests)
+	api.HandleFunc("GET /api/v1/hosting/bookings", deps.bookings.ListHostBookings)
+	api.HandleFunc("GET /api/v1/hosting/listings", deps.listings.ListHostListings)
 	api.HandleFunc("POST /api/v1/hosting/bookings/{booking_id}/approve", deps.bookings.ApproveBooking)
 	api.HandleFunc("POST /api/v1/hosting/bookings/{booking_id}/decline", deps.bookings.DeclineBooking)
 	api.HandleFunc("GET /api/v1/conversations", deps.messages.ListConversations)

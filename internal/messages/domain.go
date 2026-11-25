@@ -10,8 +10,9 @@ import (
 type Role string
 
 const (
-	RoleGuest Role = "guest"
-	RoleHost  Role = "host"
+	RoleGuest  Role = "guest"
+	RoleHost   Role = "host"
+	RoleSystem Role = "system"
 )
 
 const MessageEventKind = "message"
@@ -28,12 +29,13 @@ const (
 )
 
 type Message struct {
-	ID             uuid.UUID `json:"id"`
-	ConversationID uuid.UUID `json:"conversation_id"`
-	SenderID       uuid.UUID `json:"-"`
-	SenderRole     Role      `json:"sender_role"`
-	Body           string    `json:"body"`
-	CreatedAt      time.Time `json:"created_at"`
+	ID             uuid.UUID  `json:"id"`
+	ConversationID uuid.UUID  `json:"conversation_id"`
+	SenderID       uuid.UUID  `json:"-"`
+	SenderRole     Role       `json:"sender_role"`
+	Body           string     `json:"body"`
+	CreatedAt      time.Time  `json:"created_at"`
+	BookingID      *uuid.UUID `json:"booking_id,omitempty"`
 }
 
 type Participants struct {

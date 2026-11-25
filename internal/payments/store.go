@@ -22,12 +22,12 @@ func (store *PostgresPaymentStore) QuoteBooking(ctx context.Context, guestID, bo
 	var quote Quote
 	err := db.WithUserTx(ctx, store.DB, guestID.String(), func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx,
-			`SELECT b.id, b.listing_id, l.host_id, b.status, (b.ends_on - b.starts_on), COALESCE(l.nightly_price_cents, 0)
+			`SELECT b.id, b.listing_id, l.host_id, b.status, (b.ends_on - b.starts_on), COALESCE(l.nightly_price_cents, 0), b.starts_on
 			 FROM app.bookings b
 			 JOIN app.listings l ON l.id = b.listing_id
 			 WHERE b.id = $1 AND b.guest_id = $2`,
 			bookingID, guestID,
-		).Scan(&quote.BookingID, &quote.ListingID, &quote.HostID, &quote.BookingStatus, &quote.Nights, &quote.NightlyPriceCents)
+		).Scan(&quote.BookingID, &quote.ListingID, &quote.HostID, &quote.BookingStatus, &quote.Nights, &quote.NightlyPriceCents, &quote.StartsOn)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Quote{}, ErrBookingNotFound

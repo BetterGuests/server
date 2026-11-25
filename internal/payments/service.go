@@ -49,6 +49,8 @@ type PaymentService struct {
 	newID      func() uuid.UUID
 }
 
+const westmostUSOffset = 10 * time.Hour
+
 func ConfigFromEnv() (Config, error) {
 	return configFromLookup(os.Getenv)
 }
@@ -156,6 +158,9 @@ func (service *PaymentService) StartCheckout(ctx context.Context, guestID, booki
 	if !holdOnly && quote.BookingStatus != bookingApproved {
 		return CheckoutResult{}, ErrBookingNotPayable
 	}
+	if tooLateToPay(quote, holdOnly, service.now()) {
+		return CheckoutResult{}, ErrBookingNotPayable
+	}
 	if quote.NightlyPriceCents <= 0 {
 		return CheckoutResult{}, ErrListingUnpriced
 	}
@@ -241,6 +246,15 @@ func (service *PaymentService) announceRequest(ctx context.Context, event Event)
 		return
 	}
 	service.publisher.Publish(quote.HostID, bookingEventKind, bookingEvent{BookingID: event.BookingID, Status: bookingRequested})
+}
+
+func tooLateToPay(quote Quote, holdOnly bool, now time.Time) bool {
+	year, month, day := now.UTC().Add(-westmostUSOffset).Date()
+	today := time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
+	if holdOnly {
+		return quote.StartsOn.Before(today)
+	}
+	return quote.StartsOn.AddDate(0, 0, quote.Nights).Before(today)
 }
 
 func statusForEvent(eventType string) (Status, bool) {

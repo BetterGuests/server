@@ -13,7 +13,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const exclusionViolationCode = "23P01"
+const (
+	exclusionViolationCode = "23P01"
+	restrictViolationCode  = "23001"
+	tripOverlapCode        = "BG001"
+)
 
 const maxListedBookings = 100
 
@@ -21,7 +25,8 @@ const detailColumns = `b.id, b.listing_id, b.guest_id, l.host_id, b.status, b.st
 	b.completed_at, b.decided_at, b.verification_id, b.created_at,
 	COALESCE(gn.display_name, ''), l.title, COALESCE(l.city, ''), COALESCE(l.region, ''),
 	COALESCE(l.host_name, ''), COALESCE(l.host_avatar_url, ''),
-	(b.ends_on - b.starts_on), COALESCE(l.nightly_price_cents, 0), l.currency, COALESCE(p.status, '')`
+	(b.ends_on - b.starts_on), COALESCE(l.nightly_price_cents, 0), l.currency, COALESCE(p.status, ''),
+	COALESCE(p.amount_cents, 0)`
 
 const detailFrom = `FROM app.bookings b
 	JOIN app.listings l ON l.id = b.listing_id
@@ -62,6 +67,10 @@ func (store *PostgresBookingStore) Create(ctx context.Context, actingUserID stri
 		switch {
 		case errors.As(err, &pgError) && pgError.Code == exclusionViolationCode:
 			return ErrBookingOverlaps
+		case errors.As(err, &pgError) && pgError.Code == tripOverlapCode:
+			return ErrTripOverlaps
+		case errors.As(err, &pgError) && pgError.Code == restrictViolationCode:
+			return ErrListingPaused
 		case err != nil:
 			return fmt.Errorf("insert booking: %w", err)
 		}
@@ -86,17 +95,26 @@ func (store *PostgresBookingStore) Get(ctx context.Context, actorID, bookingID u
 }
 
 func (store *PostgresBookingStore) ListForGuest(ctx context.Context, guestID uuid.UUID) ([]Detail, error) {
-	return store.list(ctx, guestID, `WHERE b.guest_id = $1 ORDER BY b.starts_on DESC, b.created_at DESC LIMIT $2`)
+	return store.list(ctx, guestID, `WHERE b.guest_id = $1 AND NOT (b.status = 'requested' AND COALESCE(p.status, '') NOT IN ('authorized', 'succeeded')) ORDER BY b.starts_on DESC, b.created_at DESC LIMIT $2`)
+}
+
+func (store *PostgresBookingStore) ListOverlapping(ctx context.Context, guestID uuid.UUID, startsOn, endsOn time.Time) ([]Detail, error) {
+	return store.list(ctx, guestID, `WHERE b.guest_id = $1 AND b.status IN ('requested', 'pending', 'confirmed') AND daterange(b.starts_on, b.ends_on, '[)') && daterange($3, $4, '[)') ORDER BY b.starts_on, b.created_at LIMIT $2`, startsOn, endsOn)
+}
+
+func (store *PostgresBookingStore) ListForHost(ctx context.Context, hostID uuid.UUID) ([]Detail, error) {
+	return store.list(ctx, hostID, `WHERE l.host_id = $1 AND b.ends_on >= CURRENT_DATE - 31 AND (b.status IN ('pending', 'confirmed', 'completed') OR (b.status = 'requested' AND p.status = 'authorized')) ORDER BY b.starts_on ASC, b.created_at ASC LIMIT $2`)
 }
 
 func (store *PostgresBookingStore) ListRequestsForHost(ctx context.Context, hostID uuid.UUID) ([]Detail, error) {
 	return store.list(ctx, hostID, `WHERE l.host_id = $1 AND b.status = 'requested' AND p.status = 'authorized' ORDER BY b.created_at ASC LIMIT $2`)
 }
 
-func (store *PostgresBookingStore) list(ctx context.Context, actorID uuid.UUID, clause string) ([]Detail, error) {
+func (store *PostgresBookingStore) list(ctx context.Context, actorID uuid.UUID, clause string, extra ...any) ([]Detail, error) {
 	var details []Detail
 	err := db.WithUserTx(ctx, store.DB, actorID.String(), func(tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `SELECT `+detailColumns+` `+detailFrom+` `+clause, actorID, maxListedBookings)
+		arguments := append([]any{actorID, maxListedBookings}, extra...)
+		rows, err := tx.Query(ctx, `SELECT `+detailColumns+` `+detailFrom+` `+clause, arguments...)
 		if err != nil {
 			return err
 		}
@@ -142,7 +160,8 @@ func (store *PostgresBookingStore) CancelByGuest(ctx context.Context, guestID, b
 	return db.WithUserTx(ctx, store.DB, guestID.String(), func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx,
 			`UPDATE app.bookings SET status = 'cancelled'
-			 WHERE id = $1 AND guest_id = $2 AND status IN ('requested', 'pending')`,
+			 WHERE id = $1 AND guest_id = $2 AND status IN ('requested', 'pending')
+			   AND NOT EXISTS (SELECT 1 FROM app.payments p WHERE p.booking_id = $1 AND p.status = 'succeeded')`,
 			bookingID, guestID)
 		if err != nil {
 			return fmt.Errorf("cancel booking: %w", err)
@@ -169,18 +188,22 @@ func missingOrConflict(ctx context.Context, tx pgx.Tx, conflict error, ownsQuery
 
 func scanDetail(row pgx.Row) (Detail, error) {
 	var detail Detail
+	var chargedCents int
 	err := row.Scan(
 		&detail.ID, &detail.ListingID, &detail.GuestID, &detail.HostID, &detail.Status, &detail.StartsOn, &detail.EndsOn,
 		&detail.CompletedAt, &detail.DecidedAt, &detail.VerificationID, &detail.CreatedAt,
 		&detail.GuestName, &detail.ListingTitle, &detail.ListingCity, &detail.ListingRegion,
 		&detail.HostName, &detail.HostAvatarURL,
-		&detail.Nights, &detail.NightlyPriceCents, &detail.Currency, &detail.PaymentStatus,
+		&detail.Nights, &detail.NightlyPriceCents, &detail.Currency, &detail.PaymentStatus, &chargedCents,
 	)
 	if err != nil {
 		return Detail{}, err
 	}
 	detail.GuestVerified = detail.VerificationID != nil
 	detail.TotalCents = detail.Nights * detail.NightlyPriceCents
+	if chargedCents > 0 {
+		detail.TotalCents = chargedCents
+	}
 	return detail, nil
 }
 

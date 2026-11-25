@@ -438,7 +438,8 @@ func bundleComplete(bundle Bundle, approvedKeys []string) bool {
 }
 
 func isEarning(state BookingState) bool {
-	return state.BookingStatus == "confirmed" && state.PaymentStatus == "succeeded" && state.PaymentIntentID != ""
+	stayPaidFor := state.BookingStatus == "confirmed" || state.BookingStatus == "completed"
+	return stayPaidFor && state.PaymentStatus == "succeeded" && state.PaymentIntentID != ""
 }
 
 func statusForDecision(decision Decision, note string) (TaskStatus, error) {

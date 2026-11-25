@@ -250,6 +250,8 @@ type PublicListing struct {
 	Beds          int            `json:"beds"`
 	Bathrooms     float64        `json:"bathrooms"`
 	MinimumNights int            `json:"minimum_nights"`
+	CheckInTime   string         `json:"check_in_time"`
+	CheckOutTime  string         `json:"check_out_time"`
 	Price         *ListingPrice  `json:"price,omitempty"`
 	Rating        *ListingRating `json:"rating,omitempty"`
 	Amenities     []Amenity      `json:"amenities"`
@@ -271,6 +273,17 @@ type PhotoSigner interface {
 type PublicListingReader interface {
 	ListPublished(ctx context.Context) ([]PublicListing, error)
 	GetPublished(ctx context.Context, id uuid.UUID) (PublicListing, error)
+}
+
+type HostListing struct {
+	ID     uuid.UUID     `json:"id"`
+	Title  string        `json:"title"`
+	City   string        `json:"city"`
+	Status ListingStatus `json:"status"`
+}
+
+type HostListingReader interface {
+	ListForHost(ctx context.Context, hostID uuid.UUID) ([]HostListing, error)
 }
 
 type Setup struct {
@@ -309,7 +322,7 @@ const (
 	RefusedHateful             PhotoRefusal = "it shows hateful or harassing content"
 	RefusedPersonalInformation PhotoRefusal = "it shows personal documents or private details"
 	RefusedContactDetails      PhotoRefusal = "it advertises contact or payment details"
-	RefusedUnrelated           PhotoRefusal = "it does not show your place"
+	RefusedUnrelated           PhotoRefusal = "it does not show your house or a room inside it"
 	RefusedUnsafe              PhotoRefusal = "it did not pass our safety check"
 )
 
@@ -322,4 +335,12 @@ type MediaStore interface {
 	AddPhoto(ctx context.Context, userID string, listingID uuid.UUID, photo ListingPhoto) error
 	RemovePhoto(ctx context.Context, userID string, listingID, photoID uuid.UUID) (string, error)
 	SetPrice(ctx context.Context, userID string, listingID uuid.UUID, nightlyCents int) error
+}
+
+type ListingDeleteStore interface {
+	DeleteDraft(ctx context.Context, userID string, listingID uuid.UUID) ([]string, error)
+}
+
+type ListingDeleter interface {
+	DeleteListing(ctx context.Context, hostID, listingID uuid.UUID) error
 }

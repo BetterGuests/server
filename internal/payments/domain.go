@@ -42,6 +42,7 @@ type Quote struct {
 	BookingStatus     string
 	Nights            int
 	NightlyPriceCents int
+	StartsOn          time.Time
 }
 
 type Payment struct {

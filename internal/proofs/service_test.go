@@ -67,6 +67,8 @@ func (objects *objectsStub) Stat(context.Context, string) (ObjectInfo, error) {
 	return objects.info, objects.statErr
 }
 
+func (objects *objectsStub) Write(context.Context, string, string, []byte) error { return nil }
+
 func (objects *objectsStub) Remove(_ context.Context, key string) error {
 	objects.removed = append(objects.removed, key)
 	return nil

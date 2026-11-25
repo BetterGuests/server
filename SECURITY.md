@@ -150,3 +150,56 @@ equally deep. A few are worth reading before you trust them blindly:
 - [x] Biometric consent is recorded with a policy version and timestamp before any Persona inquiry is created
 - [x] A minor's date of birth is never stored
 - [ ] Withdrawal endpoint for biometric consent
+
+## Trips, reviews and notifications
+
+- Entry codes and Wi-Fi passwords live in `app.listing_arrival_guides`. The
+  host can read their own guide. A guest can read it only with a confirmed
+  booking near its dates, and the API narrows that to 48 hours before
+  check-in until checkout. Notifications and thread notes never contain them.
+- Reviews are double-blind. A review has no `published_at` until both sides
+  wrote one or 14 days passed, only `app.publish_due_reviews()` sets it, and
+  the API role cannot update or delete reviews.
+- Five `SECURITY DEFINER` functions let the background job act without a
+  signed-in user: `complete_finished_stays`, `publish_due_reviews`,
+  `stay_journey`, `deliver_stay_notification` and `post_stay_message`. The
+  first two take their clock from the database. The last two only address the
+  guest or host of the named booking. None is reachable from a request without
+  going through a service that checks the caller.
+
+## Guards on bookings and listings
+
+- The API role may change only `status` and `decided_at` on a booking, and a
+  host may only move a request to approved or declined.
+- A listing cannot leave `published` while it has a current or upcoming
+  booking, and the booking foreign key stops it being deleted.
+- A request cannot be approved after its check-in date. A booking the guest was
+  charged for cannot be cancelled, and a cancel only goes through once the card
+  hold is released.
+- Check-in times and time zone are locked while a guest is staying.
+
+## Cancellations and refunds
+
+- Refund amounts are worked out on the server from the stored payment. The
+  client only echoes the amount it showed, and a mismatch cancels nothing.
+- A cancellation or decision is recorded first, then refunded. Failed refunds
+  stay `pending`, are retried by the job, and hold the host payout.
+- Only an admin who is neither the guest nor the host can decide a problem
+  report; a database trigger enforces it.
+- Paused listings live in `app.listing_suspensions`. The API role cannot remove
+  a row, so lifting a pause is a manual database change.
+
+## Automatic property document checks
+
+- A proof is approved without an admin only when the signed Persona webhook says
+  the inquiry completed, the document verification passed with no failed check,
+  and the extracted name and address match the host's ID name and the listing.
+  Everything else stays in the admin queue.
+- Only inquiries this server created are accepted, tied to one host, listing and
+  address. `app.approve_persona_property_proof` is `SECURITY DEFINER` and limited
+  to that host's submitted proof while the listing address is unchanged. It
+  trusts the API to have verified the webhook first.
+- Document files are fetched only over HTTPS from `withpersona.com` and copied to
+  our storage.
+- Open gap: the ID deletion job and the host's "delete ID data" action do not
+  redact document inquiries held by Persona.

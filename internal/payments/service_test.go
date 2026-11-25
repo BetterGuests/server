@@ -69,7 +69,7 @@ func (parser fakeParser) ParseEvent([]byte, string) (Event, error) {
 }
 
 func pricedQuote() Quote {
-	return Quote{BookingID: uuid.New(), BookingStatus: "pending", Nights: 3, NightlyPriceCents: 12000}
+	return Quote{BookingID: uuid.New(), BookingStatus: "pending", Nights: 3, NightlyPriceCents: 12000, StartsOn: time.Now().AddDate(0, 0, 7)}
 }
 
 func newService(store *fakeStore, intents *fakeIntents, parser fakeParser) *PaymentService {

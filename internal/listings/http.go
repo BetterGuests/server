@@ -37,6 +37,7 @@ type HTTPHandler struct {
 	publisher      ListingPublisher
 	publicReader   PublicListingReader
 	manager        MediaManager
+	hostReader     HostListingReader
 }
 
 func NewHTTPHandler(listingCreator ListingCreator) *HTTPHandler {
@@ -75,6 +76,28 @@ func (handler *HTTPHandler) PublishListing(w http.ResponseWriter, r *http.Reques
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"id": listingID.String(), "status": string(Published)})
 	}
+}
+
+func (handler *HTTPHandler) WithHostReader(reader HostListingReader) *HTTPHandler {
+	handler.hostReader = reader
+	return handler
+}
+
+func (handler *HTTPHandler) ListHostListings(w http.ResponseWriter, r *http.Request) {
+	hostID, ok := accounts.UserID(r.Context())
+	if !ok {
+		writeListingError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	found, err := handler.hostReader.ListForHost(r.Context(), hostID)
+	if err != nil {
+		slog.Error("list host listings", "error", err)
+		writeListingError(w, http.StatusInternalServerError, "could not load your listings")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "private, no-store")
+	_ = json.NewEncoder(w).Encode(map[string][]HostListing{"listings": found})
 }
 
 func (handler *HTTPHandler) WithPublicReader(reader PublicListingReader) *HTTPHandler {
@@ -339,4 +362,30 @@ func writeMediaResult(w http.ResponseWriter, status int, body any, err error) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+func (handler *HTTPHandler) DeleteListing(w http.ResponseWriter, r *http.Request) {
+	hostID, listingID, ok := hostAndListing(w, r)
+	if !ok {
+		return
+	}
+	deleter, ok := handler.listingCreator.(ListingDeleter)
+	if !ok {
+		writeListingError(w, http.StatusNotFound, "deleting listings is not available")
+		return
+	}
+	err := deleter.DeleteListing(r.Context(), hostID, listingID)
+	switch {
+	case errors.Is(err, ErrListingNotFound):
+		writeListingError(w, http.StatusNotFound, "listing not found")
+	case errors.Is(err, ErrNotListingOwner):
+		writeListingError(w, http.StatusForbidden, "only the host can delete this listing")
+	case errors.Is(err, ErrListingInUse):
+		writeListingError(w, http.StatusConflict, err.Error())
+	case err != nil:
+		slog.Error("Delete listing", "error", err)
+		writeListingError(w, http.StatusInternalServerError, "could not delete listing")
+	default:
+		w.WriteHeader(http.StatusNoContent)
+	}
 }

@@ -45,6 +45,10 @@ type Proof struct {
 	CreatedAt       time.Time    `json:"created_at"`
 	UpdatedAt       time.Time    `json:"updated_at"`
 	ObjectKey       string       `json:"-"`
+	ExtraObjectKeys []string     `json:"-"`
+	InquiryID       string       `json:"-"`
+	AddressKey      *string      `json:"-"`
+	UnitKey         *string      `json:"-"`
 }
 
 type ReviewItem struct {
@@ -61,6 +65,8 @@ type ReviewItem struct {
 	IDLastName   string `json:"id_last_name,omitempty"`
 	IDNameSuffix string `json:"id_name_suffix,omitempty"`
 	DocumentURL  string `json:"document_url,omitempty"`
+
+	ExtraDocumentURLs []string `json:"extra_document_urls,omitempty"`
 }
 
 type UploadTicket struct {
@@ -80,6 +86,7 @@ type ObjectStore interface {
 	PresignUpload(ctx context.Context, key, contentType string, expires time.Duration) (string, error)
 	PresignDownload(ctx context.Context, key string, expires time.Duration) (string, error)
 	Stat(ctx context.Context, key string) (ObjectInfo, error)
+	Write(ctx context.Context, key, contentType string, data []byte) error
 	Remove(ctx context.Context, key string) error
 }
 
@@ -111,4 +118,75 @@ type AdminChecker interface {
 type ReviewQueue interface {
 	ListSubmitted(ctx context.Context, adminID uuid.UUID) ([]ReviewItem, error)
 	Decide(ctx context.Context, adminID, proofID uuid.UUID, decision Decision, reason string) error
+}
+
+type IDName struct {
+	First  string
+	Last   string
+	Suffix string
+}
+
+type PropertyAddress struct {
+	Line1       string
+	Line2       string
+	City        string
+	PostalCode  string
+	CountryCode string
+}
+
+type CheckSubject struct {
+	Address    PropertyAddress
+	AddressKey *string
+	UnitKey    *string
+}
+
+type CheckInquiry struct {
+	ID           uuid.UUID
+	InquiryID    string
+	ListingID    uuid.UUID
+	HostID       uuid.UUID
+	DocumentType DocumentType
+	AddressKey   *string
+	UnitKey      *string
+	CreatedAt    time.Time
+}
+
+type CheckTicket struct {
+	InquiryID    string `json:"inquiry_id"`
+	SessionToken string `json:"session_token"`
+}
+
+type CheckEvent struct {
+	AccountID uuid.UUID
+	InquiryID string
+	Name      string
+	Body      []byte
+}
+
+type CheckStore interface {
+	ListingHost(ctx context.Context, actingID, listingID uuid.UUID) (uuid.UUID, error)
+	Latest(ctx context.Context, actingID, listingID uuid.UUID) (Proof, bool, error)
+	CheckSubject(ctx context.Context, hostID, listingID uuid.UUID) (CheckSubject, error)
+	IDName(ctx context.Context, hostID uuid.UUID) (IDName, bool, error)
+	SaveInquiry(ctx context.Context, inquiry CheckInquiry) error
+	FindInquiry(ctx context.Context, hostID uuid.UUID, inquiryID string) (CheckInquiry, bool, error)
+	HasProofForInquiry(ctx context.Context, hostID uuid.UUID, inquiryID string) (bool, error)
+	SaveFromInquiry(ctx context.Context, proof Proof) error
+	ApproveFromInquiry(ctx context.Context, hostID uuid.UUID, inquiryID string, at time.Time) (bool, error)
+}
+
+type InquiryStarter interface {
+	StartInquiry(ctx context.Context, referenceID string, fields map[string]string) (CheckTicket, error)
+}
+
+type IDChecker interface {
+	HasCurrentID(ctx context.Context, accountID uuid.UUID) (bool, error)
+}
+
+type FileFetcher interface {
+	Fetch(ctx context.Context, url string, maxBytes int64) ([]byte, error)
+}
+
+type CheckStarter interface {
+	Start(ctx context.Context, hostID, listingID uuid.UUID, documentType DocumentType) (CheckTicket, error)
 }

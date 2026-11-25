@@ -211,6 +211,7 @@ func TestVerifiedGuestWithUnpaidBookingCannotSubmit(t *testing.T) {
 		"payment failed":    {BookingStatus: "pending", PaymentStatus: "failed", PaymentIntentID: "pi_1"},
 		"booking cancelled": {BookingStatus: "cancelled", PaymentStatus: "succeeded", PaymentIntentID: "pi_1"},
 		"no payment":        {BookingStatus: "confirmed"},
+		"finished unpaid":   {BookingStatus: "completed"},
 	}
 	for name, state := range cases {
 		t.Run(name, func(t *testing.T) {

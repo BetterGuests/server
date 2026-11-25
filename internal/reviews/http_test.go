@@ -13,15 +13,15 @@ import (
 
 type reviewCreatorStub struct{ err error }
 
-func (stub *reviewCreatorStub) CreateReview(_ context.Context, guestID uuid.UUID, input CreateReviewInput) (Review, error) {
-	return Review{ID: uuid.New(), GuestID: guestID, BookingID: input.BookingID}, stub.err
+func (stub *reviewCreatorStub) CreateReview(_ context.Context, _ uuid.UUID, input CreateReviewInput) (Review, error) {
+	return Review{ID: uuid.New(), BookingID: input.BookingID}, stub.err
 }
 
 func TestCreateReviewHTTPMapsConflict(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/reviews", strings.NewReader(`{"booking_id":"11111111-1111-4111-8111-111111111111","rating":5,"comment":"Great"}`))
 	request = request.WithContext(accounts.WithUserID(request.Context(), uuid.New()))
 	response := httptest.NewRecorder()
-	NewHTTPHandler(&reviewCreatorStub{err: ErrReviewAlreadyExists}).CreateReview(response, request)
+	NewHTTPHandler(&reviewCreatorStub{err: ErrReviewAlreadyExists}, nil).CreateReview(response, request)
 	if response.Code != http.StatusConflict {
 		t.Fatalf("expected 409, got %d", response.Code)
 	}
@@ -29,7 +29,7 @@ func TestCreateReviewHTTPMapsConflict(t *testing.T) {
 
 func TestCreateReviewHTTPRequiresAuthentication(t *testing.T) {
 	response := httptest.NewRecorder()
-	NewHTTPHandler(&reviewCreatorStub{}).CreateReview(response, httptest.NewRequest(http.MethodPost, "/api/v1/reviews", strings.NewReader(`{}`)))
+	NewHTTPHandler(&reviewCreatorStub{}, nil).CreateReview(response, httptest.NewRequest(http.MethodPost, "/api/v1/reviews", strings.NewReader(`{}`)))
 	if response.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", response.Code)
 	}
@@ -44,7 +44,7 @@ func TestCreateReviewHTTPRejectsOversizedBody(t *testing.T) {
 	oversized := `{"comment":"` + strings.Repeat("a", 2<<20) + `"}`
 	response := httptest.NewRecorder()
 
-	NewHTTPHandler(&reviewCreatorStub{}).CreateReview(response, reviewRequest(oversized))
+	NewHTTPHandler(&reviewCreatorStub{}, nil).CreateReview(response, reviewRequest(oversized))
 
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for a body over the byte limit, got %d", response.Code)
@@ -54,7 +54,7 @@ func TestCreateReviewHTTPRejectsOversizedBody(t *testing.T) {
 func TestCreateReviewHTTPRejectsUnknownFields(t *testing.T) {
 	response := httptest.NewRecorder()
 
-	NewHTTPHandler(&reviewCreatorStub{}).CreateReview(response, reviewRequest(`{"rating":5,"comment":"ok","unexpected":"field"}`))
+	NewHTTPHandler(&reviewCreatorStub{}, nil).CreateReview(response, reviewRequest(`{"rating":5,"comment":"ok","unexpected":"field"}`))
 
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for an unknown field, got %d", response.Code)
@@ -64,7 +64,7 @@ func TestCreateReviewHTTPRejectsUnknownFields(t *testing.T) {
 func TestCreateReviewHTTPRejectsMalformedJSON(t *testing.T) {
 	response := httptest.NewRecorder()
 
-	NewHTTPHandler(&reviewCreatorStub{}).CreateReview(response, reviewRequest(`{"rating":`))
+	NewHTTPHandler(&reviewCreatorStub{}, nil).CreateReview(response, reviewRequest(`{"rating":`))
 
 	if response.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for malformed JSON, got %d", response.Code)

@@ -112,3 +112,23 @@ naming convention. This gives tests direct package access and keeps ownership
 clear. The database suite uses two disposable accounts to test cross-account
 access, identity spoofing, SQL injection, role escalation, DDL, RLS disabling,
 truncation, migration-table access, and pooled session-state leakage.
+
+## Trip lifecycle
+
+A job in the API process runs every minute, and sooner after a booking,
+payment, check-in, check-out, arrival guide or review changes. It completes
+stays whose checkout time has passed in the listing's time zone, publishes
+reviews that are due, and sends each notification and message thread note once.
+Unique constraints keep it safe to run on several replicas.
+
+On its first run after migrations 00027 and 00028 it marks every past confirmed booking
+completed.
+
+## Cancellation rules
+
+A request expires after 12 hours, or at check-in if sooner, with at least one
+hour to answer. A guest gets a full refund within 4 hours of approval or 5 or
+more days before check-in, and half otherwise. There is no automatic refund
+after check-in. A host cancellation refunds everything, blocks those dates, and
+the third in 12 months pauses the listing. Problem reports are open for 24 hours
+after check-in and decided at `/admin/stay-reports`.

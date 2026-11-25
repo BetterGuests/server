@@ -15,6 +15,8 @@ import (
 
 const VerificationRequiredCode = "verification_required"
 
+const TripOverlapCode = "trip_overlap"
+
 const dateLayout = "2006-01-02"
 
 type BookingCreator interface {
@@ -24,6 +26,7 @@ type BookingCreator interface {
 type BookingReader interface {
 	Get(ctx context.Context, actorID, bookingID uuid.UUID) (Detail, error)
 	ListForGuest(ctx context.Context, guestID uuid.UUID) ([]Detail, error)
+	ListForHost(ctx context.Context, hostID uuid.UUID) ([]Detail, error)
 	ListRequestsForHost(ctx context.Context, hostID uuid.UUID) ([]Detail, error)
 }
 
@@ -103,7 +106,13 @@ func (handler *HTTPHandler) CreateBooking(w http.ResponseWriter, r *http.Request
 		w.WriteHeader(http.StatusForbidden)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": err.Error(), "code": VerificationRequiredCode})
 		return
-	case errors.Is(err, ErrBookingOverlaps):
+	case errors.Is(err, ErrTripOverlaps):
+		writeBookingJSON(w, http.StatusConflict, map[string]string{"error": ErrTripOverlaps.Error(), "code": TripOverlapCode})
+		return
+	case errors.Is(err, ErrReleaseFailed):
+		writeBookingError(w, http.StatusBadGateway, ErrReleaseFailed.Error())
+		return
+	case errors.Is(err, ErrBookingOverlaps), errors.Is(err, ErrListingPaused):
 		writeBookingError(w, http.StatusConflict, err.Error())
 		return
 	case err != nil:
@@ -137,6 +146,20 @@ func (handler *HTTPHandler) ListMyBookings(w http.ResponseWriter, r *http.Reques
 	details, err := handler.reader.ListForGuest(r.Context(), guestID)
 	if err != nil {
 		writeServiceError(w, "List bookings", err)
+		return
+	}
+	writeBookingJSON(w, http.StatusOK, map[string][]Detail{"bookings": nonNil(details)})
+}
+
+func (handler *HTTPHandler) ListHostBookings(w http.ResponseWriter, r *http.Request) {
+	hostID, ok := accounts.UserID(r.Context())
+	if !ok {
+		writeBookingError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	details, err := handler.reader.ListForHost(r.Context(), hostID)
+	if err != nil {
+		writeServiceError(w, "List host bookings", err)
 		return
 	}
 	writeBookingJSON(w, http.StatusOK, map[string][]Detail{"bookings": nonNil(details)})
@@ -203,9 +226,9 @@ func writeServiceError(w http.ResponseWriter, operation string, err error) {
 	switch {
 	case errors.Is(err, ErrBookingNotFound):
 		writeBookingError(w, http.StatusNotFound, "booking not found")
-	case errors.Is(err, ErrNotAwaitingApproval), errors.Is(err, ErrNotCancellable), errors.Is(err, ErrPaymentNotAuthorized):
+	case errors.Is(err, ErrNotAwaitingApproval), errors.Is(err, ErrNotCancellable), errors.Is(err, ErrPaymentNotAuthorized), errors.Is(err, ErrStayAlreadyStarted):
 		writeBookingError(w, http.StatusConflict, err.Error())
-	case errors.Is(err, ErrCaptureFailed):
+	case errors.Is(err, ErrCaptureFailed), errors.Is(err, ErrReleaseFailed):
 		writeBookingError(w, http.StatusBadGateway, err.Error())
 	default:
 		slog.Error(operation, "error", err)

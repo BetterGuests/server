@@ -13,12 +13,14 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/auth"
 	"github.com/BetterGuests/BetterGuests-Server/internal/availability"
 	"github.com/BetterGuests/BetterGuests-Server/internal/bookings"
+	"github.com/BetterGuests/BetterGuests-Server/internal/cancellations"
 	"github.com/BetterGuests/BetterGuests-Server/internal/cashback"
 	"github.com/BetterGuests/BetterGuests-Server/internal/compliance"
 	"github.com/BetterGuests/BetterGuests-Server/internal/listings"
 	"github.com/BetterGuests/BetterGuests-Server/internal/messages"
 	"github.com/BetterGuests/BetterGuests-Server/internal/monitoring"
 	"github.com/BetterGuests/BetterGuests-Server/internal/nearby"
+	"github.com/BetterGuests/BetterGuests-Server/internal/notifications"
 	"github.com/BetterGuests/BetterGuests-Server/internal/payments"
 	"github.com/BetterGuests/BetterGuests-Server/internal/profiles"
 	"github.com/BetterGuests/BetterGuests-Server/internal/proofs"
@@ -26,6 +28,7 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/reviews"
 	"github.com/BetterGuests/BetterGuests-Server/internal/screening"
 	"github.com/BetterGuests/BetterGuests-Server/internal/settlements"
+	"github.com/BetterGuests/BetterGuests-Server/internal/stays"
 	"github.com/BetterGuests/BetterGuests-Server/internal/verification"
 	"github.com/BetterGuests/BetterGuests-Server/internal/waitlist"
 	"github.com/google/uuid"
@@ -56,6 +59,14 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 	authenticator := auth.NewAuthenticator(authService)
 	realtimeService := realtime.NewRealtimeService()
 
+	notificationStore := notifications.NewPostgresNotificationStore(pool)
+	journeyService := notifications.NewJourneyService(notificationStore, realtimeService)
+	tripPublisher := nudgingPublisher{publisher: realtimeService, nudger: journeyService}
+	stayStore := stays.NewPostgresStayStore(pool)
+	stayService := stays.NewStayService(stayStore, stayStore).WithNudger(journeyService)
+	reviewService := reviews.NewReviewService(reviews.NewPostgresReviewStore(pool)).WithNudger(journeyService)
+	journeyService.WithLifecycle(stayService, reviewService)
+
 	complianceService := compliance.NewComplianceService(compliance.NewPostgresComplianceStore(pool))
 
 	personaConfig, err := verification.ConfigFromEnv()
@@ -84,13 +95,21 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 	paymentService := payments.NewPaymentService(paymentStore, stripeGateway, stripeGateway, paymentConfig).
 		WithSavedCards(stripeGateway, paymentStore).
 		WithController(stripeGateway).
-		WithPublisher(realtimeService)
+		WithPublisher(tripPublisher)
+
+	cancellationService := cancellations.NewCancellationService(
+		cancellations.NewPostgresCancellationStore(pool),
+		cancellations.NewStripeGateway(paymentConfig.SecretKey),
+		paymentService,
+		tripPublisher,
+	)
+	journeyService.WithUpkeep(cancellationService)
 
 	bookingStore := bookings.NewPostgresBookingStore(pool)
 	bookingService := bookings.NewBookingService(bookingStore).
 		WithVerification(currentVerifier).
 		WithDetails(bookingStore).
-		WithPublisher(realtimeService).
+		WithPublisher(tripPublisher).
 		WithPayments(paymentService)
 
 	objectStore, err := cashback.NewObjectStoreFromEnv()
@@ -124,7 +143,22 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		slog.Warn("listing photos are not screened: ANTHROPIC_API_KEY is not set")
 	}
 
-	proofService := proofs.NewProofService(proofs.NewPostgresProofStore(pool), proofObjectsFrom(objectStore))
+	proofStore := proofs.NewPostgresProofStore(pool)
+	proofService := proofs.NewProofService(proofStore, proofObjectsFrom(objectStore))
+	proofHandler := proofs.NewHTTPHandler(proofService, proofService, proofService, proofService, proofService)
+	checksEnabled := personaConfig.PropertyTemplateID != "" && objectStore != nil
+	var checkInquiries proofs.InquiryStarter
+	if checksEnabled {
+		checkInquiries = propertyInquiries{client: personaClient, templateID: personaConfig.PropertyTemplateID}
+	}
+	checkService := proofs.NewCheckService(proofStore, checkInquiries, currentIDs{checker: currentVerifier},
+		proofObjectsFrom(objectStore), proofs.NewPersonaFileFetcher(nil))
+	if checksEnabled {
+		proofHandler.WithChecks(checkService)
+	} else {
+		slog.Warn("listing documents are reviewed by hand: PERSONA_PROPERTY_TEMPLATE_ID and S3 storage are both needed")
+	}
+	verificationService.WithOtherInquiries(propertyEvents{checks: checkService})
 
 	profileService := profiles.NewProfileService(profiles.NewPostgresProfileStore(pool), bannerObjectsFrom(objectStore))
 
@@ -135,22 +169,45 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		listings: listings.NewHTTPHandler(listingService).
 			WithPublisher(listingService).
 			WithMedia(listingService).
+			WithHostReader(listingStore).
 			WithPublicReader(listings.NewPublicListingService(listingStore, objectStore)),
-		proofs:       proofs.NewHTTPHandler(proofService, proofService, proofService, proofService, proofService),
-		nearby:       buildNearbyHandler(listingStore),
-		reviews:      reviews.NewHTTPHandler(reviews.NewService(reviews.NewPostgresStore(pool))),
-		bookings:     bookings.NewHTTPHandler(bookingService).WithReader(bookingService).WithResponder(bookingService),
-		messages:     messages.NewHTTPHandler(messageService, messageService, messageService),
-		realtime:     realtime.NewHTTPHandler(realtimeService, authService, origins),
-		cashback:     cashback.NewHTTPHandler(cashbackService, cashbackService, cashbackService, cashbackService, cashbackService),
-		verification: verification.NewHTTPHandler(verificationService, verificationService).WithStatusReader(verificationStore).WithCurrentChecker(currentVerifier).WithDeletion(deletionService),
-		payments:     payments.NewHTTPHandler(paymentService, paymentService),
-		payouts:      settlements.NewHTTPHandler(payoutService, payoutService),
-		compliance:   compliance.NewHTTPHandler(complianceService, complianceService, complianceService),
-		profiles:     profiles.NewHTTPHandler(profileService, profileService, profileService, profileService),
-		waitlist:     waitlist.NewHTTPHandler(waitlist.NewWaitlistService(waitlist.NewPostgresWaitlistStore(pool))),
-		availability: availability.NewHTTPHandler(availability.NewAvailabilityService(availability.NewPostgresAvailabilityStore(pool))),
+		proofs:        proofHandler,
+		nearby:        buildNearbyHandler(listingStore),
+		reviews:       reviews.NewHTTPHandler(reviewService, reviewService),
+		bookings:      bookings.NewHTTPHandler(bookingService).WithReader(bookingService).WithResponder(bookingService),
+		messages:      messages.NewHTTPHandler(messageService, messageService, messageService),
+		realtime:      realtime.NewHTTPHandler(realtimeService, authService, origins),
+		cashback:      cashback.NewHTTPHandler(cashbackService, cashbackService, cashbackService, cashbackService, cashbackService),
+		verification:  verification.NewHTTPHandler(verificationService, verificationService).WithStatusReader(verificationStore).WithCurrentChecker(currentVerifier).WithDeletion(deletionService),
+		payments:      payments.NewHTTPHandler(paymentService, paymentService),
+		payouts:       settlements.NewHTTPHandler(payoutService, payoutService),
+		compliance:    compliance.NewHTTPHandler(complianceService, complianceService, complianceService),
+		profiles:      profiles.NewHTTPHandler(profileService, profileService, profileService, profileService),
+		waitlist:      waitlist.NewHTTPHandler(waitlist.NewWaitlistService(waitlist.NewPostgresWaitlistStore(pool))),
+		availability:  availability.NewHTTPHandler(availability.NewAvailabilityService(availability.NewPostgresAvailabilityStore(pool))),
+		stays:         stays.NewHTTPHandler(stayService, stayService),
+		inbox:         notifications.NewHTTPHandler(notifications.NewNotificationService(notificationStore)),
+		tripUpdates:   journeyService,
+		cancellations: cancellations.NewHTTPHandler(cancellationService, cancellationService),
 	}, nil
+}
+
+type realtimePublisher interface {
+	Publish(userID uuid.UUID, kind string, payload any)
+}
+
+type nudger interface {
+	Nudge()
+}
+
+type nudgingPublisher struct {
+	publisher realtimePublisher
+	nudger    nudger
+}
+
+func (trip nudgingPublisher) Publish(userID uuid.UUID, kind string, payload any) {
+	trip.publisher.Publish(userID, kind, payload)
+	trip.nudger.Nudge()
 }
 
 func buildNearbyHandler(listingStore *listings.PostgresListingStore) *nearby.HTTPHandler {
@@ -261,6 +318,14 @@ func (objects proofObjects) Stat(ctx context.Context, key string) (proofs.Object
 	return proofs.ObjectInfo{Size: info.Size, ContentType: info.ContentType}, nil
 }
 
+func (objects proofObjects) Write(ctx context.Context, key, contentType string, data []byte) error {
+	content, ok := objects.store.(objectContent)
+	if !ok {
+		return errors.New("storage cannot write objects")
+	}
+	return content.Write(ctx, key, contentType, data)
+}
+
 func (objects proofObjects) Remove(ctx context.Context, key string) error {
 	remover, ok := objects.store.(objectRemover)
 	if !ok {
@@ -321,6 +386,34 @@ func (objects listingObjects) Remove(ctx context.Context, key string) error {
 		return nil
 	}
 	return remover.Remove(ctx, key)
+}
+
+type propertyInquiries struct {
+	client     *verification.PersonaClient
+	templateID string
+}
+
+func (inquiries propertyInquiries) StartInquiry(ctx context.Context, referenceID string, fields map[string]string) (proofs.CheckTicket, error) {
+	inquiry, err := inquiries.client.CreatePrefilledInquiry(ctx, inquiries.templateID, referenceID, fields)
+	if err != nil {
+		return proofs.CheckTicket{}, err
+	}
+	return proofs.CheckTicket{InquiryID: inquiry.ID, SessionToken: inquiry.SessionToken}, nil
+}
+
+type currentIDs struct{ checker verification.CurrentChecker }
+
+func (ids currentIDs) HasCurrentID(ctx context.Context, accountID uuid.UUID) (bool, error) {
+	_, current, err := ids.checker.CurrentVerificationID(ctx, accountID)
+	return current, err
+}
+
+type propertyEvents struct{ checks *proofs.CheckService }
+
+func (events propertyEvents) Claim(ctx context.Context, inquiry verification.OtherInquiry) (bool, error) {
+	return events.checks.Process(ctx, proofs.CheckEvent{
+		AccountID: inquiry.AccountID, InquiryID: inquiry.InquiryID, Name: inquiry.EventName, Body: inquiry.Body,
+	})
 }
 
 func buildSettlementService(pool *pgxpool.Pool) (*settlements.SettlementService, error) {

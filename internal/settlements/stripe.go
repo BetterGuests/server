@@ -21,7 +21,7 @@ const (
 	accountLinksPath   = "/v2/core/account_links"
 	capabilityActive   = "active"
 	hostCountry        = "us"
-	platformWebsite    = "https://betterguests.com"
+	platformWebsite    = "https://better-guests.com"
 	hostDescription    = "Hosts a short term rental booked and paid through Better Guests."
 )
 

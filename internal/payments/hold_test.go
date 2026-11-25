@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -34,6 +35,31 @@ type publisherStub struct{ events []publishedEvent }
 
 func (stub *publisherStub) Publish(userID uuid.UUID, kind string, payload any) {
 	stub.events = append(stub.events, publishedEvent{userID, kind, payload})
+}
+
+func TestCheckoutRefusesStaysThatCanNoLongerHappen(t *testing.T) {
+	cases := map[string]struct {
+		status  string
+		daysAgo int
+		refused bool
+	}{
+		"a request whose check-in date passed": {"requested", 2, true},
+		"an approved stay already over":        {"pending", 10, true},
+		"an approved stay still running":       {"pending", 2, false},
+	}
+	for name, test := range cases {
+		t.Run(name, func(t *testing.T) {
+			store := &fakeStore{quote: pricedQuote()}
+			store.quote.BookingStatus = test.status
+			store.quote.StartsOn = time.Now().AddDate(0, 0, -test.daysAgo)
+			intents := &fakeIntents{}
+
+			_, err := newService(store, intents, fakeParser{}).StartCheckout(context.Background(), uuid.New(), store.quote.BookingID)
+			if errors.Is(err, ErrBookingNotPayable) != test.refused || (len(intents.params) == 0) != test.refused {
+				t.Fatalf("refused=%v err=%v intents=%+v", test.refused, err, intents.params)
+			}
+		})
+	}
 }
 
 func TestRequestedBookingCheckoutOnlyHoldsTheCard(t *testing.T) {

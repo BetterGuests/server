@@ -13,7 +13,7 @@ func TestHostAccountIsATransfersOnlyExpressRecipient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{`"business_url":"https://betterguests.com"`, `"product_description":`, `"contact_email":"host@example.com"`, `"dashboard":"express"`, `"stripe_transfers":{"requested":true}`, `"fees_collector":"application"`, `"losses_collector":"application"`} {
+	for _, want := range []string{`"business_url":"https://better-guests.com"`, `"product_description":`, `"contact_email":"host@example.com"`, `"dashboard":"express"`, `"stripe_transfers":{"requested":true}`, `"fees_collector":"application"`, `"losses_collector":"application"`} {
 		if !strings.Contains(string(encoded), want) {
 			t.Fatalf("missing %s in %s", want, encoded)
 		}

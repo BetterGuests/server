@@ -51,6 +51,7 @@ type Due struct {
 	Currency           string
 	AcceptedTaskKeys   []string
 	EarlierRefundCents int
+	AdjustmentCents    int
 	HostAccountID      string
 	Saved              *Settlement
 }

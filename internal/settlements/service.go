@@ -156,9 +156,10 @@ func (service *SettlementService) plan(due Due) Settlement {
 	if due.Saved != nil {
 		return *due.Saved
 	}
-	earned := cashback.EarnableCents(due.AcceptedTaskKeys, due.AmountCents)
+	kept := max(due.AmountCents-due.AdjustmentCents, 0)
+	earned := cashback.EarnableCents(due.AcceptedTaskKeys, kept)
 	total := max(earned, due.EarlierRefundCents)
-	fee := due.AmountCents * service.config.FeePercent / percent
+	fee := kept * service.config.FeePercent / percent
 	return Settlement{
 		ID:             service.newID(),
 		BookingID:      due.BookingID,
@@ -167,7 +168,7 @@ func (service *SettlementService) plan(due Due) Settlement {
 		FeeCents:       fee,
 		CashbackCents:  total,
 		RefundDueCents: total - due.EarlierRefundCents,
-		PayoutCents:    max(due.AmountCents-fee-total, 0),
+		PayoutCents:    max(kept-fee-total, 0),
 	}
 }
 
@@ -179,7 +180,7 @@ func blockReason(due Due, settlement Settlement, charge Charge) string {
 		return reasonWrongCapture
 	case charge.SettlementRefundDead:
 		return reasonRefundFailed
-	case charge.RefundedCents-charge.SettlementRefundCents > due.EarlierRefundCents:
+	case charge.RefundedCents-charge.SettlementRefundCents > due.EarlierRefundCents+due.AdjustmentCents:
 		return reasonOutsideRefund
 	case charge.SettlementRefundID != "" && charge.SettlementRefundCents != settlement.RefundDueCents:
 		return reasonRefundMismatch

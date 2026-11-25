@@ -12,6 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const foreignKeyViolationCode = "23503"
+
 type ListingStore interface {
 	Create(
 		ctx context.Context,
@@ -51,6 +53,36 @@ func (s *PostgresListingStore) Create(
 }
 
 const uniqueViolationCode = "23505"
+
+const maxHostListings = 100
+
+func (s *PostgresListingStore) ListForHost(ctx context.Context, hostID uuid.UUID) ([]HostListing, error) {
+	found := []HostListing{}
+	err := db.WithUserTx(ctx, s.DB, hostID.String(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			SELECT id, title, city, status
+			FROM app.listings
+			WHERE host_id = $1
+			ORDER BY created_at DESC, id
+			LIMIT $2`, hostID, maxHostListings)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var listing HostListing
+			if err := rows.Scan(&listing.ID, &listing.Title, &listing.City, &listing.Status); err != nil {
+				return err
+			}
+			found = append(found, listing)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list host listings: %w", err)
+	}
+	return found, nil
+}
 
 func (s *PostgresListingStore) Publish(ctx context.Context, userID string, listingID uuid.UUID) error {
 	return db.WithUserTx(ctx, s.DB, userID, func(tx pgx.Tx) error {
@@ -272,7 +304,8 @@ const publicListingColumns = `
 	l.latitude, l.longitude, l.listing_type, l.property_type, l.max_guests,
 	l.bedrooms, l.beds, l.bathrooms::float8, l.minimum_nights,
 	l.nightly_price_cents, l.cleaning_fee_cents, l.currency,
-	l.rating_avg::float8, l.rating_count, l.created_at, l.published_at`
+	l.rating_avg::float8, l.rating_count, l.created_at, l.published_at,
+	to_char(l.check_in_time, 'HH24:MI'), to_char(l.check_out_time, 'HH24:MI')`
 
 func (s *PostgresListingStore) ListPublished(ctx context.Context) ([]PublicListing, error) {
 	var listings []PublicListing
@@ -353,6 +386,7 @@ func scanPublicListing(rows pgx.Rows) (PublicListing, error) {
 		&listing.Bedrooms, &listing.Beds, &listing.Bathrooms, &listing.MinimumNights,
 		&nightly, &cleaning, &currency,
 		&ratingAverage, &ratingCount, &listing.CreatedAt, &listing.PublishedAt,
+		&listing.CheckInTime, &listing.CheckOutTime,
 	); err != nil {
 		return PublicListing{}, fmt.Errorf("scan published listing: %w", err)
 	}
@@ -451,8 +485,8 @@ func requirePriceAndPhoto(ctx context.Context, tx pgx.Tx, listingID uuid.UUID) e
 	var priced, pictured bool
 	err := tx.QueryRow(ctx, `
 		SELECT l.nightly_price_cents IS NOT NULL,
-		       EXISTS (SELECT 1 FROM app.listing_photos p WHERE p.listing_id = l.id)
-		FROM app.listings l WHERE l.id = $1 FOR UPDATE`, listingID).Scan(&priced, &pictured)
+		       (SELECT count(*) FROM app.listing_photos p WHERE p.listing_id = l.id) >= $2
+		FROM app.listings l WHERE l.id = $1 FOR UPDATE`, listingID, minPublishPhotos).Scan(&priced, &pictured)
 	if err != nil {
 		return fmt.Errorf("check price and photos: %w", err)
 	}
@@ -571,7 +605,7 @@ func (s *PostgresListingStore) RemovePhoto(ctx context.Context, userID string, l
 		if err := tx.QueryRow(ctx, `SELECT count(*) FROM app.listing_photos WHERE listing_id = $1`, listingID).Scan(&remaining); err != nil {
 			return fmt.Errorf("count listing photos: %w", err)
 		}
-		if remaining == 0 {
+		if remaining < minPublishPhotos {
 			return ErrLastPhoto
 		}
 		return nil
@@ -594,4 +628,38 @@ func (s *PostgresListingStore) SetPrice(ctx context.Context, userID string, list
 		}
 		return nil
 	})
+}
+
+func (s *PostgresListingStore) DeleteDraft(ctx context.Context, userID string, listingID uuid.UUID) ([]string, error) {
+	var keys []string
+	err := db.WithUserTx(ctx, s.DB, userID, func(tx pgx.Tx) error {
+		status, err := lockOwnedListing(ctx, tx, userID, listingID)
+		if err != nil {
+			return err
+		}
+		if status != Draft {
+			return ErrListingInUse
+		}
+		rows, err := tx.Query(ctx, `SELECT object_key FROM app.listing_photos WHERE listing_id = $1`, listingID)
+		if err != nil {
+			return fmt.Errorf("query listing photos: %w", err)
+		}
+		keys, err = pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			return fmt.Errorf("read listing photos: %w", err)
+		}
+		_, err = tx.Exec(ctx, `DELETE FROM app.listings WHERE id = $1`, listingID)
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == foreignKeyViolationCode {
+			return ErrListingInUse
+		}
+		if err != nil {
+			return fmt.Errorf("delete listing: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return keys, nil
 }

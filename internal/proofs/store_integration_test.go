@@ -81,9 +81,11 @@ func (f fixture) priceAndPhotograph(t *testing.T, listing listings.Listing) {
 	if err := store.SetPrice(f.ctx, listing.HostID.String(), listing.ID, 12000); err != nil {
 		t.Fatal(err)
 	}
-	photo := listings.ListingPhoto{ID: uuid.New(), ObjectKey: "listings/" + listing.ID.String() + "/" + uuid.NewString() + ".jpg"}
-	if err := store.AddPhoto(f.ctx, listing.HostID.String(), listing.ID, photo); err != nil {
-		t.Fatal(err)
+	for range 5 {
+		photo := listings.ListingPhoto{ID: uuid.New(), ObjectKey: "listings/" + listing.ID.String() + "/" + uuid.NewString() + ".jpg"}
+		if err := store.AddPhoto(f.ctx, listing.HostID.String(), listing.ID, photo); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -429,5 +431,39 @@ func TestHeldIDNameIsDeletedOnceTheHoldIsReleased(t *testing.T) {
 	}
 	if saved() != 0 {
 		t.Fatal("redacting a requested deletion must delete the name")
+	}
+}
+
+func TestCheckedDocumentIsApprovedForItsOwnerOnly(t *testing.T) {
+	f := newFixture(t)
+	listing := f.draft(t, uuid.New())
+	store := NewPostgresProofStore(f.pool)
+	subject, err := store.CheckSubject(f.ctx, listing.HostID, listing.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inquiryID := "inq_" + uuid.NewString()
+	now := time.Now().UTC()
+	if err := store.SaveInquiry(f.ctx, CheckInquiry{ID: uuid.New(), InquiryID: inquiryID, ListingID: listing.ID, HostID: listing.HostID,
+		DocumentType: UtilityBill, AddressKey: subject.AddressKey, UnitKey: subject.UnitKey, CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := store.FindInquiry(f.ctx, uuid.New(), inquiryID); err != nil || found {
+		t.Fatalf("a stranger must not see the inquiry: %v %v", found, err)
+	}
+	proof := Proof{ID: uuid.New(), ListingID: listing.ID, HostID: listing.HostID, DocumentType: UtilityBill,
+		ObjectKey: keyPrefix(listing.ID) + uuid.NewString() + ".pdf", ContentType: "application/pdf", SizeBytes: 10,
+		InquiryID: inquiryID, AddressKey: subject.AddressKey, UnitKey: subject.UnitKey, CreatedAt: now}
+	if err := store.SaveFromInquiry(f.ctx, proof); err != nil {
+		t.Fatal(err)
+	}
+	if approved, err := store.ApproveFromInquiry(f.ctx, uuid.New(), inquiryID, now); err != nil || approved {
+		t.Fatalf("a stranger must not approve: %v %v", approved, err)
+	}
+	if approved, err := store.ApproveFromInquiry(f.ctx, listing.HostID, inquiryID, now); err != nil || !approved {
+		t.Fatalf("expected approval: %v %v", approved, err)
+	}
+	if err := f.listings.PublishListing(f.ctx, listing.HostID, listing.ID); err != nil {
+		t.Fatalf("an automatically approved proof must unlock publishing: %v", err)
 	}
 }

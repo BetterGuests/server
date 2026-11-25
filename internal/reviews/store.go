@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/BetterGuests/BetterGuests-Server/db"
 	"github.com/google/uuid"
@@ -12,68 +13,222 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type PostgresStore struct{ DB *pgxpool.Pool }
+const stayReviewColumns = `r.id, r.booking_id, r.listing_id, 'guest', COALESCE(r.author_name, ''), r.rating, r.comment,
+	r.cleanliness, r.accuracy, r.check_in, r.communication, r.location, r.value, r.created_at, r.published_at`
 
-func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore { return &PostgresStore{DB: pool} }
+const guestReviewColumns = `g.id, g.booking_id, g.listing_id, 'host', COALESCE(g.author_name, ''), g.rating, g.comment,
+	NULL::integer, NULL::integer, NULL::integer, NULL::integer, NULL::integer, NULL::integer, g.created_at, g.published_at`
 
-func (store *PostgresStore) Create(ctx context.Context, guestID uuid.UUID, review Review) (Review, error) {
-	err := db.WithUserTx(ctx, store.DB, guestID.String(), func(tx pgx.Tx) error {
-		if err := ensureGuestAccount(ctx, tx, guestID); err != nil {
-			return err
+type PostgresReviewStore struct{ DB *pgxpool.Pool }
+
+func NewPostgresReviewStore(pool *pgxpool.Pool) *PostgresReviewStore {
+	return &PostgresReviewStore{DB: pool}
+}
+
+func (store *PostgresReviewStore) Booking(ctx context.Context, actorID, bookingID uuid.UUID) (Booking, error) {
+	var booking Booking
+	err := db.WithUserTx(ctx, store.DB, actorID.String(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT b.id, b.listing_id, l.title, b.guest_id, l.host_id,
+			        COALESCE(n.display_name, ''), COALESCE(l.host_name, ''), b.status, b.completed_at
+			 FROM app.bookings b
+			 JOIN app.listings l ON l.id = b.listing_id
+			 LEFT JOIN app.account_names n ON n.account_id = b.guest_id
+			 WHERE b.id = $1 AND (b.guest_id = $2 OR l.host_id = $2)`,
+			bookingID, actorID,
+		).Scan(
+			&booking.BookingID, &booking.ListingID, &booking.ListingTitle, &booking.GuestID, &booking.HostID,
+			&booking.GuestName, &booking.HostName, &booking.Status, &booking.CompletedAt,
+		)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Booking{}, ErrBookingNotFound
+	}
+	if err != nil {
+		return Booking{}, fmt.Errorf("load booking: %w", err)
+	}
+	return booking, nil
+}
+
+func (store *PostgresReviewStore) Insert(ctx context.Context, actorID uuid.UUID, review NewReview) error {
+	return db.WithUserTx(ctx, store.DB, actorID.String(), func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO app.accounts (id) VALUES ($1) ON CONFLICT (id) DO NOTHING`, actorID); err != nil {
+			return fmt.Errorf("ensure account: %w", err)
 		}
-		listingID, err := reviewableBookingListing(ctx, tx, review.BookingID, guestID)
+		var err error
+		if review.AuthorRole == RoleHost {
+			_, err = tx.Exec(ctx,
+				`INSERT INTO app.guest_reviews (id, booking_id, listing_id, host_id, guest_id, rating, comment, author_name, created_at)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+				review.ID, review.BookingID, review.ListingID, review.HostID, review.GuestID,
+				review.Rating, review.Comment, review.AuthorName, review.CreatedAt)
+		} else {
+			scores := Categories{}
+			if review.Categories != nil {
+				scores = *review.Categories
+			}
+			_, err = tx.Exec(ctx,
+				`INSERT INTO app.listing_reviews
+				     (id, listing_id, guest_id, booking_id, rating, comment, author_name, created_at, updated_at,
+				      cleanliness, accuracy, check_in, communication, location, value)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10, $11, $12, $13, $14)`,
+				review.ID, review.ListingID, review.GuestID, review.BookingID, review.Rating, review.Comment,
+				review.AuthorName, review.CreatedAt,
+				scores.Cleanliness, scores.Accuracy, scores.CheckIn, scores.Communication, scores.Location, scores.Value)
+		}
+		var pgError *pgconn.PgError
+		switch {
+		case errors.As(err, &pgError) && pgError.Code == uniqueViolationCode:
+			return ErrReviewAlreadyExists
+		case err != nil:
+			return fmt.Errorf("insert review: %w", err)
+		}
+		return nil
+	})
+}
+
+func (store *PostgresReviewStore) ForBooking(ctx context.Context, actorID, bookingID uuid.UUID) ([]Review, error) {
+	var found []Review
+	err := db.WithUserTx(ctx, store.DB, actorID.String(), func(tx pgx.Tx) error {
+		var err error
+		found, err = queryReviews(ctx, tx,
+			`SELECT `+stayReviewColumns+` FROM app.listing_reviews r WHERE r.booking_id = $1
+			 UNION ALL
+			 SELECT `+guestReviewColumns+` FROM app.guest_reviews g WHERE g.booking_id = $1`,
+			bookingID)
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list booking reviews: %w", err)
+	}
+	return found, nil
+}
+
+func (store *PostgresReviewStore) ForListing(ctx context.Context, listingID uuid.UUID, limit int) (ListingReviews, error) {
+	var result ListingReviews
+	err := db.WithPublicTx(ctx, store.DB, func(tx pgx.Tx) error {
+		averages := &result.Categories
+		if err := tx.QueryRow(ctx,
+			`SELECT count(*)::integer, COALESCE(round(avg(rating), 2), 0)::float8,
+			        round(avg(cleanliness), 2)::float8, round(avg(accuracy), 2)::float8,
+			        round(avg(check_in), 2)::float8, round(avg(communication), 2)::float8,
+			        round(avg(location), 2)::float8, round(avg(value), 2)::float8
+			 FROM app.listing_reviews WHERE listing_id = $1 AND published_at IS NOT NULL`,
+			listingID,
+		).Scan(
+			&result.Count, &result.Average, &averages.Cleanliness, &averages.Accuracy,
+			&averages.CheckIn, &averages.Communication, &averages.Location, &averages.Value,
+		); err != nil {
+			return fmt.Errorf("summarize reviews: %w", err)
+		}
+		var err error
+		result.Reviews, err = queryReviews(ctx, tx,
+			`SELECT `+stayReviewColumns+` FROM app.listing_reviews r
+			 WHERE r.listing_id = $1 AND r.published_at IS NOT NULL
+			 ORDER BY r.created_at DESC, r.id
+			 LIMIT $2`, listingID, limit)
+		return err
+	})
+	if err != nil {
+		return ListingReviews{}, fmt.Errorf("list listing reviews: %w", err)
+	}
+	return result, nil
+}
+
+func (store *PostgresReviewStore) AboutGuest(ctx context.Context, actorID, guestID uuid.UUID, limit int) (GuestReviews, error) {
+	var result GuestReviews
+	err := db.WithUserTx(ctx, store.DB, actorID.String(), func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx,
+			`SELECT count(*)::integer, COALESCE(round(avg(rating), 2), 0)::float8
+			 FROM app.guest_reviews WHERE guest_id = $1 AND published_at IS NOT NULL`,
+			guestID,
+		).Scan(&result.Count, &result.Average); err != nil {
+			return fmt.Errorf("summarize guest reviews: %w", err)
+		}
+		var err error
+		result.Reviews, err = queryReviews(ctx, tx,
+			`SELECT `+guestReviewColumns+` FROM app.guest_reviews g
+			 WHERE g.guest_id = $1 AND g.published_at IS NOT NULL
+			 ORDER BY g.created_at DESC, g.id
+			 LIMIT $2`, guestID, limit)
+		return err
+	})
+	if err != nil {
+		return GuestReviews{}, fmt.Errorf("list guest reviews: %w", err)
+	}
+	return result, nil
+}
+
+func (store *PostgresReviewStore) Pending(ctx context.Context, actorID uuid.UUID, completedAfter time.Time, limit int) ([]PendingReview, error) {
+	pending := []PendingReview{}
+	err := db.WithUserTx(ctx, store.DB, actorID.String(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT b.id, l.title,
+			        CASE WHEN l.host_id = $1 THEN 'host' ELSE 'guest' END,
+			        CASE WHEN l.host_id = $1 THEN COALESCE(n.display_name, $4) ELSE COALESCE(l.host_name, $5) END,
+			        b.completed_at
+			 FROM app.bookings b
+			 JOIN app.listings l ON l.id = b.listing_id
+			 LEFT JOIN app.account_names n ON n.account_id = b.guest_id
+			 WHERE b.status = 'completed' AND b.completed_at > $2
+			   AND (
+			       (b.guest_id = $1 AND NOT EXISTS (SELECT 1 FROM app.listing_reviews r WHERE r.booking_id = b.id))
+			       OR (l.host_id = $1 AND NOT EXISTS (SELECT 1 FROM app.guest_reviews g WHERE g.booking_id = b.id))
+			   )
+			 ORDER BY b.completed_at, b.id
+			 LIMIT $3`,
+			actorID, completedAfter, limit, missingGuestName, missingHostName)
 		if err != nil {
 			return err
 		}
-		review.ListingID = listingID
-		return insertReview(ctx, tx, review)
+		defer rows.Close()
+		for rows.Next() {
+			var item PendingReview
+			var completedAt time.Time
+			if err := rows.Scan(&item.BookingID, &item.ListingTitle, &item.Role, &item.SubjectName, &completedAt); err != nil {
+				return err
+			}
+			item.WindowClosesAt = completedAt.Add(ReviewWindow)
+			pending = append(pending, item)
+		}
+		return rows.Err()
 	})
 	if err != nil {
-		return Review{}, err
+		return nil, fmt.Errorf("list pending reviews: %w", err)
 	}
-	return review, nil
+	return pending, nil
 }
 
-// ensureGuestAccount makes sure a row exists in app.accounts for the guest
-// placing the review, since RLS requires every account to exist before it
-// can own any data.
-func ensureGuestAccount(ctx context.Context, tx pgx.Tx, guestID uuid.UUID) error {
-	if _, err := tx.Exec(ctx, `INSERT INTO app.accounts (id) VALUES ($1) ON CONFLICT (id) DO NOTHING`, guestID); err != nil {
-		return fmt.Errorf("ensure guest account: %w", err)
+func (store *PostgresReviewStore) PublishDue(ctx context.Context) (int, error) {
+	var published int
+	if err := store.DB.QueryRow(ctx, `SELECT count(*) FROM app.publish_due_reviews()`).Scan(&published); err != nil {
+		return 0, fmt.Errorf("publish reviews: %w", err)
 	}
-	return nil
+	return published, nil
 }
 
-// reviewableBookingListing looks up the listing for a booking and confirms
-// the guest actually completed it. It returns ErrBookingNotReviewable for
-// both "no such booking" and "not completed yet" - callers don't need to
-// know which, only that a review isn't allowed.
-func reviewableBookingListing(ctx context.Context, tx pgx.Tx, bookingID, guestID uuid.UUID) (uuid.UUID, error) {
-	var listingID uuid.UUID
-	var status string
-	err := tx.QueryRow(ctx, `SELECT listing_id, status FROM app.bookings WHERE id = $1 AND guest_id = $2`, bookingID, guestID).Scan(&listingID, &status)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		return uuid.Nil, ErrBookingNotReviewable
-	case err != nil:
-		return uuid.Nil, fmt.Errorf("load booking: %w", err)
-	case status != "completed":
-		return uuid.Nil, ErrBookingNotReviewable
+func queryReviews(ctx context.Context, tx pgx.Tx, query string, args ...any) ([]Review, error) {
+	rows, err := tx.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
 	}
-	return listingID, nil
-}
-
-// insertReview writes the review row, translating a duplicate booking_id
-// (one review per booking, enforced by a unique constraint) into
-// ErrReviewAlreadyExists instead of a raw Postgres error.
-func insertReview(ctx context.Context, tx pgx.Tx, review Review) error {
-	_, err := tx.Exec(ctx, `INSERT INTO app.listing_reviews (id, listing_id, guest_id, booking_id, rating, comment, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`, review.ID, review.ListingID, review.GuestID, review.BookingID, review.Rating, review.Comment, review.CreatedAt, review.UpdatedAt)
-	var pgError *pgconn.PgError
-	switch {
-	case errors.As(err, &pgError) && pgError.Code == "23505":
-		return ErrReviewAlreadyExists
-	case err != nil:
-		return fmt.Errorf("insert review: %w", err)
+	defer rows.Close()
+	found := []Review{}
+	for rows.Next() {
+		var review Review
+		var scores Categories
+		if err := rows.Scan(
+			&review.ID, &review.BookingID, &review.ListingID, &review.AuthorRole, &review.AuthorName,
+			&review.Rating, &review.Comment,
+			&scores.Cleanliness, &scores.Accuracy, &scores.CheckIn, &scores.Communication, &scores.Location, &scores.Value,
+			&review.CreatedAt, &review.PublishedAt,
+		); err != nil {
+			return nil, err
+		}
+		if scores != (Categories{}) {
+			review.Categories = &scores
+		}
+		found = append(found, review)
 	}
-	return nil
+	return found, rows.Err()
 }

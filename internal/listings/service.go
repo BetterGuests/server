@@ -226,12 +226,13 @@ func validPropertyType(value PropertyType) bool {
 
 var (
 	ErrListingNotFound      = errors.New("listing not found")
+	ErrListingInUse         = errors.New("only a draft with no bookings or ownership documents can be deleted")
 	ErrDuplicateListing     = errors.New("a published listing already exists at this address")
 	ErrNotListingOwner      = errors.New("only the host can publish this listing")
 	ErrVerificationRequired = errors.New("identity verification is required to publish a listing")
 	ErrProofRequired        = errors.New("approved proof of property control is required to publish a listing")
 	ErrPriceRequired        = errors.New("set a nightly price before publishing")
-	ErrPhotoRequired        = errors.New("add at least one photo before publishing")
+	ErrPhotoRequired        = errors.New("add at least 5 photos before publishing")
 	ErrUploadsDisabled      = errors.New("photo uploads are not available")
 	ErrPhotoRejected        = errors.New("photo must be a JPEG, PNG or WebP image up to 10 MB")
 	ErrPhotoNotAllowed      = errors.New("that photo cannot be used")
@@ -242,7 +243,7 @@ var (
 	ErrPhotoAlreadyAdded    = errors.New("that photo is already on the listing")
 	ErrTooManyPhotos        = errors.New("a listing can have up to 20 photos")
 	ErrPhotoNotFound        = errors.New("photo not found")
-	ErrLastPhoto            = errors.New("a published listing needs at least one photo")
+	ErrLastPhoto            = errors.New("a published listing needs at least 5 photos")
 	ErrInvalidPrice         = errors.New("nightly price must be between $1 and $100,000")
 )
 
@@ -335,6 +336,7 @@ func roundCoordinate(value float64) float64 {
 const (
 	maxPhotoBytes         = 10 << 20
 	maxPhotos             = 20
+	minPublishPhotos      = 5
 	maxAltTextLength      = 500
 	minNightlyCents       = 100
 	maxNightlyCents       = 10_000_000
@@ -523,4 +525,21 @@ func (service *ListingService) discard(ctx context.Context, key string) {
 	if err := service.objects.Remove(ctx, key); err != nil {
 		slog.Warn("Remove listing photo", "error", err)
 	}
+}
+
+func (service *ListingService) DeleteListing(ctx context.Context, hostID, listingID uuid.UUID) error {
+	remover, ok := service.store.(ListingDeleteStore)
+	if !ok {
+		return errors.New("listing store cannot delete")
+	}
+	keys, err := remover.DeleteDraft(ctx, hostID.String(), listingID)
+	if err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if validPhotoKey(key, listingID) {
+			service.discard(ctx, key)
+		}
+	}
+	return nil
 }

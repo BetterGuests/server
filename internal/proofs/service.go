@@ -177,6 +177,11 @@ func (service *ProofService) ListSubmitted(ctx context.Context, adminID uuid.UUI
 	}
 	for index := range items {
 		items[index].DocumentURL = service.signedDownload(ctx, items[index].ObjectKey)
+		for _, key := range items[index].ExtraObjectKeys {
+			if url := service.signedDownload(ctx, key); url != "" {
+				items[index].ExtraDocumentURLs = append(items[index].ExtraDocumentURLs, url)
+			}
+		}
 	}
 	return items, nil
 }

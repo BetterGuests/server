@@ -70,9 +70,11 @@ func priceAndPicture(t *testing.T, ctx context.Context, service *ListingService,
 	if err := store.SetPrice(ctx, listing.HostID.String(), listing.ID, 12000); err != nil {
 		t.Fatal(err)
 	}
-	photo := ListingPhoto{ID: uuid.New(), ObjectKey: ownKey(listing.ID)}
-	if err := store.AddPhoto(ctx, listing.HostID.String(), listing.ID, photo); err != nil {
-		t.Fatal(err)
+	for range minPublishPhotos {
+		photo := ListingPhoto{ID: uuid.New(), ObjectKey: ownKey(listing.ID)}
+		if err := store.AddPhoto(ctx, listing.HostID.String(), listing.ID, photo); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -223,7 +225,7 @@ func TestPublishDateIsWhenTheListingWentLiveAndSurvivesRepublishing(t *testing.T
 	}
 }
 
-func TestPublishRequiresAPriceThenAPhoto(t *testing.T) {
+func TestPublishRequiresAPriceThenFivePhotos(t *testing.T) {
 	ctx, service := publishFixture(t)
 	store := service.store.(*PostgresListingStore)
 	input := validCreateInput()
@@ -251,22 +253,34 @@ func TestPublishRequiresAPriceThenAPhoto(t *testing.T) {
 	if err := store.AddPhoto(ctx, host, listing.ID, ListingPhoto{ID: uuid.New(), ObjectKey: first.ObjectKey}); !errors.Is(err, ErrPhotoAlreadyAdded) {
 		t.Fatalf("duplicate error = %v", err)
 	}
+	addAnother := func() ListingPhoto {
+		t.Helper()
+		photo := ListingPhoto{ID: uuid.New(), ObjectKey: ownKey(listing.ID)}
+		if err := store.AddPhoto(ctx, host, listing.ID, photo); err != nil {
+			t.Fatal(err)
+		}
+		return photo
+	}
+	for range 3 {
+		addAnother()
+	}
+	if err := service.PublishListing(ctx, listing.HostID, listing.ID); !errors.Is(err, ErrPhotoRequired) {
+		t.Fatalf("four photos must not be enough, got %v", err)
+	}
+	second := addAnother()
 	if err := service.PublishListing(ctx, listing.HostID, listing.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.RemovePhoto(ctx, host, listing.ID, first.ID); !errors.Is(err, ErrLastPhoto) {
-		t.Fatalf("last photo error = %v", err)
+		t.Fatalf("dropping below five = %v", err)
 	}
 
-	second := ListingPhoto{ID: uuid.New(), ObjectKey: ownKey(listing.ID)}
-	if err := store.AddPhoto(ctx, host, listing.ID, second); err != nil {
-		t.Fatal(err)
-	}
+	addAnother()
 	if key, err := store.RemovePhoto(ctx, host, listing.ID, first.ID); err != nil || key != first.ObjectKey {
 		t.Fatalf("key = %q, err = %v", key, err)
 	}
 	setup, err := store.Setup(ctx, host, listing.ID)
-	if err != nil || setup.NightlyPriceCents != 9900 || len(setup.Photos) != 1 || setup.Photos[0].Position != 1 {
+	if err != nil || setup.NightlyPriceCents != 9900 || len(setup.Photos) != minPublishPhotos || setup.Photos[0].Position != 1 {
 		t.Fatalf("setup = %+v, err = %v", setup, err)
 	}
 

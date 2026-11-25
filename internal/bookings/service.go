@@ -19,13 +19,20 @@ var (
 	ErrNotCancellable       = errors.New("booking can no longer be cancelled")
 	ErrPaymentNotAuthorized = errors.New("the guest has not put a card on hold for this booking")
 	ErrCaptureFailed        = errors.New("the payment could not be completed")
+	ErrStayAlreadyStarted   = errors.New("the check-in date has passed, so this booking can no longer be approved")
+	ErrReleaseFailed        = errors.New("we could not release the card, so the booking was not cancelled")
+	ErrListingPaused        = errors.New("this listing is not taking bookings right now")
+	ErrTripOverlaps         = errors.New("you already have a trip on these dates")
 )
 
 type VerificationChecker interface {
 	CurrentVerificationID(ctx context.Context, accountID uuid.UUID) (uuid.UUID, bool, error)
 }
 
-const maxStayNights = 90
+const (
+	maxStayNights    = 90
+	westmostUSOffset = 10 * time.Hour
+)
 
 type BookingService struct {
 	store     BookingStore
@@ -100,10 +107,49 @@ func (service *BookingService) CreateBooking(
 		CreatedAt:      service.now().UTC(),
 	}
 
+	if err := service.clearAbandonedCheckouts(ctx, guestID, input); err != nil {
+		return Booking{}, err
+	}
+
 	if err := service.store.Create(ctx, guestID.String(), booking); err != nil {
 		return Booking{}, err
 	}
 	return booking, nil
+}
+
+func (overlap *TripOverlapError) Error() string {
+	return ErrTripOverlaps.Error()
+}
+
+func (overlap *TripOverlapError) Unwrap() error {
+	return ErrTripOverlaps
+}
+
+func (service *BookingService) clearAbandonedCheckouts(ctx context.Context, guestID uuid.UUID, input CreateBookingInput) error {
+	if service.details == nil {
+		return nil
+	}
+	others, err := service.details.ListOverlapping(ctx, guestID, input.StartsOn, input.EndsOn)
+	if err != nil {
+		return fmt.Errorf("find overlapping trips: %w", err)
+	}
+	for _, other := range others {
+		if !abandonedCheckout(other) {
+			return &TripOverlapError{Trip: other}
+		}
+	}
+	for _, other := range others {
+		if _, err := service.Cancel(ctx, guestID, other.ID); err != nil {
+			return fmt.Errorf("cancel abandoned checkout: %w", err)
+		}
+	}
+	return nil
+}
+
+func abandonedCheckout(detail Detail) bool {
+	return detail.Status == StatusRequested &&
+		detail.PaymentStatus != paymentAuthorized &&
+		detail.PaymentStatus != paymentSucceeded
 }
 
 func (service *BookingService) Get(ctx context.Context, actorID, bookingID uuid.UUID) (Detail, error) {
@@ -112,6 +158,10 @@ func (service *BookingService) Get(ctx context.Context, actorID, bookingID uuid.
 
 func (service *BookingService) ListForGuest(ctx context.Context, guestID uuid.UUID) ([]Detail, error) {
 	return service.details.ListForGuest(ctx, guestID)
+}
+
+func (service *BookingService) ListForHost(ctx context.Context, hostID uuid.UUID) ([]Detail, error) {
+	return service.details.ListForHost(ctx, hostID)
 }
 
 func (service *BookingService) ListRequestsForHost(ctx context.Context, hostID uuid.UUID) ([]Detail, error) {
@@ -131,6 +181,9 @@ func (service *BookingService) Approve(ctx context.Context, hostID, bookingID uu
 			return detail, nil
 		}
 		return Detail{}, ErrPaymentNotAuthorized
+	}
+	if detail.StartsOn.Before(truncateToDate(service.now().UTC().Add(-westmostUSOffset))) {
+		return Detail{}, ErrStayAlreadyStarted
 	}
 	switch detail.Status {
 	case StatusRequested:
@@ -164,16 +217,36 @@ func (service *BookingService) Decline(ctx context.Context, hostID, bookingID uu
 }
 
 func (service *BookingService) Cancel(ctx context.Context, guestID, bookingID uuid.UUID) (Detail, error) {
+	current, err := service.details.Get(ctx, guestID, bookingID)
+	if err != nil {
+		return Detail{}, err
+	}
+	if current.GuestID != guestID {
+		return Detail{}, ErrBookingNotFound
+	}
+	if !cancellable(current) {
+		return Detail{}, ErrNotCancellable
+	}
+	if service.payments != nil {
+		if err := service.payments.Release(ctx, guestID, bookingID); err != nil {
+			slog.Error("Release held payment", "error", err, "booking_id", bookingID)
+			return Detail{}, ErrReleaseFailed
+		}
+	}
 	if err := service.details.CancelByGuest(ctx, guestID, bookingID); err != nil {
 		return Detail{}, err
 	}
-	service.release(ctx, guestID, bookingID)
 	detail, err := service.details.Get(ctx, guestID, bookingID)
 	if err != nil {
 		return Detail{}, err
 	}
 	service.publish(detail.HostID, detail)
 	return detail, nil
+}
+
+func cancellable(detail Detail) bool {
+	open := detail.Status == StatusRequested || detail.Status == StatusPending
+	return open && detail.PaymentStatus != paymentSucceeded
 }
 
 func (service *BookingService) finish(ctx context.Context, actorID, bookingID, notify uuid.UUID) (Detail, error) {
