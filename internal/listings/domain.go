@@ -297,6 +297,24 @@ type PhotoObjects interface {
 	PresignDownload(ctx context.Context, key string, expires time.Duration) (string, error)
 	Stat(ctx context.Context, key string) (ObjectInfo, error)
 	Remove(ctx context.Context, key string) error
+	Read(ctx context.Context, key string, maxBytes int64) ([]byte, error)
+	Write(ctx context.Context, key, contentType string, data []byte) error
+}
+
+type PhotoRefusal string
+
+const (
+	RefusedExplicit            PhotoRefusal = "it shows nudity or sexual content"
+	RefusedViolent             PhotoRefusal = "it shows violence, weapons or drugs"
+	RefusedHateful             PhotoRefusal = "it shows hateful or harassing content"
+	RefusedPersonalInformation PhotoRefusal = "it shows personal documents or private details"
+	RefusedContactDetails      PhotoRefusal = "it advertises contact or payment details"
+	RefusedUnrelated           PhotoRefusal = "it does not show your place"
+	RefusedUnsafe              PhotoRefusal = "it did not pass our safety check"
+)
+
+type PhotoScreener interface {
+	Screen(ctx context.Context, photo []byte, contentType string) (PhotoRefusal, error)
 }
 
 type MediaStore interface {

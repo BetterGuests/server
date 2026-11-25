@@ -47,6 +47,8 @@ type photoObjectsStub struct {
 	info    ObjectInfo
 	missing bool
 	deleted []string
+	content []byte
+	written map[string][]byte
 }
 
 func (stub *photoObjectsStub) PresignUpload(_ context.Context, key, _ string, _ time.Duration) (string, error) {
@@ -62,6 +64,18 @@ func (stub *photoObjectsStub) Stat(context.Context, string) (ObjectInfo, error) 
 		return ObjectInfo{}, errors.New("missing")
 	}
 	return stub.info, nil
+}
+
+func (stub *photoObjectsStub) Read(context.Context, string, int64) ([]byte, error) {
+	return stub.content, nil
+}
+
+func (stub *photoObjectsStub) Write(_ context.Context, key, _ string, data []byte) error {
+	if stub.written == nil {
+		stub.written = map[string][]byte{}
+	}
+	stub.written[key] = data
+	return nil
 }
 
 func (stub *photoObjectsStub) Remove(_ context.Context, key string) error {

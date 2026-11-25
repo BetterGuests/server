@@ -312,7 +312,9 @@ func mediaErrorStatus(err error) int {
 	case errors.Is(err, ErrPhotoRejected), errors.Is(err, ErrInvalidPhotoKey), errors.Is(err, ErrPhotoNotUploaded),
 		errors.Is(err, ErrInvalidPrice), errors.Is(err, ErrInvalidListing):
 		return http.StatusBadRequest
-	case errors.Is(err, ErrUploadsDisabled):
+	case errors.Is(err, ErrPhotoNotAllowed), errors.Is(err, ErrPhotoTooLargeToCheck):
+		return http.StatusUnprocessableEntity
+	case errors.Is(err, ErrUploadsDisabled), errors.Is(err, ErrPhotoCheckFailed):
 		return http.StatusServiceUnavailable
 	}
 	return http.StatusInternalServerError
@@ -322,6 +324,10 @@ func writeMediaResult(w http.ResponseWriter, status int, body any, err error) {
 	if err != nil {
 		code := mediaErrorStatus(err)
 		message := err.Error()
+		if errors.Is(err, ErrPhotoCheckFailed) {
+			slog.Error("listing photo screening", "error", err)
+			message = ErrPhotoCheckFailed.Error()
+		}
 		if code == http.StatusInternalServerError {
 			slog.Error("listing media", "error", err)
 			message = "could not complete request"

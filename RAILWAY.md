@@ -126,6 +126,10 @@ Create a second Railway service from the same repo.
     browser straight to the bucket, so run `scripts/bucket-cors.sh` once per
     bucket (it needs the `S3_*` variables, `ALLOWED_ORIGINS`, `jq` and the AWS
     CLI; set `DRY_RUN=1` to print the rules first)
+  - `ANTHROPIC_API_KEY`: every new listing photo is sent to Claude, which
+    refuses explicit, violent, hateful and unrelated images, personal documents
+    and advertised contact details. Without the key photos are accepted
+    unscreened and the server logs a warning at startup
   - `SENTRY_DSN`, `SENTRY_ENVIRONMENT`
   - Optional `GEOAPIFY_API_KEY`: `GET /api/v1/listings/{id}/nearby?category=drinks`
     asks Geoapify Places for bars, cafes and similar places around a stay's

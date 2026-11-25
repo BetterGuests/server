@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"net/http"
 	"regexp"
 	"slices"
 	"strings"
@@ -20,6 +21,7 @@ type ListingService struct {
 	verifier     HostVerifier
 	media        MediaStore
 	objects      PhotoObjects
+	screener     PhotoScreener
 	now          func() time.Time
 	newID        func() uuid.UUID
 }
@@ -232,6 +234,9 @@ var (
 	ErrPhotoRequired        = errors.New("add at least one photo before publishing")
 	ErrUploadsDisabled      = errors.New("photo uploads are not available")
 	ErrPhotoRejected        = errors.New("photo must be a JPEG, PNG or WebP image up to 10 MB")
+	ErrPhotoNotAllowed      = errors.New("that photo cannot be used")
+	ErrPhotoCheckFailed     = errors.New("we could not check that photo right now, try again")
+	ErrPhotoTooLargeToCheck = errors.New("photo must be 7 MB or smaller")
 	ErrInvalidPhotoKey      = errors.New("photo key is not valid for this listing")
 	ErrPhotoNotUploaded     = errors.New("photo was not uploaded")
 	ErrPhotoAlreadyAdded    = errors.New("that photo is already on the listing")
@@ -328,12 +333,13 @@ func roundCoordinate(value float64) float64 {
 }
 
 const (
-	maxPhotoBytes       = 10 << 20
-	maxPhotos           = 20
-	maxAltTextLength    = 500
-	minNightlyCents     = 100
-	maxNightlyCents     = 10_000_000
-	photoUploadLifetime = 10 * time.Minute
+	maxPhotoBytes         = 10 << 20
+	maxPhotos             = 20
+	maxAltTextLength      = 500
+	minNightlyCents       = 100
+	maxNightlyCents       = 10_000_000
+	photoUploadLifetime   = 10 * time.Minute
+	maxScreenedPhotoBytes = 7 * 1024 * 1024
 )
 
 var allowedPhotoTypes = map[string]string{
@@ -351,6 +357,11 @@ func photoKeyPrefix(listingID uuid.UUID) string {
 func validPhotoKey(key string, listingID uuid.UUID) bool {
 	name, owned := strings.CutPrefix(key, photoKeyPrefix(listingID))
 	return owned && photoNamePattern.MatchString(name)
+}
+
+func (service *ListingService) WithScreening(screener PhotoScreener) *ListingService {
+	service.screener = screener
+	return service
 }
 
 func (service *ListingService) WithMedia(store MediaStore, objects PhotoObjects) *ListingService {
@@ -417,8 +428,15 @@ func (service *ListingService) AddPhoto(ctx context.Context, hostID, listingID u
 	if len(altText) > maxAltTextLength {
 		return Setup{}, invalidListing("photo description must be %d characters or fewer", maxAltTextLength)
 	}
-	if _, err := service.media.Setup(ctx, hostID.String(), listingID); err != nil {
+	current, err := service.media.Setup(ctx, hostID.String(), listingID)
+	if err != nil {
 		return Setup{}, err
+	}
+	if slices.ContainsFunc(current.Photos, func(photo ListingPhoto) bool { return photo.ObjectKey == key }) {
+		return Setup{}, ErrPhotoAlreadyAdded
+	}
+	if len(current.Photos) >= maxPhotos {
+		return Setup{}, ErrTooManyPhotos
 	}
 	info, err := service.objects.Stat(ctx, key)
 	if err != nil {
@@ -428,11 +446,53 @@ func (service *ListingService) AddPhoto(ctx context.Context, hostID, listingID u
 		service.discard(ctx, key)
 		return Setup{}, ErrPhotoRejected
 	}
-	photo := ListingPhoto{ID: service.newID(), ObjectKey: key, AltText: altText}
+	storedKey := key
+	if service.screener != nil {
+		if storedKey, err = service.screenedCopy(ctx, listingID, key, info); err != nil {
+			return Setup{}, err
+		}
+	}
+	photo := ListingPhoto{ID: service.newID(), ObjectKey: storedKey, AltText: altText}
 	if err := service.media.AddPhoto(ctx, hostID.String(), listingID, photo); err != nil {
+		if storedKey != key && !errors.Is(err, ErrPhotoAlreadyAdded) {
+			service.discard(ctx, storedKey)
+		}
 		return Setup{}, err
 	}
+	if storedKey != key {
+		service.discard(ctx, key)
+	}
 	return service.Setup(ctx, hostID, listingID)
+}
+
+func (service *ListingService) screenedCopy(ctx context.Context, listingID uuid.UUID, key string, info ObjectInfo) (string, error) {
+	if info.Size > maxScreenedPhotoBytes {
+		service.discard(ctx, key)
+		return "", ErrPhotoTooLargeToCheck
+	}
+	data, err := service.objects.Read(ctx, key, maxScreenedPhotoBytes)
+	if err != nil {
+		return "", fmt.Errorf("%w: read upload: %w", ErrPhotoCheckFailed, err)
+	}
+	contentType := http.DetectContentType(data)
+	extension, allowed := allowedPhotoTypes[contentType]
+	if !allowed {
+		service.discard(ctx, key)
+		return "", ErrPhotoRejected
+	}
+	refusal, err := service.screener.Screen(ctx, data, contentType)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrPhotoCheckFailed, err)
+	}
+	if refusal != "" {
+		service.discard(ctx, key)
+		return "", fmt.Errorf("%w: %s", ErrPhotoNotAllowed, refusal)
+	}
+	screenedKey := photoKeyPrefix(listingID) + uuid.NewSHA1(listingID, []byte(key)).String() + extension
+	if err := service.objects.Write(ctx, screenedKey, contentType, data); err != nil {
+		return "", fmt.Errorf("%w: store checked photo: %w", ErrPhotoCheckFailed, err)
+	}
+	return screenedKey, nil
 }
 
 func (service *ListingService) RemovePhoto(ctx context.Context, hostID, listingID, photoID uuid.UUID) (Setup, error) {

@@ -24,6 +24,7 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/proofs"
 	"github.com/BetterGuests/BetterGuests-Server/internal/realtime"
 	"github.com/BetterGuests/BetterGuests-Server/internal/reviews"
+	"github.com/BetterGuests/BetterGuests-Server/internal/screening"
 	"github.com/BetterGuests/BetterGuests-Server/internal/settlements"
 	"github.com/BetterGuests/BetterGuests-Server/internal/verification"
 	"github.com/BetterGuests/BetterGuests-Server/internal/waitlist"
@@ -117,6 +118,11 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 	listingService := listings.NewListingService(listingStore).
 		WithPublishing(listingStore, verificationStore).
 		WithMedia(listingStore, listingObjectsFrom(objectStore))
+	if config, enabled := screening.ConfigFromLookup(os.Getenv); enabled {
+		listingService.WithScreening(screening.NewScreeningService(config))
+	} else {
+		slog.Warn("listing photos are not screened: ANTHROPIC_API_KEY is not set")
+	}
 
 	proofService := proofs.NewProofService(proofs.NewPostgresProofStore(pool), proofObjectsFrom(objectStore))
 
@@ -263,6 +269,11 @@ func (objects proofObjects) Remove(ctx context.Context, key string) error {
 	return remover.Remove(ctx, key)
 }
 
+type objectContent interface {
+	Read(ctx context.Context, key string, maxBytes int64) ([]byte, error)
+	Write(ctx context.Context, key, contentType string, data []byte) error
+}
+
 type listingObjects struct{ store cashback.ObjectStore }
 
 func listingObjectsFrom(store cashback.ObjectStore) listings.PhotoObjects {
@@ -286,6 +297,22 @@ func (objects listingObjects) Stat(ctx context.Context, key string) (listings.Ob
 		return listings.ObjectInfo{}, err
 	}
 	return listings.ObjectInfo{Size: info.Size, ContentType: info.ContentType}, nil
+}
+
+func (objects listingObjects) Read(ctx context.Context, key string, maxBytes int64) ([]byte, error) {
+	content, ok := objects.store.(objectContent)
+	if !ok {
+		return nil, errors.New("storage cannot read objects")
+	}
+	return content.Read(ctx, key, maxBytes)
+}
+
+func (objects listingObjects) Write(ctx context.Context, key, contentType string, data []byte) error {
+	content, ok := objects.store.(objectContent)
+	if !ok {
+		return errors.New("storage cannot write objects")
+	}
+	return content.Write(ctx, key, contentType, data)
 }
 
 func (objects listingObjects) Remove(ctx context.Context, key string) error {
