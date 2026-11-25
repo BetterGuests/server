@@ -77,12 +77,8 @@ func migrationStatus() error {
 }
 
 func test() (err error) {
-	// Point Compose at a dedicated env file so its dotenv parser never has to
-	// read the server's .env, which may contain multi-line credentials.
 	compose := []string{"compose", "--env-file", testComposeEnvFile, "-f", testComposeFile}
 
-	// Always start from an empty, disposable database so tests cannot depend
-	// on data left by a previous run.
 	if err := execute("docker", append(compose, "down", "--volumes", "--remove-orphans")...); err != nil {
 		return err
 	}
@@ -108,9 +104,6 @@ func test() (err error) {
 		return err
 	}
 
-	// These fixed loopback URLs deliberately override the shell and .env.
-	// TEST_* enables the database security suite; DATABASE_URL keeps any
-	// server-level tests on the same disposable database.
 	testEnv := map[string]string{
 		"DATABASE_URL":                testDatabaseURL,
 		"MIGRATION_DATABASE_URL":      testMigrationDatabaseURL,
@@ -123,7 +116,7 @@ func test() (err error) {
 	if err := executeWithOverrides(testEnv, "go", "run", "./cmd/migrate", "up"); err != nil {
 		return err
 	}
-	return executeWithOverrides(testEnv, "go", "test", "-count=1", "./...")
+	return executeWithOverrides(testEnv, "go", "test", "-count=1", "-p", "1", "./...")
 }
 
 func runServer() error {
