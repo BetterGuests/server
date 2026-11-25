@@ -5,14 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 
 	"github.com/BetterGuests/BetterGuests-Server/internal/accounts"
 	"github.com/google/uuid"
 )
 
-// ListingCreator is the one application capability the create-listing HTTP
-// route needs. ListingService will implement it when CreateListing is built.
 type ListingCreator interface {
 	CreateListing(
 		ctx context.Context,
@@ -21,10 +20,13 @@ type ListingCreator interface {
 	) (Listing, error)
 }
 
-// HTTPHandler owns the HTTP-facing listing routes. It knows only the
-// application capability above, not PostgreSQL or object storage.
+type ListingPublisher interface {
+	PublishListing(ctx context.Context, hostID, listingID uuid.UUID) error
+}
+
 type HTTPHandler struct {
 	listingCreator ListingCreator
+	publisher      ListingPublisher
 	publicReader   PublicListingReader
 }
 
@@ -32,14 +34,44 @@ func NewHTTPHandler(listingCreator ListingCreator) *HTTPHandler {
 	return &HTTPHandler{listingCreator: listingCreator}
 }
 
+func (handler *HTTPHandler) WithPublisher(publisher ListingPublisher) *HTTPHandler {
+	handler.publisher = publisher
+	return handler
+}
+
+func (handler *HTTPHandler) PublishListing(w http.ResponseWriter, r *http.Request) {
+	hostID, ok := accounts.UserID(r.Context())
+	if !ok {
+		writeListingError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	listingID, err := uuid.Parse(r.PathValue("listing_id"))
+	if err != nil {
+		writeListingError(w, http.StatusNotFound, "listing not found")
+		return
+	}
+	err = handler.publisher.PublishListing(r.Context(), hostID, listingID)
+	switch {
+	case errors.Is(err, ErrListingNotFound):
+		writeListingError(w, http.StatusNotFound, "listing not found")
+	case errors.Is(err, ErrNotListingOwner), errors.Is(err, ErrVerificationRequired), errors.Is(err, ErrProofRequired):
+		writeListingError(w, http.StatusForbidden, err.Error())
+	case errors.Is(err, ErrDuplicateListing):
+		writeListingError(w, http.StatusConflict, err.Error())
+	case err != nil:
+		slog.Error("publish listing", "error", err)
+		writeListingError(w, http.StatusInternalServerError, "could not publish listing")
+	default:
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": listingID.String(), "status": string(Published)})
+	}
+}
+
 func (handler *HTTPHandler) WithPublicReader(reader PublicListingReader) *HTTPHandler {
 	handler.publicReader = reader
 	return handler
 }
 
-// CreateListingRequest is the JSON body accepted by POST /api/v1/listings.
-// Host identity is deliberately absent because it comes from the validated
-// bearer token.
 type CreateListingRequest struct {
 	Title            string                      `json:"title"`
 	Description      string                      `json:"description"`

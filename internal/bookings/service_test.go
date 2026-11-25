@@ -92,7 +92,7 @@ func TestCreateBookingValidation(t *testing.T) {
 	}
 }
 
-func TestCreateBookingSetsGuestAndPendingStatus(t *testing.T) {
+func TestCreateBookingSetsGuestAndRequestedStatus(t *testing.T) {
 	store := &storeStub{}
 	service := newTestService(store)
 	guestID := uuid.New()
@@ -109,8 +109,8 @@ func TestCreateBookingSetsGuestAndPendingStatus(t *testing.T) {
 	if created.GuestID != guestID || created.ListingID != listingID {
 		t.Fatalf("unexpected booking: %+v", created)
 	}
-	if created.Status != StatusPending {
-		t.Fatalf("expected status %q, got %q", StatusPending, created.Status)
+	if created.Status != StatusRequested {
+		t.Fatalf("expected status %q, got %q", StatusRequested, created.Status)
 	}
 	if store.created.ID != created.ID {
 		t.Fatalf("store received unexpected booking: %+v", store.created)

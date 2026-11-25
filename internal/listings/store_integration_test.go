@@ -28,7 +28,7 @@ func TestBatchedChildInsertsWriteEveryRowAndRejectUnknownAmenities(t *testing.T)
 	hostID := uuid.New()
 	listing, err := NewListingService(NewPostgresListingStore(pool)).CreateListing(ctx, hostID, CreateListingInput{
 		Title: "Batch House", Description: "A complete listing used by the batching integration test.",
-		Address: Address{Line1: "1 Test Way", City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1},
+		Address: Address{Line1: "1 Test Way " + uuid.NewString(), City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1},
 		Type:    EntirePlace, PropertyType: House, MaxGuests: 4,
 		MinimumAgeToBook: 21, Bedrooms: 2, Beds: 2, Bathrooms: 1.5,
 		Amenities: []Amenity{WiFi, KitchenAmenity},

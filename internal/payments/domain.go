@@ -10,16 +10,18 @@ import (
 type Status string
 
 const (
-	StatusPending   Status = "pending"
-	StatusSucceeded Status = "succeeded"
-	StatusFailed    Status = "failed"
-	StatusCanceled  Status = "canceled"
+	StatusPending    Status = "pending"
+	StatusAuthorized Status = "authorized"
+	StatusSucceeded  Status = "succeeded"
+	StatusFailed     Status = "failed"
+	StatusCanceled   Status = "canceled"
 )
 
 const (
-	EventSucceeded = "payment_intent.succeeded"
-	EventFailed    = "payment_intent.payment_failed"
-	EventCanceled  = "payment_intent.canceled"
+	EventAuthorized = "payment_intent.amount_capturable_updated"
+	EventSucceeded  = "payment_intent.succeeded"
+	EventFailed     = "payment_intent.payment_failed"
+	EventCanceled   = "payment_intent.canceled"
 )
 
 const (
@@ -61,6 +63,7 @@ type IntentParams struct {
 	BookingID      uuid.UUID
 	GuestID        uuid.UUID
 	IdempotencyKey string
+	ManualCapture  bool
 }
 
 type Intent struct {
@@ -97,6 +100,21 @@ type Store interface {
 	ExistingPayment(ctx context.Context, guestID, bookingID uuid.UUID) (Payment, bool, error)
 	CreatePayment(ctx context.Context, payment Payment) error
 	ApplyOutcome(ctx context.Context, guestID uuid.UUID, intentID string, status Status, occurredAt time.Time) error
+	HoldForBooking(ctx context.Context, actorID, bookingID uuid.UUID) (PaymentHold, bool, error)
+}
+
+type PaymentHold struct {
+	IntentID string
+	Status   Status
+}
+
+type IntentController interface {
+	Capture(ctx context.Context, intentID string) error
+	Cancel(ctx context.Context, intentID string) error
+}
+
+type Publisher interface {
+	Publish(userID uuid.UUID, kind string, payload any)
 }
 
 type CheckoutStarter interface {

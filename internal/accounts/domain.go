@@ -18,3 +18,7 @@ type Account struct {
 type AccountStore interface {
 	Ensure(ctx context.Context, account Account) error
 }
+
+type NameStore interface {
+	Remember(ctx context.Context, accountID uuid.UUID, displayName string) error
+}

@@ -116,3 +116,20 @@ func (store *PostgresPaymentStore) ApplyOutcome(ctx context.Context, guestID uui
 		return nil
 	})
 }
+
+func (store *PostgresPaymentStore) HoldForBooking(ctx context.Context, actorID, bookingID uuid.UUID) (PaymentHold, bool, error) {
+	var hold PaymentHold
+	err := db.WithUserTx(ctx, store.DB, actorID.String(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT stripe_payment_intent_id, status FROM app.payments
+			 WHERE booking_id = $1 AND (guest_id = $2 OR host_id = $2)`,
+			bookingID, actorID).Scan(&hold.IntentID, &hold.Status)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return PaymentHold{}, false, nil
+	}
+	if err != nil {
+		return PaymentHold{}, false, fmt.Errorf("select payment hold: %w", err)
+	}
+	return hold, true, nil
+}

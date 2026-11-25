@@ -2,11 +2,13 @@ package listings
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/BetterGuests/BetterGuests-Server/db"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -46,6 +48,57 @@ func (s *PostgresListingStore) Create(
 		}
 		return insertListingRules(ctx, tx, listing.ID, listing.Rules)
 	})
+}
+
+const uniqueViolationCode = "23505"
+
+func (s *PostgresListingStore) Publish(ctx context.Context, userID string, listingID uuid.UUID) error {
+	return db.WithUserTx(ctx, s.DB, userID, func(tx pgx.Tx) error {
+		var hostID uuid.UUID
+		err := tx.QueryRow(ctx, `SELECT host_id FROM app.listings WHERE id = $1`, listingID).Scan(&hostID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrListingNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("find listing: %w", err)
+		}
+		if hostID.String() != userID {
+			return ErrNotListingOwner
+		}
+		if err := requireApprovedProof(ctx, tx, listingID); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `UPDATE app.listings SET status = 'published', updated_at = now() WHERE id = $1`, listingID)
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolationCode {
+			return ErrDuplicateListing
+		}
+		if err != nil {
+			return fmt.Errorf("publish listing: %w", err)
+		}
+		return nil
+	})
+}
+
+func requireApprovedProof(ctx context.Context, tx pgx.Tx, listingID uuid.UUID) error {
+	var approved bool
+	err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM app.property_proofs p
+			JOIN app.listings l ON l.id = p.listing_id
+			WHERE p.listing_id = $1
+			  AND p.status = 'approved'
+			  AND p.address_key IS NOT DISTINCT FROM l.address_key
+			  AND p.unit_key IS NOT DISTINCT FROM l.unit_key
+		)`, listingID).Scan(&approved)
+	if err != nil {
+		return fmt.Errorf("check property proof: %w", err)
+	}
+	if !approved {
+		return ErrProofRequired
+	}
+	return nil
 }
 
 func ensureHostAccount(ctx context.Context, tx pgx.Tx, hostID uuid.UUID) error {

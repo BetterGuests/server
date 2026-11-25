@@ -7,10 +7,13 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/cashback"
 	"github.com/BetterGuests/BetterGuests-Server/internal/compliance"
 	"github.com/BetterGuests/BetterGuests-Server/internal/listings"
+	"github.com/BetterGuests/BetterGuests-Server/internal/messages"
 	"github.com/BetterGuests/BetterGuests-Server/internal/middleware"
 	"github.com/BetterGuests/BetterGuests-Server/internal/nearby"
 	"github.com/BetterGuests/BetterGuests-Server/internal/payments"
 	"github.com/BetterGuests/BetterGuests-Server/internal/profiles"
+	"github.com/BetterGuests/BetterGuests-Server/internal/proofs"
+	"github.com/BetterGuests/BetterGuests-Server/internal/realtime"
 	"github.com/BetterGuests/BetterGuests-Server/internal/reviews"
 	"github.com/BetterGuests/BetterGuests-Server/internal/verification"
 	"github.com/go-chi/cors"
@@ -21,6 +24,7 @@ type routeDeps struct {
 	origins      []string
 	authenticate func(http.Handler) http.Handler
 	listings     *listings.HTTPHandler
+	proofs       *proofs.HTTPHandler
 	nearby       *nearby.HTTPHandler
 	reviews      *reviews.HTTPHandler
 	bookings     *bookings.HTTPHandler
@@ -29,6 +33,8 @@ type routeDeps struct {
 	payments     *payments.HTTPHandler
 	compliance   *compliance.HTTPHandler
 	profiles     *profiles.HTTPHandler
+	messages     *messages.HTTPHandler
+	realtime     *realtime.HTTPHandler
 }
 
 func routes(deps routeDeps) http.Handler {
@@ -39,6 +45,7 @@ func routes(deps routeDeps) http.Handler {
 	deps.mountPayments(mux)
 	deps.mountPublicListings(mux)
 	deps.mountNearby(mux)
+	deps.mountRealtime(mux)
 	deps.mountAuthenticatedAPI(mux)
 	return withMiddleware(mux, deps.origins)
 }
@@ -76,6 +83,13 @@ func (deps routeDeps) mountNearby(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/listings/{listing_id}/nearby", deps.nearby.Search)
 }
 
+func (deps routeDeps) mountRealtime(mux *http.ServeMux) {
+	if deps.realtime == nil {
+		return
+	}
+	mux.HandleFunc("GET /api/v1/realtime", deps.realtime.Connect)
+}
+
 func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	if deps.authenticate == nil {
 		return
@@ -85,8 +99,27 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.HandleFunc("POST /api/v1/compliance/age", deps.compliance.ConfirmAge)
 	api.HandleFunc("POST /api/v1/compliance/consents", deps.compliance.GrantConsent)
 	api.Handle("POST /api/v1/listings", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.CreateListing)))
+	api.Handle("POST /api/v1/listings/{listing_id}/publish", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.PublishListing)))
+	api.Handle("POST /api/v1/listings/{listing_id}/proof/uploads", deps.compliance.RequireAdult(http.HandlerFunc(deps.proofs.RequestUpload)))
+	api.Handle("POST /api/v1/listings/{listing_id}/proof", deps.compliance.RequireAdult(http.HandlerFunc(deps.proofs.Submit)))
+	api.HandleFunc("GET /api/v1/listings/{listing_id}/proof", deps.proofs.Status)
+	api.HandleFunc("GET /api/v1/admin/me", deps.proofs.Me)
+	api.HandleFunc("GET /api/v1/admin/property-proofs", deps.proofs.ListSubmitted)
+	api.HandleFunc("POST /api/v1/admin/property-proofs/{proof_id}/decision", deps.proofs.Decide)
 	api.HandleFunc("POST /api/v1/reviews", deps.reviews.CreateReview)
 	api.Handle("POST /api/v1/bookings", deps.compliance.RequireAdult(http.HandlerFunc(deps.bookings.CreateBooking)))
+	api.HandleFunc("GET /api/v1/bookings", deps.bookings.ListMyBookings)
+	api.HandleFunc("GET /api/v1/bookings/{booking_id}", deps.bookings.GetBooking)
+	api.HandleFunc("POST /api/v1/bookings/{booking_id}/cancel", deps.bookings.CancelBooking)
+	api.HandleFunc("GET /api/v1/hosting/booking-requests", deps.bookings.ListHostRequests)
+	api.HandleFunc("POST /api/v1/hosting/bookings/{booking_id}/approve", deps.bookings.ApproveBooking)
+	api.HandleFunc("POST /api/v1/hosting/bookings/{booking_id}/decline", deps.bookings.DeclineBooking)
+	api.HandleFunc("GET /api/v1/conversations", deps.messages.ListConversations)
+	api.Handle("POST /api/v1/conversations", deps.compliance.RequireAdult(http.HandlerFunc(deps.messages.OpenConversation)))
+	api.HandleFunc("GET /api/v1/conversations/{conversation_id}", deps.messages.GetConversation)
+	api.HandleFunc("GET /api/v1/conversations/{conversation_id}/messages", deps.messages.ListMessages)
+	api.HandleFunc("POST /api/v1/conversations/{conversation_id}/messages", deps.messages.SendMessage)
+	api.HandleFunc("POST /api/v1/conversations/{conversation_id}/read", deps.messages.MarkRead)
 	api.HandleFunc("GET /api/v1/bookings/{booking_id}/cashback", deps.cashback.GetTrip)
 	api.HandleFunc("POST /api/v1/bookings/{booking_id}/cashback/tasks/{task_key}/photo-upload", deps.cashback.RequestUpload)
 	api.HandleFunc("POST /api/v1/bookings/{booking_id}/cashback/tasks/{task_key}/photo", deps.cashback.SubmitPhoto)

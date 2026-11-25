@@ -25,7 +25,9 @@ func geoapifyAt(t *testing.T, handler http.HandlerFunc) *GeoapifySource {
 func TestGeoapifyRequestAsksForNamedPlacesInACircleNearestFirst(t *testing.T) {
 	var request *http.Request
 	source := geoapifyAt(t, func(w http.ResponseWriter, r *http.Request) {
-		request = r.Clone(context.Background())
+		if request == nil {
+			request = r.Clone(context.Background())
+		}
 		_, _ = w.Write([]byte(`{"type":"FeatureCollection","features":[]}`))
 	})
 
@@ -53,6 +55,58 @@ func TestGeoapifyRequestAsksForNamedPlacesInACircleNearestFirst(t *testing.T) {
 		if got := query.Get(name); got != value {
 			t.Errorf("%s = %q, want %q", name, got, value)
 		}
+	}
+}
+
+func TestGeoapifyWidensTheCircleUntilThereAreEnoughPlaces(t *testing.T) {
+	var radii []string
+	source := geoapifyAt(t, func(w http.ResponseWriter, r *http.Request) {
+		filter := r.URL.Query().Get("filter")
+		radii = append(radii, filter[strings.LastIndex(filter, ",")+1:])
+		if len(radii) < 2 {
+			_, _ = w.Write([]byte(`{"features":[]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"features":[
+			{"properties":{"place_id":"1","name":"A","lat":1,"lon":1}},
+			{"properties":{"place_id":"2","name":"B","lat":1,"lon":1}},
+			{"properties":{"place_id":"3","name":"C","lat":1,"lon":1}},
+			{"properties":{"place_id":"4","name":"D","lat":1,"lon":1}},
+			{"properties":{"place_id":"5","name":"E","lat":1,"lon":1}}
+		]}`))
+	})
+
+	places, err := source.Find(context.Background(), categories["drinks"], home)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(places) != enoughPlaces {
+		t.Fatalf("got %d places, want %d", len(places), enoughPlaces)
+	}
+	if strings.Join(radii, ",") != "8000,25000" {
+		t.Fatalf("radii asked = %v, want [8000 25000]", radii)
+	}
+}
+
+func TestGeoapifyKeepsWhatItFoundWhenAWiderSearchFails(t *testing.T) {
+	calls := 0
+	source := geoapifyAt(t, func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls > 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		_, _ = w.Write([]byte(`{"features":[{"properties":{"place_id":"1","name":"A","lat":1,"lon":1}}]}`))
+	})
+
+	places, err := source.Find(context.Background(), categories["drinks"], home)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(places) != 1 {
+		t.Fatalf("places = %+v, want the one found at the first radius", places)
 	}
 }
 

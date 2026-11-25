@@ -4,6 +4,7 @@ go 1.26.10
 
 require (
 	github.com/clerk/clerk-sdk-go/v2 v2.8.0
+	github.com/coder/websocket v1.8.15
 	github.com/go-chi/cors v1.2.2
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.12.0

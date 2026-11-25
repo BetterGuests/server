@@ -17,6 +17,8 @@ type fakeStore struct {
 	created    []Payment
 	applied    []appliedOutcome
 	applyErr   error
+	hold       PaymentHold
+	hasHold    bool
 }
 
 type appliedOutcome struct {
@@ -41,6 +43,10 @@ func (store *fakeStore) CreatePayment(_ context.Context, payment Payment) error 
 func (store *fakeStore) ApplyOutcome(_ context.Context, guestID uuid.UUID, intentID string, status Status, _ time.Time) error {
 	store.applied = append(store.applied, appliedOutcome{guestID, intentID, status})
 	return store.applyErr
+}
+
+func (store *fakeStore) HoldForBooking(context.Context, uuid.UUID, uuid.UUID) (PaymentHold, bool, error) {
+	return store.hold, store.hasHold, nil
 }
 
 type fakeIntents struct {

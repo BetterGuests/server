@@ -12,13 +12,12 @@ import (
 	"github.com/google/uuid"
 )
 
-// ListingService owns the listing use cases. ListingStore is the boundary it uses
-// to persist domain objects; the clock and ID generator make creation
-// deterministic in tests.
 type ListingService struct {
-	store ListingStore
-	now   func() time.Time
-	newID func() uuid.UUID
+	store        ListingStore
+	publishStore ListingPublishStore
+	verifier     HostVerifier
+	now          func() time.Time
+	newID        func() uuid.UUID
 }
 
 func NewListingService(store ListingStore) *ListingService {
@@ -254,7 +253,41 @@ func validPropertyType(value PropertyType) bool {
 	)
 }
 
-var ErrListingNotFound = errors.New("listing not found")
+var (
+	ErrListingNotFound      = errors.New("listing not found")
+	ErrDuplicateListing     = errors.New("a published listing already exists at this address")
+	ErrNotListingOwner      = errors.New("only the host can publish this listing")
+	ErrVerificationRequired = errors.New("identity verification is required to publish a listing")
+	ErrProofRequired        = errors.New("approved proof of property control is required to publish a listing")
+)
+
+type ListingPublishStore interface {
+	Publish(ctx context.Context, userID string, listingID uuid.UUID) error
+}
+
+type HostVerifier interface {
+	HasCompleted(ctx context.Context, accountID uuid.UUID) (bool, error)
+}
+
+func (service *ListingService) WithPublishing(store ListingPublishStore, verifier HostVerifier) *ListingService {
+	service.publishStore = store
+	service.verifier = verifier
+	return service
+}
+
+func (service *ListingService) PublishListing(ctx context.Context, hostID, listingID uuid.UUID) error {
+	if service.publishStore == nil || service.verifier == nil {
+		return ErrVerificationRequired
+	}
+	verified, err := service.verifier.HasCompleted(ctx, hostID)
+	if err != nil {
+		return fmt.Errorf("check host verification: %w", err)
+	}
+	if !verified {
+		return ErrVerificationRequired
+	}
+	return service.publishStore.Publish(ctx, hostID.String(), listingID)
+}
 
 const (
 	photoURLLifetime      = time.Hour

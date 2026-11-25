@@ -9,12 +9,14 @@ import (
 )
 
 const (
-	cacheLifetime      = 24 * time.Hour
-	maxCachedSearches  = 1024
-	maxPlaces          = 20
-	sourcePlaceLimit   = 20
-	searchRadiusMeters = 8000
+	cacheLifetime     = 24 * time.Hour
+	maxCachedSearches = 1024
+	maxPlaces         = 20
+	sourcePlaceLimit  = 20
+	enoughPlaces      = 5
 )
+
+var searchRadiiMeters = []int{8000, 25000, 60000}
 
 var (
 	ErrListingNotFound   = errors.New("listing not found")

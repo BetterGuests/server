@@ -38,7 +38,7 @@ func TestConcurrentBookingAttemptsOnlyOneWins(t *testing.T) {
 	hostID := uuid.New()
 	listing, err := listings.NewListingService(listings.NewPostgresListingStore(pool)).CreateListing(ctx, hostID, listings.CreateListingInput{
 		Title: "Concurrency Test House", Description: "A complete listing used by the booking concurrency test.",
-		Address: listings.Address{Line1: "1 Test Way", City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1},
+		Address: listings.Address{Line1: "1 Test Way " + uuid.NewString(), City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1},
 		Type:    listings.EntirePlace, PropertyType: listings.House, MaxGuests: 4,
 		MinimumAgeToBook: 21, Bedrooms: 2, Beds: 2, Bathrooms: 1.5,
 		Amenities: []listings.Amenity{listings.WiFi},
@@ -122,7 +122,7 @@ func TestNonOverlappingBookingsBothSucceed(t *testing.T) {
 	hostID := uuid.New()
 	listing, err := listings.NewListingService(listings.NewPostgresListingStore(pool)).CreateListing(ctx, hostID, listings.CreateListingInput{
 		Title: "Back To Back House", Description: "A complete listing used by the non-overlap test case.",
-		Address: listings.Address{Line1: "2 Test Way", City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1},
+		Address: listings.Address{Line1: "2 Test Way " + uuid.NewString(), City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1},
 		Type:    listings.EntirePlace, PropertyType: listings.House, MaxGuests: 4,
 		MinimumAgeToBook: 21, Bedrooms: 2, Beds: 2, Bathrooms: 1.5,
 		Amenities: []listings.Amenity{listings.WiFi},

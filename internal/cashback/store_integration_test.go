@@ -38,7 +38,7 @@ func TestMoneyBackWorkflowAgainstPostgres(t *testing.T) {
 	hostID, guestID, strangerID := uuid.New(), uuid.New(), uuid.New()
 	listing, err := listings.NewListingService(listings.NewPostgresListingStore(pool)).CreateListing(ctx, hostID, listings.CreateListingInput{
 		Title: "Cashback House", Description: "A complete listing used by the cashback integration test.",
-		Address: listings.Address{Line1: "1 Test Way", City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1},
+		Address: listings.Address{Line1: "1 Test Way " + uuid.NewString(), City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1},
 		Type:    listings.EntirePlace, PropertyType: listings.House, MaxGuests: 4,
 		MinimumAgeToBook: 21, Bedrooms: 2, Beds: 2, Bathrooms: 1.5,
 		Amenities: []listings.Amenity{listings.WiFi},
@@ -58,7 +58,13 @@ func TestMoneyBackWorkflowAgainstPostgres(t *testing.T) {
 		if _, err := tx.Exec(ctx, `INSERT INTO app.accounts (id) VALUES ($1)`, guestID); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO app.bookings (id, listing_id, guest_id, status, starts_on, ends_on) VALUES ($1,$2,$3,'pending',CURRENT_DATE + 10,CURRENT_DATE + 12)`, bookingID, listing.ID, guestID)
+		_, err := tx.Exec(ctx, `INSERT INTO app.bookings (id, listing_id, guest_id, status, starts_on, ends_on) VALUES ($1,$2,$3,'requested',CURRENT_DATE + 10,CURRENT_DATE + 12)`, bookingID, listing.ID, guestID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.WithUserTx(ctx, pool, hostID.String(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `UPDATE app.bookings SET status = 'pending', decided_at = now() WHERE id = $1`, bookingID)
 		return err
 	}); err != nil {
 		t.Fatal(err)

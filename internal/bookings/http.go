@@ -13,37 +13,52 @@ import (
 	"github.com/google/uuid"
 )
 
-// dateLayout is the wire format for starts_on/ends_on: a bare calendar date
-// with no time-of-day or timezone component, matching app.bookings' "date"
-// columns.
 const VerificationRequiredCode = "verification_required"
 
 const dateLayout = "2006-01-02"
 
-// BookingCreator is the application capability the create-booking HTTP
-// route needs.
 type BookingCreator interface {
 	CreateBooking(ctx context.Context, guestID uuid.UUID, input CreateBookingInput) (Booking, error)
 }
 
-// HTTPHandler owns the HTTP-facing booking routes.
-type HTTPHandler struct{ creator BookingCreator }
+type BookingReader interface {
+	Get(ctx context.Context, actorID, bookingID uuid.UUID) (Detail, error)
+	ListForGuest(ctx context.Context, guestID uuid.UUID) ([]Detail, error)
+	ListRequestsForHost(ctx context.Context, hostID uuid.UUID) ([]Detail, error)
+}
 
-// NewHTTPHandler returns a handler backed by creator.
+type BookingResponder interface {
+	Approve(ctx context.Context, hostID, bookingID uuid.UUID) (Detail, error)
+	Decline(ctx context.Context, hostID, bookingID uuid.UUID) (Detail, error)
+	Cancel(ctx context.Context, guestID, bookingID uuid.UUID) (Detail, error)
+}
+
+type HTTPHandler struct {
+	creator   BookingCreator
+	reader    BookingReader
+	responder BookingResponder
+}
+
 func NewHTTPHandler(creator BookingCreator) *HTTPHandler {
 	return &HTTPHandler{creator: creator}
 }
 
-// CreateBookingRequest is the JSON body accepted by POST /api/v1/bookings.
-// Guest identity is deliberately absent because it comes from the validated
-// bearer token.
+func (handler *HTTPHandler) WithReader(reader BookingReader) *HTTPHandler {
+	handler.reader = reader
+	return handler
+}
+
+func (handler *HTTPHandler) WithResponder(responder BookingResponder) *HTTPHandler {
+	handler.responder = responder
+	return handler
+}
+
 type CreateBookingRequest struct {
 	ListingID uuid.UUID `json:"listing_id"`
 	StartsOn  string    `json:"starts_on"`
 	EndsOn    string    `json:"ends_on"`
 }
 
-// CreateBooking handles POST /api/v1/bookings.
 func (handler *HTTPHandler) CreateBooking(w http.ResponseWriter, r *http.Request) {
 	guestID, ok := accounts.UserID(r.Context())
 	if !ok {
@@ -97,9 +112,119 @@ func (handler *HTTPHandler) CreateBooking(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	writeBookingJSON(w, http.StatusCreated, booking)
+}
+
+func (handler *HTTPHandler) GetBooking(w http.ResponseWriter, r *http.Request) {
+	actorID, bookingID, ok := actorAndBookingID(w, r)
+	if !ok {
+		return
+	}
+	detail, err := handler.reader.Get(r.Context(), actorID, bookingID)
+	if err != nil {
+		writeServiceError(w, "Get booking", err)
+		return
+	}
+	writeBookingJSON(w, http.StatusOK, detail)
+}
+
+func (handler *HTTPHandler) ListMyBookings(w http.ResponseWriter, r *http.Request) {
+	guestID, ok := accounts.UserID(r.Context())
+	if !ok {
+		writeBookingError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	details, err := handler.reader.ListForGuest(r.Context(), guestID)
+	if err != nil {
+		writeServiceError(w, "List bookings", err)
+		return
+	}
+	writeBookingJSON(w, http.StatusOK, map[string][]Detail{"bookings": nonNil(details)})
+}
+
+func (handler *HTTPHandler) ListHostRequests(w http.ResponseWriter, r *http.Request) {
+	hostID, ok := accounts.UserID(r.Context())
+	if !ok {
+		writeBookingError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	details, err := handler.reader.ListRequestsForHost(r.Context(), hostID)
+	if err != nil {
+		writeServiceError(w, "List booking requests", err)
+		return
+	}
+	writeBookingJSON(w, http.StatusOK, map[string][]Detail{"bookings": nonNil(details)})
+}
+
+func (handler *HTTPHandler) ApproveBooking(w http.ResponseWriter, r *http.Request) {
+	handler.respond(w, r, handler.responder.Approve)
+}
+
+func (handler *HTTPHandler) DeclineBooking(w http.ResponseWriter, r *http.Request) {
+	handler.respond(w, r, handler.responder.Decline)
+}
+
+func (handler *HTTPHandler) CancelBooking(w http.ResponseWriter, r *http.Request) {
+	handler.respond(w, r, handler.responder.Cancel)
+}
+
+func (handler *HTTPHandler) respond(
+	w http.ResponseWriter,
+	r *http.Request,
+	action func(ctx context.Context, actorID, bookingID uuid.UUID) (Detail, error),
+) {
+	actorID, bookingID, ok := actorAndBookingID(w, r)
+	if !ok {
+		return
+	}
+	detail, err := action(r.Context(), actorID, bookingID)
+	if err != nil {
+		writeServiceError(w, "Respond to booking", err)
+		return
+	}
+	writeBookingJSON(w, http.StatusOK, detail)
+}
+
+func actorAndBookingID(w http.ResponseWriter, r *http.Request) (uuid.UUID, uuid.UUID, bool) {
+	actorID, ok := accounts.UserID(r.Context())
+	if !ok {
+		writeBookingError(w, http.StatusUnauthorized, "authentication required")
+		return uuid.Nil, uuid.Nil, false
+	}
+	bookingID, err := uuid.Parse(r.PathValue("booking_id"))
+	if err != nil {
+		writeBookingError(w, http.StatusBadRequest, "booking_id must be a UUID")
+		return uuid.Nil, uuid.Nil, false
+	}
+	return actorID, bookingID, true
+}
+
+func writeServiceError(w http.ResponseWriter, operation string, err error) {
+	switch {
+	case errors.Is(err, ErrBookingNotFound):
+		writeBookingError(w, http.StatusNotFound, "booking not found")
+	case errors.Is(err, ErrNotAwaitingApproval), errors.Is(err, ErrNotCancellable), errors.Is(err, ErrPaymentNotAuthorized):
+		writeBookingError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, ErrCaptureFailed):
+		writeBookingError(w, http.StatusBadGateway, err.Error())
+	default:
+		slog.Error(operation, "error", err)
+		writeBookingError(w, http.StatusInternalServerError, "could not complete the request")
+	}
+}
+
+func nonNil(details []Detail) []Detail {
+	if details == nil {
+		return []Detail{}
+	}
+	return details
+}
+
+func writeBookingJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(booking)
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 func writeBookingError(w http.ResponseWriter, status int, message string) {

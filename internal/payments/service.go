@@ -12,25 +12,38 @@ import (
 )
 
 var (
-	ErrBookingNotFound    = errors.New("booking not found")
-	ErrBookingNotPayable  = errors.New("booking is not awaiting payment")
-	ErrListingUnpriced    = errors.New("listing has no nightly price")
-	ErrAlreadyPaid        = errors.New("booking is already paid")
-	ErrInvalidSignature   = errors.New("invalid webhook signature")
-	ErrInvalidPayload     = errors.New("invalid webhook payload")
-	ErrPaymentNotFound    = errors.New("payment not found")
-	ErrMissingCredentials = errors.New("stripe credentials are required")
+	ErrBookingNotFound     = errors.New("booking not found")
+	ErrBookingNotPayable   = errors.New("booking is not awaiting payment")
+	ErrListingUnpriced     = errors.New("listing has no nightly price")
+	ErrAlreadyPaid         = errors.New("booking is already paid")
+	ErrInvalidSignature    = errors.New("invalid webhook signature")
+	ErrInvalidPayload      = errors.New("invalid webhook payload")
+	ErrPaymentNotFound     = errors.New("payment not found")
+	ErrMissingCredentials  = errors.New("stripe credentials are required")
+	ErrNoAuthorizedPayment = errors.New("no authorized payment for this booking")
 )
 
-const defaultCurrency = "usd"
+const (
+	defaultCurrency  = "usd"
+	bookingRequested = "requested"
+	bookingApproved  = "pending"
+	bookingEventKind = "booking"
+)
+
+type bookingEvent struct {
+	BookingID uuid.UUID `json:"booking_id"`
+	Status    string    `json:"status"`
+}
 
 type PaymentService struct {
-	store    Store
-	intents  IntentCreator
-	parser   EventParser
-	currency string
-	now      func() time.Time
-	newID    func() uuid.UUID
+	store      Store
+	intents    IntentCreator
+	parser     EventParser
+	controller IntentController
+	publisher  Publisher
+	currency   string
+	now        func() time.Time
+	newID      func() uuid.UUID
 }
 
 func ConfigFromEnv() (Config, error) {
@@ -64,12 +77,45 @@ func NewPaymentService(store Store, intents IntentCreator, parser EventParser, c
 	}
 }
 
+func (service *PaymentService) WithController(controller IntentController) *PaymentService {
+	service.controller = controller
+	return service
+}
+
+func (service *PaymentService) WithPublisher(publisher Publisher) *PaymentService {
+	service.publisher = publisher
+	return service
+}
+
+func (service *PaymentService) Capture(ctx context.Context, actorID, bookingID uuid.UUID) error {
+	hold, found, err := service.store.HoldForBooking(ctx, actorID, bookingID)
+	if err != nil {
+		return err
+	}
+	if !found || hold.Status != StatusAuthorized {
+		return ErrNoAuthorizedPayment
+	}
+	return service.controller.Capture(ctx, hold.IntentID)
+}
+
+func (service *PaymentService) Release(ctx context.Context, actorID, bookingID uuid.UUID) error {
+	hold, found, err := service.store.HoldForBooking(ctx, actorID, bookingID)
+	if err != nil || !found {
+		return err
+	}
+	if hold.Status != StatusAuthorized && hold.Status != StatusPending {
+		return nil
+	}
+	return service.controller.Cancel(ctx, hold.IntentID)
+}
+
 func (service *PaymentService) StartCheckout(ctx context.Context, guestID, bookingID uuid.UUID) (CheckoutResult, error) {
 	quote, err := service.store.QuoteBooking(ctx, guestID, bookingID)
 	if err != nil {
 		return CheckoutResult{}, err
 	}
-	if quote.BookingStatus != "pending" {
+	holdOnly := quote.BookingStatus == bookingRequested
+	if !holdOnly && quote.BookingStatus != bookingApproved {
 		return CheckoutResult{}, ErrBookingNotPayable
 	}
 	if quote.NightlyPriceCents <= 0 {
@@ -80,7 +126,7 @@ func (service *PaymentService) StartCheckout(ctx context.Context, guestID, booki
 	if err != nil {
 		return CheckoutResult{}, fmt.Errorf("look up payment: %w", err)
 	}
-	if found && existing.Status == StatusSucceeded {
+	if found && (existing.Status == StatusSucceeded || existing.Status == StatusAuthorized) {
 		return CheckoutResult{}, ErrAlreadyPaid
 	}
 
@@ -90,7 +136,8 @@ func (service *PaymentService) StartCheckout(ctx context.Context, guestID, booki
 		Currency:       service.currency,
 		BookingID:      bookingID,
 		GuestID:        guestID,
-		IdempotencyKey: "booking-" + bookingID.String() + "-" + fmt.Sprint(amount),
+		IdempotencyKey: "booking-" + bookingID.String() + "-" + fmt.Sprint(amount) + "-" + fmt.Sprint(holdOnly),
+		ManualCapture:  holdOnly,
 	})
 	if err != nil {
 		return CheckoutResult{}, fmt.Errorf("create payment intent: %w", err)
@@ -135,11 +182,30 @@ func (service *PaymentService) HandleWebhook(ctx context.Context, signature stri
 	if event.IntentID == "" || event.GuestID == uuid.Nil {
 		return ErrInvalidPayload
 	}
-	return service.store.ApplyOutcome(ctx, event.GuestID, event.IntentID, status, event.OccurredAt)
+	if err := service.store.ApplyOutcome(ctx, event.GuestID, event.IntentID, status, event.OccurredAt); err != nil {
+		return err
+	}
+	if status == StatusAuthorized {
+		service.announceRequest(ctx, event)
+	}
+	return nil
+}
+
+func (service *PaymentService) announceRequest(ctx context.Context, event Event) {
+	if service.publisher == nil || event.BookingID == uuid.Nil {
+		return
+	}
+	quote, err := service.store.QuoteBooking(ctx, event.GuestID, event.BookingID)
+	if err != nil {
+		return
+	}
+	service.publisher.Publish(quote.HostID, bookingEventKind, bookingEvent{BookingID: event.BookingID, Status: bookingRequested})
 }
 
 func statusForEvent(eventType string) (Status, bool) {
 	switch eventType {
+	case EventAuthorized:
+		return StatusAuthorized, true
 	case EventSucceeded:
 		return StatusSucceeded, true
 	case EventFailed:

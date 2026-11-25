@@ -30,6 +30,9 @@ func (gateway *StripeGateway) CreateIntent(ctx context.Context, params IntentPar
 			Enabled: stripe.Bool(true),
 		},
 	}
+	if params.ManualCapture {
+		request.CaptureMethod = stripe.String(string(stripe.PaymentIntentCaptureMethodManual))
+	}
 	request.Context = ctx
 	request.AddMetadata(MetadataBookingID, params.BookingID.String())
 	request.AddMetadata(MetadataGuestID, params.GuestID.String())
@@ -41,6 +44,30 @@ func (gateway *StripeGateway) CreateIntent(ctx context.Context, params IntentPar
 		return Intent{}, fmt.Errorf("stripe create payment intent: %w", err)
 	}
 	return Intent{ID: intent.ID, ClientSecret: intent.ClientSecret}, nil
+}
+
+func (gateway *StripeGateway) client() paymentintent.Client {
+	return paymentintent.Client{B: stripe.GetBackend(stripe.APIBackend), Key: gateway.secretKey}
+}
+
+func (gateway *StripeGateway) Capture(ctx context.Context, intentID string) error {
+	params := &stripe.PaymentIntentCaptureParams{}
+	params.Context = ctx
+	params.SetIdempotencyKey("capture-" + intentID)
+	if _, err := gateway.client().Capture(intentID, params); err != nil {
+		return fmt.Errorf("stripe capture payment intent: %w", err)
+	}
+	return nil
+}
+
+func (gateway *StripeGateway) Cancel(ctx context.Context, intentID string) error {
+	params := &stripe.PaymentIntentCancelParams{}
+	params.Context = ctx
+	params.SetIdempotencyKey("cancel-" + intentID)
+	if _, err := gateway.client().Cancel(intentID, params); err != nil {
+		return fmt.Errorf("stripe cancel payment intent: %w", err)
+	}
+	return nil
 }
 
 func (gateway *StripeGateway) ParseEvent(body []byte, signature string) (Event, error) {

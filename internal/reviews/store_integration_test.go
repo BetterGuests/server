@@ -31,7 +31,7 @@ func TestReviewStoreRequiresCompletedGuestBooking(t *testing.T) {
 	hostID, guestID, otherGuestID := uuid.New(), uuid.New(), uuid.New()
 	listing, err := listings.NewListingService(listings.NewPostgresListingStore(pool)).CreateListing(ctx, hostID, listings.CreateListingInput{
 		Title: "Integration House", Description: "A complete listing used by the integration test.",
-		Address: listings.Address{Line1: "1 Test Way", City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1},
+		Address: listings.Address{Line1: "1 Test Way " + uuid.NewString(), City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1},
 		Type:    listings.EntirePlace, PropertyType: listings.House, MaxGuests: 4,
 		MinimumAgeToBook: 21, Bedrooms: 2, Beds: 2, Bathrooms: 1.5,
 		Amenities: []listings.Amenity{listings.WiFi, listings.KitchenAmenity},
@@ -43,7 +43,7 @@ func TestReviewStoreRequiresCompletedGuestBooking(t *testing.T) {
 		t.Fatal(err)
 	}
 	bookingID := uuid.New()
-	if err := createPendingBooking(ctx, pool, guestID, listing.ID, bookingID); err != nil {
+	if err := createRequestedBooking(ctx, pool, guestID, listing.ID, bookingID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -51,8 +51,15 @@ func TestReviewStoreRequiresCompletedGuestBooking(t *testing.T) {
 	// separate (rather than one function full of unrelated if-checks) means
 	// a failure names the behavior that broke instead of just a line number.
 	t.Run("guest cannot complete their own booking", func(t *testing.T) {
-		if err := completeBooking(ctx, pool, guestID, bookingID, 0); err != nil {
-			t.Fatalf("guest was allowed to complete their own booking: %v", err)
+		_ = completeBooking(ctx, pool, guestID, bookingID, 0)
+		var status string
+		if err := db.WithUserTx(ctx, pool, guestID.String(), func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, `SELECT status FROM app.bookings WHERE id = $1`, bookingID).Scan(&status)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if status != "requested" {
+			t.Fatalf("guest changed their booking to %q", status)
 		}
 	})
 
@@ -94,12 +101,12 @@ func publishListing(ctx context.Context, pool *pgxpool.Pool, hostID, listingID u
 	})
 }
 
-func createPendingBooking(ctx context.Context, pool *pgxpool.Pool, guestID, listingID, bookingID uuid.UUID) error {
+func createRequestedBooking(ctx context.Context, pool *pgxpool.Pool, guestID, listingID, bookingID uuid.UUID) error {
 	return db.WithUserTx(ctx, pool, guestID.String(), func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `INSERT INTO app.accounts (id) VALUES ($1)`, guestID); err != nil {
 			return err
 		}
-		_, err := tx.Exec(ctx, `INSERT INTO app.bookings (id, listing_id, guest_id, status, starts_on, ends_on) VALUES ($1,$2,$3,'pending',CURRENT_DATE - 2,CURRENT_DATE - 1)`, bookingID, listingID, guestID)
+		_, err := tx.Exec(ctx, `INSERT INTO app.bookings (id, listing_id, guest_id, status, starts_on, ends_on) VALUES ($1,$2,$3,'requested',CURRENT_DATE - 2,CURRENT_DATE - 1)`, bookingID, listingID, guestID)
 		return err
 	})
 }

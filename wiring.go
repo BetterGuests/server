@@ -15,10 +15,13 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/cashback"
 	"github.com/BetterGuests/BetterGuests-Server/internal/compliance"
 	"github.com/BetterGuests/BetterGuests-Server/internal/listings"
+	"github.com/BetterGuests/BetterGuests-Server/internal/messages"
 	"github.com/BetterGuests/BetterGuests-Server/internal/monitoring"
 	"github.com/BetterGuests/BetterGuests-Server/internal/nearby"
 	"github.com/BetterGuests/BetterGuests-Server/internal/payments"
 	"github.com/BetterGuests/BetterGuests-Server/internal/profiles"
+	"github.com/BetterGuests/BetterGuests-Server/internal/proofs"
+	"github.com/BetterGuests/BetterGuests-Server/internal/realtime"
 	"github.com/BetterGuests/BetterGuests-Server/internal/reviews"
 	"github.com/BetterGuests/BetterGuests-Server/internal/verification"
 	"github.com/google/uuid"
@@ -39,8 +42,15 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 	if err != nil {
 		return routeDeps{}, fmt.Errorf("clerk configuration: %w", err)
 	}
-	accountService := accounts.NewAccountService(accounts.NewPostgresAccountStore(pool))
-	authenticator := auth.NewAuthenticator(auth.NewAuthService(clerkVerifier, accountService))
+	accountStore := accounts.NewPostgresAccountStore(pool)
+	accountService := accounts.NewAccountService(accountStore)
+	nameFetcher, err := auth.NewClerkNameFetcher(clerkConfig)
+	if err != nil {
+		return routeDeps{}, fmt.Errorf("clerk configuration: %w", err)
+	}
+	authService := auth.NewAuthService(clerkVerifier, newNamingProvisioner(accountService, nameFetcher, accountStore))
+	authenticator := auth.NewAuthenticator(authService)
+	realtimeService := realtime.NewRealtimeService()
 
 	complianceService := compliance.NewComplianceService(compliance.NewPostgresComplianceStore(pool))
 
@@ -57,12 +67,23 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 
 	currentVerifier := verification.NewCurrentVerifier(verificationStore)
 
+	messageService := messages.NewMessageService(messages.NewPostgresMessageStore(pool)).WithPublisher(realtimeService)
+
 	paymentConfig, err := payments.ConfigFromEnv()
 	if err != nil {
 		return routeDeps{}, fmt.Errorf("stripe configuration: %w", err)
 	}
 	stripeGateway := payments.NewStripeGateway(paymentConfig)
-	paymentService := payments.NewPaymentService(payments.NewPostgresPaymentStore(pool), stripeGateway, stripeGateway, paymentConfig)
+	paymentService := payments.NewPaymentService(payments.NewPostgresPaymentStore(pool), stripeGateway, stripeGateway, paymentConfig).
+		WithController(stripeGateway).
+		WithPublisher(realtimeService)
+
+	bookingStore := bookings.NewPostgresBookingStore(pool)
+	bookingService := bookings.NewBookingService(bookingStore).
+		WithVerification(currentVerifier).
+		WithDetails(bookingStore).
+		WithPublisher(realtimeService).
+		WithPayments(paymentService)
 
 	objectStore, err := cashback.NewObjectStoreFromEnv()
 	if err != nil {
@@ -76,6 +97,9 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 	)
 
 	listingStore := listings.NewPostgresListingStore(pool)
+	listingService := listings.NewListingService(listingStore).WithPublishing(listingStore, verificationStore)
+
+	proofService := proofs.NewProofService(proofs.NewPostgresProofStore(pool), proofObjectsFrom(objectStore))
 
 	profileService := profiles.NewProfileService(profiles.NewPostgresProfileStore(pool), bannerObjectsFrom(objectStore))
 
@@ -83,11 +107,15 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		database:     pool,
 		origins:      origins,
 		authenticate: authenticator.Middleware,
-		listings: listings.NewHTTPHandler(listings.NewListingService(listingStore)).
+		listings: listings.NewHTTPHandler(listingService).
+			WithPublisher(listingService).
 			WithPublicReader(listings.NewPublicListingService(listingStore, objectStore)),
+		proofs:       proofs.NewHTTPHandler(proofService, proofService, proofService, proofService, proofService),
 		nearby:       buildNearbyHandler(listingStore),
 		reviews:      reviews.NewHTTPHandler(reviews.NewService(reviews.NewPostgresStore(pool))),
-		bookings:     bookings.NewHTTPHandler(bookings.NewBookingService(bookings.NewPostgresBookingStore(pool)).WithVerification(currentVerifier)),
+		bookings:     bookings.NewHTTPHandler(bookingService).WithReader(bookingService).WithResponder(bookingService),
+		messages:     messages.NewHTTPHandler(messageService, messageService, messageService),
+		realtime:     realtime.NewHTTPHandler(realtimeService, authService, origins),
 		cashback:     cashback.NewHTTPHandler(cashbackService, cashbackService, cashbackService, cashbackService, cashbackService),
 		verification: verification.NewHTTPHandler(verificationService, verificationService).WithStatusReader(verificationStore).WithCurrentChecker(currentVerifier),
 		payments:     payments.NewHTTPHandler(paymentService, paymentService),
@@ -172,6 +200,39 @@ func (objects bannerObjects) Stat(ctx context.Context, key string) (profiles.Obj
 }
 
 func (objects bannerObjects) Remove(ctx context.Context, key string) error {
+	remover, ok := objects.store.(objectRemover)
+	if !ok {
+		return nil
+	}
+	return remover.Remove(ctx, key)
+}
+
+type proofObjects struct{ store cashback.ObjectStore }
+
+func proofObjectsFrom(store cashback.ObjectStore) proofs.ObjectStore {
+	if store == nil {
+		return nil
+	}
+	return proofObjects{store: store}
+}
+
+func (objects proofObjects) PresignUpload(ctx context.Context, key, contentType string, expires time.Duration) (string, error) {
+	return objects.store.PresignUpload(ctx, key, contentType, expires)
+}
+
+func (objects proofObjects) PresignDownload(ctx context.Context, key string, expires time.Duration) (string, error) {
+	return objects.store.PresignDownload(ctx, key, expires)
+}
+
+func (objects proofObjects) Stat(ctx context.Context, key string) (proofs.ObjectInfo, error) {
+	info, err := objects.store.Stat(ctx, key)
+	if err != nil {
+		return proofs.ObjectInfo{}, err
+	}
+	return proofs.ObjectInfo{Size: info.Size, ContentType: info.ContentType}, nil
+}
+
+func (objects proofObjects) Remove(ctx context.Context, key string) error {
 	remover, ok := objects.store.(objectRemover)
 	if !ok {
 		return nil

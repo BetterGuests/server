@@ -74,9 +74,27 @@ func (source *GeoapifySource) Find(ctx context.Context, category Category, origi
 	if !source.config.Configured() {
 		return nil, fmt.Errorf("%w: no geoapify api key configured", ErrSourceUnavailable)
 	}
+	var places []Place
+	for _, radius := range searchRadiiMeters {
+		found, err := source.findWithin(ctx, category, origin, radius)
+		if err != nil {
+			if len(places) > 0 {
+				return places, nil
+			}
+			return nil, err
+		}
+		places = found
+		if len(places) >= enoughPlaces {
+			break
+		}
+	}
+	return places, nil
+}
+
+func (source *GeoapifySource) findWithin(ctx context.Context, category Category, origin Point, radiusMeters int) ([]Place, error) {
 	ctx, cancel := context.WithTimeout(ctx, source.timeout)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, source.placesURL(category, origin), nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, source.placesURL(category, origin, radiusMeters), nil)
 	if err != nil {
 		return nil, fmt.Errorf("build geoapify request: %w", err)
 	}
@@ -99,11 +117,11 @@ func (source *GeoapifySource) Find(ctx context.Context, category Category, origi
 	return placesFrom(body.Features), nil
 }
 
-func (source *GeoapifySource) placesURL(category Category, origin Point) string {
+func (source *GeoapifySource) placesURL(category Category, origin Point, radiusMeters int) string {
 	longitude, latitude := formatCoordinate(origin.Longitude), formatCoordinate(origin.Latitude)
 	params := url.Values{
 		"categories": {strings.Join(category.Keys, ",")},
-		"filter":     {fmt.Sprintf("circle:%s,%s,%d", longitude, latitude, searchRadiusMeters)},
+		"filter":     {fmt.Sprintf("circle:%s,%s,%d", longitude, latitude, radiusMeters)},
 		"bias":       {fmt.Sprintf("proximity:%s,%s", longitude, latitude)},
 		"conditions": {"named"},
 		"limit":      {strconv.Itoa(sourcePlaceLimit)},
