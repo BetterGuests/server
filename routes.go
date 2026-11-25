@@ -16,6 +16,7 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/realtime"
 	"github.com/BetterGuests/BetterGuests-Server/internal/reviews"
 	"github.com/BetterGuests/BetterGuests-Server/internal/verification"
+	"github.com/BetterGuests/BetterGuests-Server/internal/waitlist"
 	"github.com/go-chi/cors"
 )
 
@@ -35,6 +36,7 @@ type routeDeps struct {
 	profiles     *profiles.HTTPHandler
 	messages     *messages.HTTPHandler
 	realtime     *realtime.HTTPHandler
+	waitlist     *waitlist.HTTPHandler
 }
 
 func routes(deps routeDeps) http.Handler {
@@ -46,6 +48,7 @@ func routes(deps routeDeps) http.Handler {
 	deps.mountPublicListings(mux)
 	deps.mountNearby(mux)
 	deps.mountRealtime(mux)
+	deps.mountWaitlist(mux)
 	deps.mountAuthenticatedAPI(mux)
 	return withMiddleware(mux, deps.origins)
 }
@@ -89,6 +92,13 @@ func (deps routeDeps) mountRealtime(mux *http.ServeMux) {
 		return
 	}
 	mux.HandleFunc("GET /api/v1/realtime", deps.realtime.Connect)
+}
+
+func (deps routeDeps) mountWaitlist(mux *http.ServeMux) {
+	if deps.waitlist == nil {
+		return
+	}
+	mux.HandleFunc("POST /api/v1/waitlist", deps.waitlist.Join)
 }
 
 func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {

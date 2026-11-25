@@ -132,6 +132,26 @@ Create a second Railway service from the same repo.
   database) and leave `GET /health` for an external uptime monitor that
   should stay green even during a database outage.
 
+## US-only access and the waitlist
+
+The web service limits access by the `CF-IPCountry` header that Cloudflare adds.
+Visitors outside the United States and its territories see the waitlist and the
+legal pages only.
+
+- The web hostname must be proxied through Cloudflare (orange cloud) with IP
+  geolocation turned on. A request without the header is let in.
+- Remove the web service's public `*.up.railway.app` domain, or anyone using it
+  skips the check.
+- The check is in the web app only. The API still answers requests from any
+  country.
+
+Signups go to `app.waitlist_signups`. The API can only insert into it, so read
+it with the Postgres admin connection:
+
+```sql
+SELECT email, country, created_at FROM app.waitlist_signups ORDER BY created_at;
+```
+
 ## 5. Scaling the api service
 
 Railway scales a service horizontally by running more replicas of it; its

@@ -24,6 +24,7 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/realtime"
 	"github.com/BetterGuests/BetterGuests-Server/internal/reviews"
 	"github.com/BetterGuests/BetterGuests-Server/internal/verification"
+	"github.com/BetterGuests/BetterGuests-Server/internal/waitlist"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -123,6 +124,7 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		payments:     payments.NewHTTPHandler(paymentService, paymentService),
 		compliance:   compliance.NewHTTPHandler(complianceService, complianceService, complianceService),
 		profiles:     profiles.NewHTTPHandler(profileService, profileService, profileService, profileService),
+		waitlist:     waitlist.NewHTTPHandler(waitlist.NewWaitlistService(waitlist.NewPostgresWaitlistStore(pool))),
 	}, nil
 }
 
