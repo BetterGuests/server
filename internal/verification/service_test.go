@@ -416,3 +416,47 @@ func TestStartHandoffWithoutHandoffCreatorIsUnavailable(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestStartHandoffMirrorsEmbeddedGuards(t *testing.T) {
+	t.Run("already verified without replace never calls persona", func(t *testing.T) {
+		inquiries := &fakeInquiries{}
+		store := newFakeStore()
+		store.completed = true
+		service := NewVerificationService(store, inquiries, Config{})
+		if _, err := service.StartHandoff(context.Background(), uuid.New(), false); !errors.Is(err, ErrAlreadyVerified) {
+			t.Fatalf("err = %v", err)
+		}
+		if len(inquiries.calls) != 0 {
+			t.Fatalf("persona called: %v", inquiries.calls)
+		}
+	})
+	t.Run("replace lets a verified account start again", func(t *testing.T) {
+		inquiries := &fakeInquiries{inquiry: Inquiry{ID: "inq_2", OneTimeLink: "https://x"}}
+		store := newFakeStore()
+		store.completed = true
+		service := NewVerificationService(store, inquiries, Config{})
+		if _, err := service.StartHandoff(context.Background(), uuid.New(), true); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("persona failure records nothing", func(t *testing.T) {
+		inquiries := &fakeInquiries{err: ErrPersonaRequest}
+		store := newFakeStore()
+		service := NewVerificationService(store, inquiries, Config{})
+		if _, err := service.StartHandoff(context.Background(), uuid.New(), false); !errors.Is(err, ErrPersonaRequest) {
+			t.Fatalf("err = %v", err)
+		}
+		if len(store.rows) != 0 {
+			t.Fatalf("rows = %d", len(store.rows))
+		}
+	})
+	t.Run("store failure surfaces", func(t *testing.T) {
+		inquiries := &fakeInquiries{inquiry: Inquiry{ID: "inq_3", OneTimeLink: "https://x"}}
+		store := newFakeStore()
+		store.createErr = errors.New("insert failed")
+		service := NewVerificationService(store, inquiries, Config{})
+		if _, err := service.StartHandoff(context.Background(), uuid.New(), false); err == nil {
+			t.Fatal("expected store error")
+		}
+	})
+}

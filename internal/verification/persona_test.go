@@ -94,3 +94,45 @@ func TestPersonaClientCreateHandoffInquiryRequestsOneTimeLinkInsteadOfSession(t 
 		t.Fatalf("body meta = %v", gotBody["meta"])
 	}
 }
+
+func TestPersonaClientCreateHandoffInquiryFailures(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"missing one-time link", http.StatusCreated, `{"data":{"id":"inq_1"},"meta":{"one-time-link":""}}`},
+		{"null meta", http.StatusCreated, `{"data":{"id":"inq_1"},"meta":null}`},
+		{"missing inquiry id", http.StatusCreated, `{"data":{},"meta":{"one-time-link":"https://x"}}`},
+		{"malformed json", http.StatusCreated, `{"data":`},
+		{"template not deployed", http.StatusBadRequest, `{"errors":[{"title":"Bad request","details":"Inquiry template is not deployed to this environment"}]}`},
+		{"rate limited", http.StatusTooManyRequests, `{}`},
+		{"unauthorized", http.StatusUnauthorized, `{}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(test.status)
+				_, _ = w.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			client := NewPersonaClient(Config{APIKey: "k", BaseURL: server.URL}, nil)
+			if _, err := client.CreateHandoffInquiry(context.Background(), "t", "r"); !errors.Is(err, ErrPersonaRequest) {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+}
+
+func TestPersonaClientHonorsCancelledContext(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	client := NewPersonaClient(Config{APIKey: "k", BaseURL: server.URL}, nil)
+	if _, err := client.CreateHandoffInquiry(ctx, "t", "r"); !errors.Is(err, ErrPersonaRequest) {
+		t.Fatalf("err = %v", err)
+	}
+}

@@ -216,3 +216,107 @@ func TestStartVerificationEndpointPassesReplaceFlag(t *testing.T) {
 		})
 	}
 }
+
+type stubHandoffStarter struct {
+	stubStarter
+	handoffResult  StartResult
+	handoffErr     error
+	handoffCalls   int
+	handoffReplace bool
+}
+
+func (stub *stubHandoffStarter) StartHandoff(_ context.Context, accountID uuid.UUID, replace bool) (StartResult, error) {
+	stub.handoffCalls++
+	stub.accountID = accountID
+	stub.handoffReplace = replace
+	return stub.handoffResult, stub.handoffErr
+}
+
+func handoffRequest(target string, accountID uuid.UUID) *http.Request {
+	request := httptest.NewRequest(http.MethodPost, target, nil)
+	return request.WithContext(accounts.WithUserID(request.Context(), accountID))
+}
+
+func TestStartVerificationHandoffReturnsOneTimeLinkAndNeverTouchesTheEmbeddedPath(t *testing.T) {
+	accountID := uuid.New()
+	starter := &stubHandoffStarter{handoffResult: StartResult{InquiryID: "inq_9", OneTimeLink: "https://inquiry.withpersona.com/verify?code=abc", Status: StatusCreated}}
+	handler := NewHTTPHandler(starter, &stubProcessor{})
+	recorder := httptest.NewRecorder()
+	handler.StartVerification(recorder, handoffRequest("/api/v1/verification/inquiries?handoff=true&replace=true", accountID))
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(recorder.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["one_time_link"] != "https://inquiry.withpersona.com/verify?code=abc" || body["inquiry_id"] != "inq_9" {
+		t.Fatalf("body = %v", body)
+	}
+	if _, leaked := body["session_token"]; leaked && body["session_token"] != "" {
+		t.Fatalf("handoff response must not carry a session token: %v", body)
+	}
+	if starter.handoffCalls != 1 || !starter.handoffReplace || starter.accountID != accountID {
+		t.Fatalf("handoff calls = %d replace = %v account = %s", starter.handoffCalls, starter.handoffReplace, starter.accountID)
+	}
+	if recorder.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("one-time link response must not be cacheable")
+	}
+}
+
+func TestStartVerificationHandoffFailureModes(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"already verified", ErrAlreadyVerified, http.StatusConflict},
+		{"consent missing", ErrConsentRequired, http.StatusForbidden},
+		{"handoff unsupported", ErrHandoffUnavailable, http.StatusNotFound},
+		{"persona down", errors.New("persona request failed: status 503"), http.StatusInternalServerError},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handler := NewHTTPHandler(&stubHandoffStarter{handoffErr: test.err}, &stubProcessor{})
+			recorder := httptest.NewRecorder()
+			handler.StartVerification(recorder, handoffRequest("/api/v1/verification/inquiries?handoff=true", uuid.New()))
+			if recorder.Code != test.want {
+				t.Fatalf("status = %d, want %d", recorder.Code, test.want)
+			}
+			if strings.Contains(recorder.Body.String(), "persona request failed") {
+				t.Fatalf("upstream error text leaked: %s", recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestStartVerificationHandoffWithoutHandoffStarterIsNotFound(t *testing.T) {
+	handler := NewHTTPHandler(&stubStarter{}, &stubProcessor{})
+	recorder := httptest.NewRecorder()
+	handler.StartVerification(recorder, handoffRequest("/api/v1/verification/inquiries?handoff=true", uuid.New()))
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+}
+
+func TestStartVerificationHandoffRequiresAuthentication(t *testing.T) {
+	starter := &stubHandoffStarter{}
+	handler := NewHTTPHandler(starter, &stubProcessor{})
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/verification/inquiries?handoff=true", nil)
+	recorder := httptest.NewRecorder()
+	handler.StartVerification(recorder, request)
+	if recorder.Code != http.StatusUnauthorized || starter.handoffCalls != 0 {
+		t.Fatalf("status = %d calls = %d", recorder.Code, starter.handoffCalls)
+	}
+}
+
+func TestStartVerificationHandoffFlagOnlyMatchesTrue(t *testing.T) {
+	for _, value := range []string{"false", "1", "yes", ""} {
+		starter := &stubHandoffStarter{stubStarter: stubStarter{result: StartResult{InquiryID: "inq_1", Status: StatusCreated}}}
+		handler := NewHTTPHandler(starter, &stubProcessor{})
+		handler.StartVerification(httptest.NewRecorder(), handoffRequest("/api/v1/verification/inquiries?handoff="+value, uuid.New()))
+		if starter.handoffCalls != 0 {
+			t.Fatalf("handoff=%q must use the embedded path", value)
+		}
+	}
+}
