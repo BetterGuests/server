@@ -29,6 +29,7 @@ type MediaManager interface {
 	RequestPhotoUpload(ctx context.Context, hostID, listingID uuid.UUID, contentType string, sizeBytes int64) (PhotoTicket, error)
 	AddPhoto(ctx context.Context, hostID, listingID uuid.UUID, key, altText string) (Setup, error)
 	RemovePhoto(ctx context.Context, hostID, listingID, photoID uuid.UUID) (Setup, error)
+	ReorderPhotos(ctx context.Context, hostID, listingID uuid.UUID, photoIDs []uuid.UUID) (Setup, error)
 	SetPrice(ctx context.Context, hostID, listingID uuid.UUID, nightlyCents int) (Setup, error)
 }
 
@@ -286,6 +287,21 @@ func (handler *HTTPHandler) RemovePhoto(w http.ResponseWriter, r *http.Request) 
 	writeMediaResult(w, http.StatusOK, setup, err)
 }
 
+func (handler *HTTPHandler) ReorderPhotos(w http.ResponseWriter, r *http.Request) {
+	hostID, listingID, ok := hostAndListing(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		PhotoIDs []uuid.UUID `json:"photo_ids"`
+	}
+	if !decodeMediaBody(w, r, &request) {
+		return
+	}
+	setup, err := handler.manager.ReorderPhotos(r.Context(), hostID, listingID, request.PhotoIDs)
+	writeMediaResult(w, http.StatusOK, setup, err)
+}
+
 func (handler *HTTPHandler) SetPrice(w http.ResponseWriter, r *http.Request) {
 	hostID, listingID, ok := hostAndListing(w, r)
 	if !ok {
@@ -338,9 +354,9 @@ func mediaErrorStatus(err error) int {
 	case errors.Is(err, ErrPhotoAlreadyAdded), errors.Is(err, ErrTooManyPhotos), errors.Is(err, ErrLastPhoto):
 		return http.StatusConflict
 	case errors.Is(err, ErrPhotoRejected), errors.Is(err, ErrInvalidPhotoKey), errors.Is(err, ErrPhotoNotUploaded),
-		errors.Is(err, ErrInvalidPrice), errors.Is(err, ErrInvalidListing):
+		errors.Is(err, ErrInvalidPrice), errors.Is(err, ErrInvalidListing), errors.Is(err, ErrPhotoOrderMismatch):
 		return http.StatusBadRequest
-	case errors.Is(err, ErrPhotoNotAllowed), errors.Is(err, ErrPhotoTooLargeToCheck):
+	case errors.Is(err, ErrPhotoNotAllowed), errors.Is(err, ErrPhotoTooLargeToCheck), errors.Is(err, ErrDuplicatePhoto):
 		return http.StatusUnprocessableEntity
 	case errors.Is(err, ErrUploadsDisabled), errors.Is(err, ErrPhotoCheckFailed):
 		return http.StatusServiceUnavailable

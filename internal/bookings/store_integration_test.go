@@ -9,19 +9,13 @@ import (
 	"time"
 
 	"github.com/BetterGuests/BetterGuests-Server/db"
+	"github.com/BetterGuests/BetterGuests-Server/db/dbtest"
 	"github.com/BetterGuests/BetterGuests-Server/internal/listings"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// TestConcurrentBookingAttemptsOnlyOneWins is the test for the security
-// checklist's "prevent overlapping property bookings" / "test concurrent
-// booking attempts" items. It fires several CreateBooking calls for the
-// same listing and the exact same date range from separate goroutines
-// (separate database connections and transactions, like real concurrent
-// HTTP requests) and asserts PostgreSQL's exclusion constraint - not a
-// Go-level mutex or a check-then-insert - lets exactly one of them succeed.
 func TestConcurrentBookingAttemptsOnlyOneWins(t *testing.T) {
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
 	if databaseURL == "" {
@@ -35,7 +29,7 @@ func TestConcurrentBookingAttemptsOnlyOneWins(t *testing.T) {
 	}
 	defer pool.Close()
 
-	hostID := uuid.New()
+	hostID := dbtest.SignedUpAccount(t, ctx, pool)
 	listing, err := listings.NewListingService(listings.NewPostgresListingStore(pool)).CreateListing(ctx, hostID, listings.CreateListingInput{
 		Title: "Concurrency Test House", Description: "A complete listing used by the booking concurrency test.",
 		Address: listings.Address{Line1: "1 Test Way " + uuid.NewString(), City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1},
@@ -66,9 +60,6 @@ func TestConcurrentBookingAttemptsOnlyOneWins(t *testing.T) {
 		other     []error
 	)
 
-	// A WaitGroup-gated start (every goroutine blocks on the same channel
-	// close) makes the attempts land on the database at close to the same
-	// instant, instead of one finishing before the next even begins.
 	start := make(chan struct{})
 	wg.Add(attempts)
 	for i := 0; i < attempts; i++ {
@@ -87,7 +78,7 @@ func TestConcurrentBookingAttemptsOnlyOneWins(t *testing.T) {
 			default:
 				other = append(other, err)
 			}
-		}(uuid.New())
+		}(dbtest.SignedUpAccount(t, ctx, pool))
 	}
 	close(start)
 	wg.Wait()
@@ -103,9 +94,6 @@ func TestConcurrentBookingAttemptsOnlyOneWins(t *testing.T) {
 	}
 }
 
-// TestNonOverlappingBookingsBothSucceed guards against the overlap
-// constraint being too strict (e.g. rejecting back-to-back stays that don't
-// actually share a night).
 func TestNonOverlappingBookingsBothSucceed(t *testing.T) {
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
 	if databaseURL == "" {
@@ -119,7 +107,7 @@ func TestNonOverlappingBookingsBothSucceed(t *testing.T) {
 	}
 	defer pool.Close()
 
-	hostID := uuid.New()
+	hostID := dbtest.SignedUpAccount(t, ctx, pool)
 	listing, err := listings.NewListingService(listings.NewPostgresListingStore(pool)).CreateListing(ctx, hostID, listings.CreateListingInput{
 		Title: "Back To Back House", Description: "A complete listing used by the non-overlap test case.",
 		Address: listings.Address{Line1: "2 Test Way " + uuid.NewString(), City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1},
@@ -139,12 +127,10 @@ func TestNonOverlappingBookingsBothSucceed(t *testing.T) {
 	checkOut := checkIn.AddDate(0, 0, 3)
 	nextCheckOut := checkOut.AddDate(0, 0, 3)
 
-	if _, err := service.CreateBooking(ctx, uuid.New(), CreateBookingInput{ListingID: listing.ID, StartsOn: checkIn, EndsOn: checkOut}); err != nil {
+	if _, err := service.CreateBooking(ctx, dbtest.SignedUpAccount(t, ctx, pool), CreateBookingInput{ListingID: listing.ID, StartsOn: checkIn, EndsOn: checkOut}); err != nil {
 		t.Fatalf("first booking should succeed: %v", err)
 	}
-	// The second guest checks in the same day the first checks out - no
-	// shared night, so this must not be treated as an overlap.
-	if _, err := service.CreateBooking(ctx, uuid.New(), CreateBookingInput{ListingID: listing.ID, StartsOn: checkOut, EndsOn: nextCheckOut}); err != nil {
+	if _, err := service.CreateBooking(ctx, dbtest.SignedUpAccount(t, ctx, pool), CreateBookingInput{ListingID: listing.ID, StartsOn: checkOut, EndsOn: nextCheckOut}); err != nil {
 		t.Fatalf("back-to-back booking should succeed: %v", err)
 	}
 }
@@ -172,7 +158,7 @@ func TestOneGuestCannotRaceTwoTripsOntoTheSameDates(t *testing.T) {
 	const attempts = 4
 	var places []uuid.UUID
 	for range attempts {
-		hostID := uuid.New()
+		hostID := dbtest.SignedUpAccount(t, ctx, pool)
 		listing, err := listings.NewListingService(listings.NewPostgresListingStore(pool)).CreateListing(ctx, hostID, listings.CreateListingInput{
 			Title: "One Trip House", Description: "A complete listing used by the one trip at a time test.",
 			Address: listings.Address{Line1: "3 Test Way " + uuid.NewString(), City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1},
@@ -191,7 +177,7 @@ func TestOneGuestCannotRaceTwoTripsOntoTheSameDates(t *testing.T) {
 
 	store := NewPostgresBookingStore(pool)
 	service := NewBookingService(store)
-	guestID := uuid.New()
+	guestID := dbtest.SignedUpAccount(t, ctx, pool)
 	checkIn := time.Now().UTC().AddDate(0, 0, 40)
 	results := make([]error, attempts)
 	var group sync.WaitGroup

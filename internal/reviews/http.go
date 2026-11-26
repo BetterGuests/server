@@ -12,12 +12,18 @@ import (
 )
 
 type HTTPHandler struct {
-	creator Creator
-	reader  Reader
+	creator   Creator
+	reader    Reader
+	summaries SummaryReader
 }
 
 func NewHTTPHandler(creator Creator, reader Reader) *HTTPHandler {
 	return &HTTPHandler{creator: creator, reader: reader}
+}
+
+func (handler *HTTPHandler) WithSummaries(summaries SummaryReader) *HTTPHandler {
+	handler.summaries = summaries
+	return handler
 }
 
 func (handler *HTTPHandler) CreateReview(w http.ResponseWriter, r *http.Request) {
@@ -51,6 +57,41 @@ func (handler *HTTPHandler) ListingReviews(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	result, err := handler.reader.ForListing(r.Context(), listingID)
+	if err != nil {
+		writeReviewError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (handler *HTTPHandler) ListingReviewSummary(w http.ResponseWriter, r *http.Request) {
+	listingID, err := uuid.Parse(r.PathValue("listing_id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "listing not found")
+		return
+	}
+	if handler.summaries == nil {
+		writeJSON(w, http.StatusOK, ReviewSummary{})
+		return
+	}
+	result, err := handler.summaries.ListingSummary(r.Context(), listingID)
+	if err != nil {
+		writeReviewError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (handler *HTTPHandler) BookingGuestReviewSummary(w http.ResponseWriter, r *http.Request) {
+	hostID, bookingID, ok := authenticatedBooking(w, r)
+	if !ok {
+		return
+	}
+	if handler.summaries == nil {
+		writeJSON(w, http.StatusOK, ReviewSummary{})
+		return
+	}
+	result, err := handler.summaries.BookingGuestSummary(r.Context(), hostID, bookingID)
 	if err != nil {
 		writeReviewError(w, err)
 		return

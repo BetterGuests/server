@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/BetterGuests/BetterGuests-Server/db"
+	"github.com/BetterGuests/BetterGuests-Server/db/dbtest"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -26,7 +27,7 @@ func TestPublicReadsReturnOnlyPublishedListingsWithoutAUser(t *testing.T) {
 	}
 	defer pool.Close()
 
-	hostID := uuid.New()
+	hostID := dbtest.SignedUpAccount(t, ctx, pool)
 	store := NewPostgresListingStore(pool)
 	service := NewListingService(store)
 	input := CreateListingInput{

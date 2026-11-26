@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/BetterGuests/BetterGuests-Server/db/dbtest"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -48,7 +49,7 @@ func approveProof(t *testing.T, ctx context.Context, listing Listing) {
 	}
 	defer admin.Close(ctx)
 	reviewerID := uuid.New()
-	_, err = admin.Exec(ctx, `INSERT INTO app.accounts (id) VALUES ($1)`, reviewerID)
+	_, err = admin.Exec(ctx, `INSERT INTO app.accounts (id, clerk_user_id) VALUES ($1, $2)`, reviewerID, "user_test_"+reviewerID.String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,8 +81,14 @@ func priceAndPicture(t *testing.T, ctx context.Context, service *ListingService,
 	}
 }
 
+func signedUpHost(t *testing.T, ctx context.Context, service *ListingService) uuid.UUID {
+	t.Helper()
+	return dbtest.SignedUpAccount(t, ctx, service.store.(*PostgresListingStore).DB)
+}
+
 func draftAt(t *testing.T, ctx context.Context, service *ListingService, hostID uuid.UUID, line1, line2, postalCode string) Listing {
 	t.Helper()
+	dbtest.SignUp(t, ctx, service.store.(*PostgresListingStore).DB, hostID)
 	input := validCreateInput()
 	input.Address = Address{Line1: line1, Line2: line2, City: "Phoenix", PostalCode: postalCode, CountryCode: "US", Latitude: 33.4, Longitude: -112.1}
 	listing, err := service.CreateListing(ctx, hostID, input)
@@ -183,7 +190,7 @@ func TestPublishRequiresApprovedProof(t *testing.T) {
 	ctx, service := publishFixture(t)
 	input := validCreateInput()
 	input.Address = Address{Line1: "2" + uuid.NewString()[:6] + " Proofless Rd", City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1}
-	listing, err := service.CreateListing(ctx, uuid.New(), input)
+	listing, err := service.CreateListing(ctx, signedUpHost(t, ctx, service), input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +239,7 @@ func TestPublishRequiresAPriceThenFivePhotos(t *testing.T) {
 	store := service.store.(*PostgresListingStore)
 	input := validCreateInput()
 	input.Address = Address{Line1: "6" + uuid.NewString()[:6] + " Bare Rd", City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1}
-	listing, err := service.CreateListing(ctx, uuid.New(), input)
+	listing, err := service.CreateListing(ctx, signedUpHost(t, ctx, service), input)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,5 +364,41 @@ func TestACheckedPhotoMovesToItsCheckedKey(t *testing.T) {
 	last := setup.Photos[len(setup.Photos)-1]
 	if last.Screening != ScreeningPassed || last.ObjectKey != checkedKey {
 		t.Fatalf("photo = %+v", last)
+	}
+}
+
+func TestReorderingPhotosRewritesEveryPositionAndRefusesAPartialOrder(t *testing.T) {
+	ctx, service := publishFixture(t)
+	store := service.store.(*PostgresListingStore)
+	input := validCreateInput()
+	input.Address = Address{Line1: "7" + uuid.NewString()[:6] + " Order Rd", City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1}
+	listing, err := service.CreateListing(ctx, signedUpHost(t, ctx, service), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := listing.HostID.String()
+	var ids []uuid.UUID
+	for range 3 {
+		photo := ListingPhoto{ID: uuid.New(), ObjectKey: ownKey(listing.ID)}
+		if err := store.AddPhoto(ctx, host, listing.ID, photo); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, photo.ID)
+	}
+	wanted := []uuid.UUID{ids[2], ids[0], ids[1]}
+	if err := store.ReorderPhotos(ctx, host, listing.ID, wanted); err != nil {
+		t.Fatal(err)
+	}
+	setup, err := store.Setup(ctx, host, listing.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, photo := range setup.Photos {
+		if photo.ID != wanted[index] || photo.Position != index {
+			t.Fatalf("photo %d = %v at %d, want %v at %d", index, photo.ID, photo.Position, wanted[index], index)
+		}
+	}
+	if err := store.ReorderPhotos(ctx, host, listing.ID, wanted[:2]); !errors.Is(err, ErrPhotoOrderMismatch) {
+		t.Fatalf("partial order error = %v", err)
 	}
 }

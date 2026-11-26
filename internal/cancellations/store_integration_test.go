@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/BetterGuests/BetterGuests-Server/db"
+	"github.com/BetterGuests/BetterGuests-Server/db/dbtest"
 	"github.com/BetterGuests/BetterGuests-Server/internal/availability"
 	"github.com/BetterGuests/BetterGuests-Server/internal/bookings"
 	"github.com/BetterGuests/BetterGuests-Server/internal/cancellations"
@@ -55,9 +56,14 @@ func (w *world) sql(statement string, args ...any) {
 	}
 }
 
+func (w *world) account() uuid.UUID {
+	w.t.Helper()
+	return dbtest.SignedUpAccount(w.t, w.ctx, w.pool)
+}
+
 func (w *world) book(startsIn int, status string) (uuid.UUID, uuid.UUID) {
 	w.t.Helper()
-	guest := uuid.New()
+	guest := w.account()
 	start := time.Now().UTC().AddDate(0, 0, startsIn)
 	booking, err := w.bookings.CreateBooking(w.ctx, guest, bookings.CreateBookingInput{
 		ListingID: w.listingID, StartsOn: start, EndsOn: start.AddDate(0, 0, 2),
@@ -132,7 +138,7 @@ func newWorld(t *testing.T) *world {
 	}
 	t.Cleanup(func() { _ = admin.Close(context.Background()) })
 
-	w := &world{t: t, ctx: ctx, pool: pool, admin: admin, host: uuid.New(), refunds: &refunds{}}
+	w := &world{t: t, ctx: ctx, pool: pool, admin: admin, host: dbtest.SignedUpAccount(t, ctx, pool), refunds: &refunds{}}
 	w.service = cancellations.NewCancellationService(cancellations.NewPostgresCancellationStore(pool), w.refunds, noHold{}, silent{})
 	w.bookings = bookings.NewBookingService(bookings.NewPostgresBookingStore(pool))
 	listing, err := listings.NewListingService(listings.NewPostgresListingStore(pool)).CreateListing(ctx, w.host, listings.CreateListingInput{
@@ -196,7 +202,7 @@ func TestThreeHostCancellationsPauseTheListingAndKeepTheDatesBlocked(t *testing.
 		}
 		if index == 0 {
 			start := time.Now().UTC().AddDate(0, 0, startsIn)
-			_, err := w.bookings.CreateBooking(w.ctx, uuid.New(), bookings.CreateBookingInput{ListingID: w.listingID, StartsOn: start, EndsOn: start.AddDate(0, 0, 2)})
+			_, err := w.bookings.CreateBooking(w.ctx, w.account(), bookings.CreateBookingInput{ListingID: w.listingID, StartsOn: start, EndsOn: start.AddDate(0, 0, 2)})
 			if !errors.Is(err, bookings.ErrBookingOverlaps) {
 				t.Fatalf("dates the host cancelled were rebooked: %v", err)
 			}
@@ -207,7 +213,7 @@ func TestThreeHostCancellationsPauseTheListingAndKeepTheDatesBlocked(t *testing.
 		}
 	}
 	start := time.Now().UTC().AddDate(0, 0, 60)
-	_, err := w.bookings.CreateBooking(w.ctx, uuid.New(), bookings.CreateBookingInput{ListingID: w.listingID, StartsOn: start, EndsOn: start.AddDate(0, 0, 2)})
+	_, err := w.bookings.CreateBooking(w.ctx, w.account(), bookings.CreateBookingInput{ListingID: w.listingID, StartsOn: start, EndsOn: start.AddDate(0, 0, 2)})
 	if !errors.Is(err, bookings.ErrListingPaused) {
 		t.Fatalf("a paused listing took a booking: %v (first %s)", err, first)
 	}
@@ -258,7 +264,7 @@ func TestOnlyTheTeamDecidesAProblemReport(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	team := uuid.New()
+	team := w.account()
 	w.sql(`INSERT INTO app.admin_accounts (account_id, email) VALUES ($1, $2)`, team, team.String()+"@example.test")
 	report, err := w.service.Resolve(w.ctx, team, booking, cancellations.Decision{RefundCents: 10000, Note: "Locked out for two hours"})
 	if err != nil || report.RefundCents != 10000 {
@@ -272,13 +278,13 @@ func TestOnlyTheTeamDecidesAProblemReport(t *testing.T) {
 
 func TestTheTeamPausesAndReopensAListingAndEveryoneIsTold(t *testing.T) {
 	w := newWorld(t)
-	team := uuid.New()
+	team := w.account()
 	teamEmail := team.String() + "@example.test"
 	w.sql(`INSERT INTO app.admin_accounts (account_id, email) VALUES ($1, $2)`, team, teamEmail)
 	inbox := notifications.NewPostgresNotificationStore(w.pool)
 	book := func(startsIn int) error {
 		start := time.Now().UTC().AddDate(0, 0, startsIn)
-		_, err := w.bookings.CreateBooking(w.ctx, uuid.New(), bookings.CreateBookingInput{ListingID: w.listingID, StartsOn: start, EndsOn: start.AddDate(0, 0, 2)})
+		_, err := w.bookings.CreateBooking(w.ctx, w.account(), bookings.CreateBookingInput{ListingID: w.listingID, StartsOn: start, EndsOn: start.AddDate(0, 0, 2)})
 		return err
 	}
 	queued := func(account uuid.UUID) []notifications.Kind {
@@ -417,17 +423,17 @@ func TestOldOpenReportsAreNotAnnouncedWhenAlertsStart(t *testing.T) {
 
 func TestOnlyTheTeamSeesListingsRankedByRecentBookings(t *testing.T) {
 	w := newWorld(t)
-	team := uuid.New()
+	team := w.account()
 	w.sql(`INSERT INTO app.admin_accounts (account_id, email) VALUES ($1, $2)`, team, team.String()+"@example.test")
 	w.book(10, "confirmed")
 	w.book(20, "confirmed")
 	w.book(30, "pending")
 
-	if _, err := w.service.PopularListings(w.ctx, w.host); !errors.Is(err, cancellations.ErrNotAdmin) {
+	if _, err := w.service.PopularListings(w.ctx, w.host, nil); !errors.Is(err, cancellations.ErrNotAdmin) {
 		t.Fatalf("a host saw the popularity ranking: %v", err)
 	}
 
-	ranked, err := w.service.PopularListings(w.ctx, team)
+	ranked, err := w.service.PopularListings(w.ctx, team, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,7 +443,7 @@ func TestOnlyTheTeamSeesListingsRankedByRecentBookings(t *testing.T) {
 
 	store := cancellations.NewPostgresCancellationStore(w.pool)
 	since := time.Now().Add(-cancellations.PopularityPeriod)
-	stranger, err := store.PopularListings(w.ctx, uuid.New(), since, 10)
+	stranger, err := store.PopularListings(w.ctx, uuid.New(), since, nil, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,5 +451,32 @@ func TestOnlyTheTeamSeesListingsRankedByRecentBookings(t *testing.T) {
 		if listing.Bookings != 0 {
 			t.Fatalf("a non-admin counted other people's bookings: %+v", listing)
 		}
+	}
+}
+
+func TestPopularListingsNarrowToTheCitiesOnTheGlobe(t *testing.T) {
+	w := newWorld(t)
+	team := w.account()
+	w.sql(`INSERT INTO app.admin_accounts (account_id, email) VALUES ($1, $2)`, team, team.String()+"@example.test")
+
+	inPhoenix, err := w.service.PopularListings(w.ctx, team, []string{" PHOENIX "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(inPhoenix, func(listing cancellations.PopularListing) bool { return listing.ListingID == w.listingID }) {
+		t.Fatalf("phoenix = %+v, want the Phoenix listing", inPhoenix)
+	}
+	for _, listing := range inPhoenix {
+		if !strings.EqualFold(strings.TrimSpace(listing.City), "phoenix") {
+			t.Fatalf("a listing outside the frame came back: %+v", listing)
+		}
+	}
+
+	elsewhere, err := w.service.PopularListings(w.ctx, team, []string{"reykjavik " + uuid.NewString()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(elsewhere) != 0 {
+		t.Fatalf("elsewhere = %+v, want no listings", elsewhere)
 	}
 }

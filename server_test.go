@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -270,5 +271,62 @@ func TestDeleteIDDataRouteIsReachedOnlyByDelete(t *testing.T) {
 		if response.Code == http.StatusOK || deleter.calls != 0 {
 			t.Fatalf("%s status = %d calls = %d", method, response.Code, deleter.calls)
 		}
+	}
+}
+
+func TestRateLimitedResponsesStillCarryCORSHeaders(t *testing.T) {
+	const origin = "https://app.example.test"
+	handler := withMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}), []string{origin})
+
+	var last *httptest.ResponseRecorder
+	for range 200 {
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/listings", nil)
+		r.Header.Set("Origin", origin)
+		r.RemoteAddr = "203.0.113.9:1234"
+		last = httptest.NewRecorder()
+		handler.ServeHTTP(last, r)
+		if last.Code == http.StatusTooManyRequests {
+			break
+		}
+	}
+	if last.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected the limit to be reached, last status %d", last.Code)
+	}
+	if last.Header().Get("Access-Control-Allow-Origin") != origin {
+		t.Fatal("a refused request must still carry CORS headers so the browser can read the 429")
+	}
+}
+
+func TestPreflightsAreCachedAndDoNotSpendTheRateLimit(t *testing.T) {
+	const origin = "https://app.example.test"
+	handler := withMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}), []string{origin})
+
+	for range 500 {
+		r := httptest.NewRequest(http.MethodOptions, "/api/v1/conversations", nil)
+		r.Header.Set("Origin", origin)
+		r.Header.Set("Access-Control-Request-Method", http.MethodGet)
+		r.Header.Set("Access-Control-Request-Headers", "authorization")
+		r.RemoteAddr = "203.0.113.10:1234"
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, r)
+		if response.Code == http.StatusTooManyRequests {
+			t.Fatal("preflight checks must not count against the rate limit")
+		}
+		if response.Header().Get("Access-Control-Max-Age") != strconv.Itoa(preflightCacheSeconds) {
+			t.Fatalf("preflight must be cacheable, max-age = %q", response.Header().Get("Access-Control-Max-Age"))
+		}
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "/api/v1/conversations", nil)
+	r.Header.Set("Origin", origin)
+	r.RemoteAddr = "203.0.113.10:1234"
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, r)
+	if response.Code != http.StatusOK {
+		t.Fatalf("a real request after many preflights must still go through, got %d", response.Code)
 	}
 }

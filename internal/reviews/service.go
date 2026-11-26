@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"golang.org/x/sync/singleflight"
 )
 
 var (
@@ -18,13 +19,17 @@ var (
 	ErrReviewAlreadyExists  = errors.New("booking already has a review")
 	ErrReviewWindowClosed   = errors.New("the 14 days to review this stay have passed")
 	ErrBookingNotFound      = errors.New("booking not found")
+	errUnusableSummary      = errors.New("summary is empty or too long")
 )
 
 type ReviewService struct {
-	store  Store
-	nudger Nudger
-	now    func() time.Time
-	newID  func() uuid.UUID
+	store      Store
+	nudger     Nudger
+	summaries  SummaryStore
+	summarizer Summarizer
+	generating singleflight.Group
+	now        func() time.Time
+	newID      func() uuid.UUID
 }
 
 func NewReviewService(store Store) *ReviewService {
@@ -33,6 +38,12 @@ func NewReviewService(store Store) *ReviewService {
 
 func (service *ReviewService) WithNudger(nudger Nudger) *ReviewService {
 	service.nudger = nudger
+	return service
+}
+
+func (service *ReviewService) WithSummaries(store SummaryStore, summarizer Summarizer) *ReviewService {
+	service.summaries = store
+	service.summarizer = summarizer
 	return service
 }
 
@@ -152,6 +163,111 @@ func (service *ReviewService) AboutBookingGuest(ctx context.Context, hostID, boo
 
 func (service *ReviewService) Pending(ctx context.Context, actorID uuid.UUID) ([]PendingReview, error) {
 	return service.store.Pending(ctx, actorID, service.now().UTC().Add(-ReviewWindow), maxPendingReviews)
+}
+
+func (service *ReviewService) ListingSummary(ctx context.Context, listingID uuid.UUID) (ReviewSummary, error) {
+	return service.summary(ctx, uuid.Nil, SummaryOfListing, listingID, func(ctx context.Context) ([]Review, error) {
+		found, err := service.store.ForListing(ctx, listingID, maxListedReviews)
+		return found.Reviews, err
+	})
+}
+
+func (service *ReviewService) BookingGuestSummary(ctx context.Context, hostID, bookingID uuid.UUID) (ReviewSummary, error) {
+	booking, err := service.store.Booking(ctx, hostID, bookingID)
+	if err != nil {
+		return ReviewSummary{}, err
+	}
+	if booking.HostID != hostID {
+		return ReviewSummary{}, ErrBookingNotFound
+	}
+	return service.summary(ctx, hostID, SummaryOfGuest, booking.GuestID, func(ctx context.Context) ([]Review, error) {
+		found, err := service.store.AboutGuest(ctx, hostID, booking.GuestID, maxListedReviews)
+		return found.Reviews, err
+	})
+}
+
+func (service *ReviewService) summary(
+	ctx context.Context,
+	actorID uuid.UUID,
+	subject SummarySubject,
+	subjectID uuid.UUID,
+	load func(context.Context) ([]Review, error),
+) (ReviewSummary, error) {
+	if service.summaries == nil || service.summarizer == nil {
+		return ReviewSummary{}, nil
+	}
+	state, err := service.summaries.SummaryState(ctx, actorID, subject, subjectID)
+	if err != nil {
+		return ReviewSummary{}, err
+	}
+	if state.ReviewCount < MinSummarizedReviews {
+		return ReviewSummary{ReviewCount: state.ReviewCount}, nil
+	}
+	if state.Cached != nil && state.Cached.Fingerprint == state.Fingerprint {
+		return shownSummary(*state.Cached), nil
+	}
+	key := string(subject) + ":" + subjectID.String() + ":" + state.Fingerprint
+	fresh, err, _ := service.generating.Do(key, func() (any, error) {
+		detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), summaryDeadline)
+		defer cancel()
+		return service.generate(detached, actorID, subject, subjectID, state, load)
+	})
+	if err != nil {
+		slog.Error("Summarize reviews", "subject", subject, "subject_id", subjectID, "error", err)
+		if state.Cached != nil {
+			return shownSummary(*state.Cached), nil
+		}
+		return ReviewSummary{ReviewCount: state.ReviewCount}, nil
+	}
+	return shownSummary(fresh.(CachedSummary)), nil
+}
+
+func (service *ReviewService) generate(
+	ctx context.Context,
+	actorID uuid.UUID,
+	subject SummarySubject,
+	subjectID uuid.UUID,
+	state SummaryState,
+	load func(context.Context) ([]Review, error),
+) (CachedSummary, error) {
+	found, err := load(ctx)
+	if err != nil {
+		return CachedSummary{}, fmt.Errorf("load reviews to summarize: %w", err)
+	}
+	request := SummaryRequest{Subject: subject, Reviews: found}
+	if state.Cached != nil {
+		request.Current = state.Cached.Summary
+		request.CurrentSince = &state.Cached.CheckedAt
+	}
+	answer, err := service.summarizer.Summarize(ctx, request)
+	if err != nil {
+		return CachedSummary{}, err
+	}
+	now := service.now().UTC()
+	checked := CachedSummary{Fingerprint: state.Fingerprint, ReviewCount: state.ReviewCount, CheckedAt: now}
+	if state.Cached != nil && answer.StillAccurate {
+		checked.Summary = state.Cached.Summary
+		checked.UpdatedAt = state.Cached.UpdatedAt
+	} else {
+		text := strings.Join(strings.Fields(answer.Summary), " ")
+		if text == "" || utf8.RuneCountInString(text) > MaxSummaryRunes {
+			return CachedSummary{}, errUnusableSummary
+		}
+		checked.Summary = text
+		checked.UpdatedAt = now
+		if state.Cached != nil && state.Cached.Summary == text {
+			checked.UpdatedAt = state.Cached.UpdatedAt
+		}
+	}
+	if err := service.summaries.SaveSummary(ctx, actorID, subject, subjectID, checked); err != nil {
+		slog.Error("Save review summary", "subject", subject, "subject_id", subjectID, "error", err)
+	}
+	return checked, nil
+}
+
+func shownSummary(cached CachedSummary) ReviewSummary {
+	updatedAt := cached.UpdatedAt
+	return ReviewSummary{Summary: cached.Summary, ReviewCount: cached.ReviewCount, UpdatedAt: &updatedAt}
 }
 
 func cleanInput(input CreateReviewInput) (CreateReviewInput, error) {

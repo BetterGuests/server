@@ -207,6 +207,70 @@ func (store *PostgresReviewStore) PublishDue(ctx context.Context) (int, error) {
 	return published, nil
 }
 
+var summarySources = map[SummarySubject]struct{ reviews, cache string }{
+	SummaryOfListing: {
+		reviews: `SELECT md5(coalesce(string_agg(r.id::text, ',' ORDER BY r.id::text), '')), count(*)::integer
+		          FROM app.listing_reviews r WHERE r.listing_id = $1 AND r.published_at IS NOT NULL`,
+		cache: `SELECT fingerprint, review_count, summary, updated_at, checked_at FROM app.review_summaries WHERE listing_id = $1`,
+	},
+	SummaryOfGuest: {
+		reviews: `SELECT md5(coalesce(string_agg(g.id::text, ',' ORDER BY g.id::text), '')), count(*)::integer
+		          FROM app.guest_reviews g WHERE g.guest_id = $1 AND g.published_at IS NOT NULL`,
+		cache: `SELECT fingerprint, review_count, summary, updated_at, checked_at FROM app.review_summaries WHERE guest_id = $1`,
+	},
+}
+
+func (store *PostgresReviewStore) SummaryState(ctx context.Context, actorID uuid.UUID, subject SummarySubject, subjectID uuid.UUID) (SummaryState, error) {
+	source, known := summarySources[subject]
+	if !known {
+		return SummaryState{}, fmt.Errorf("unknown summary subject %q", subject)
+	}
+	var state SummaryState
+	read := func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, source.reviews, subjectID).Scan(&state.Fingerprint, &state.ReviewCount); err != nil {
+			return fmt.Errorf("fingerprint reviews: %w", err)
+		}
+		var cached CachedSummary
+		err := tx.QueryRow(ctx, source.cache, subjectID).Scan(&cached.Fingerprint, &cached.ReviewCount, &cached.Summary, &cached.UpdatedAt, &cached.CheckedAt)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			return nil
+		case err != nil:
+			return fmt.Errorf("load cached summary: %w", err)
+		}
+		state.Cached = &cached
+		return nil
+	}
+	var err error
+	if subject == SummaryOfListing {
+		err = db.WithPublicTx(ctx, store.DB, read)
+	} else {
+		err = db.WithUserTx(ctx, store.DB, actorID.String(), read)
+	}
+	if err != nil {
+		return SummaryState{}, fmt.Errorf("review summary state: %w", err)
+	}
+	return state, nil
+}
+
+func (store *PostgresReviewStore) SaveSummary(ctx context.Context, actorID uuid.UUID, subject SummarySubject, subjectID uuid.UUID, summary CachedSummary) error {
+	const save = `SELECT app.save_review_summary($1, $2, $3, $4, $5)`
+	args := []any{string(subject), subjectID, summary.Fingerprint, summary.ReviewCount, summary.Summary}
+	var saved bool
+	var err error
+	if subject == SummaryOfListing {
+		err = store.DB.QueryRow(ctx, save, args...).Scan(&saved)
+	} else {
+		err = db.WithUserTx(ctx, store.DB, actorID.String(), func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, save, args...).Scan(&saved)
+		})
+	}
+	if err != nil {
+		return fmt.Errorf("save review summary: %w", err)
+	}
+	return nil
+}
+
 func queryReviews(ctx context.Context, tx pgx.Tx, query string, args ...any) ([]Review, error) {
 	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {

@@ -126,6 +126,7 @@ func (deps routeDeps) mountListingReviews(mux *http.ServeMux) {
 		return
 	}
 	mux.HandleFunc("GET /api/v1/listings/{listing_id}/reviews", deps.reviews.ListingReviews)
+	mux.HandleFunc("GET /api/v1/listings/{listing_id}/reviews/summary", deps.reviews.ListingReviewSummary)
 }
 
 func (deps routeDeps) mountRealtime(mux *http.ServeMux) {
@@ -159,6 +160,7 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.Handle("POST /api/v1/listings/{listing_id}/photos/uploads", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.RequestPhotoUpload)))
 	api.Handle("POST /api/v1/listings/{listing_id}/photos", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.AddPhoto)))
 	api.Handle("DELETE /api/v1/listings/{listing_id}/photos/{photo_id}", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.RemovePhoto)))
+	api.Handle("PUT /api/v1/listings/{listing_id}/photos/order", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.ReorderPhotos)))
 	api.Handle("PUT /api/v1/listings/{listing_id}/price", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.SetPrice)))
 	api.Handle("DELETE /api/v1/listings/{listing_id}", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.DeleteListing)))
 	api.HandleFunc("GET /api/v1/admin/me", deps.proofs.Me)
@@ -174,6 +176,7 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.HandleFunc("GET /api/v1/reviews/about-me", deps.reviews.ReviewsAboutMe)
 	api.HandleFunc("GET /api/v1/bookings/{booking_id}/reviews", deps.reviews.BookingReviews)
 	api.HandleFunc("GET /api/v1/hosting/bookings/{booking_id}/guest-reviews", deps.reviews.BookingGuestReviews)
+	api.HandleFunc("GET /api/v1/hosting/bookings/{booking_id}/guest-reviews/summary", deps.reviews.BookingGuestReviewSummary)
 	api.HandleFunc("GET /api/v1/bookings/{booking_id}/stay", deps.stays.GetStay)
 	api.HandleFunc("POST /api/v1/bookings/{booking_id}/check-in", deps.stays.CheckIn)
 	api.HandleFunc("POST /api/v1/bookings/{booking_id}/check-out", deps.stays.CheckOut)
@@ -225,7 +228,10 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	mux.Handle("/api/v1/", deps.authenticate(api))
 }
 
+const preflightCacheSeconds = 600
+
 func withMiddleware(next http.Handler, origins []string) http.Handler {
+	limited := middleware.RateLimit(middleware.DefaultRateLimiterConfig())(next)
 	corsHandler := cors.Handler(cors.Options{
 		AllowedOrigins: origins,
 		AllowedMethods: []string{
@@ -235,13 +241,12 @@ func withMiddleware(next http.Handler, origins []string) http.Handler {
 			"Authorization", "Content-Type",
 		},
 		AllowCredentials: false,
-	})(next)
+		MaxAge:           preflightCacheSeconds,
+	})(limited)
 
 	return middleware.Recover(
 		middleware.SecurityHeaders(
-			middleware.RequireHTTPS(
-				middleware.RateLimit(middleware.DefaultRateLimiterConfig())(corsHandler),
-			),
+			middleware.RequireHTTPS(corsHandler),
 		),
 	)
 }

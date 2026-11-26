@@ -177,12 +177,12 @@ func (service *CancellationService) AdminListings(ctx context.Context, adminID u
 	return listings, nil
 }
 
-func (service *CancellationService) PopularListings(ctx context.Context, adminID uuid.UUID) ([]PopularListing, error) {
+func (service *CancellationService) PopularListings(ctx context.Context, adminID uuid.UUID, cities []string) ([]PopularListing, error) {
 	if err := service.requireAdmin(ctx, adminID); err != nil {
 		return nil, err
 	}
 	since := service.now().UTC().Add(-PopularityPeriod)
-	listings, err := service.store.PopularListings(ctx, adminID, since, maxPopularListings)
+	listings, err := service.store.PopularListings(ctx, adminID, since, PopularCities(cities), maxPopularListings)
 	if err != nil {
 		return nil, err
 	}
@@ -190,6 +190,23 @@ func (service *CancellationService) PopularListings(ctx context.Context, adminID
 		listings[index].CoverPhotoURL = service.signedCoverPhoto(ctx, listings[index].ListingID, listings[index].CoverPhotoKey)
 	}
 	return listings, nil
+}
+
+func PopularCities(cities []string) []string {
+	picked := []string{}
+	seen := map[string]bool{}
+	for _, city := range cities {
+		name := strings.ToLower(strings.TrimSpace(city))
+		if name == "" || seen[name] || utf8.RuneCountInString(name) > maxPopularCityRunes {
+			continue
+		}
+		seen[name] = true
+		picked = append(picked, name)
+		if len(picked) == maxPopularCities {
+			break
+		}
+	}
+	return picked
 }
 
 func (service *CancellationService) signedCoverPhoto(ctx context.Context, listingID uuid.UUID, key string) string {

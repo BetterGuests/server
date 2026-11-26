@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/BetterGuests/BetterGuests-Server/db"
+	"github.com/BetterGuests/BetterGuests-Server/db/dbtest"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -27,7 +28,7 @@ func TestVerificationStoreLifecycle(t *testing.T) {
 	defer pool.Close()
 
 	store := NewPostgresVerificationStore(pool)
-	accountID, otherAccountID := uuid.New(), uuid.New()
+	accountID, otherAccountID := dbtest.SignedUpAccount(t, ctx, pool), dbtest.SignedUpAccount(t, ctx, pool)
 	inquiryID := "inq_" + uuid.NewString()
 	base := time.Now().UTC().Truncate(time.Second)
 
@@ -157,7 +158,7 @@ func TestRedactionQueriesHonorRetentionHoldsAndCap(t *testing.T) {
 	for index, item := range fixtures {
 		item.inquiry = "inq_" + suffix + string(rune('a'+index))
 		item.id = uuid.New()
-		accountID := uuid.New()
+		accountID := dbtest.SignedUpAccount(t, ctx, appPool)
 		if err := store.Create(ctx, Verification{ID: item.id, AccountID: accountID, PersonaInquiryID: item.inquiry, Status: StatusCreated, CreatedAt: item.createdAt, UpdatedAt: item.createdAt}); err != nil {
 			t.Fatalf("%s: %v", item.name, err)
 		}
@@ -262,6 +263,7 @@ func TestRequestDeletionIsScopedHoldAwareAndPickedUpByTheJob(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	suffix := uuid.NewString()[:8]
 	accountA, accountB, accountC := uuid.New(), uuid.New(), uuid.New()
+	dbtest.SignUp(t, ctx, appPool, accountA, accountB, accountC)
 
 	create := func(account uuid.UUID, label string) (uuid.UUID, string) {
 		id, inquiry := uuid.New(), "inq_"+suffix+label

@@ -28,6 +28,19 @@ const (
 	uniqueViolationCode = "23505"
 )
 
+type SummarySubject string
+
+const (
+	SummaryOfListing SummarySubject = "listing"
+	SummaryOfGuest   SummarySubject = "guest"
+)
+
+const (
+	MinSummarizedReviews = 3
+	MaxSummaryRunes      = 600
+	summaryDeadline      = 45 * time.Second
+)
+
 type Categories struct {
 	Cleanliness   *int `json:"cleanliness,omitempty"`
 	Accuracy      *int `json:"accuracy,omitempty"`
@@ -116,6 +129,52 @@ type PendingReview struct {
 	Role           Role      `json:"role"`
 	SubjectName    string    `json:"subject_name"`
 	WindowClosesAt time.Time `json:"window_closes_at"`
+}
+
+type ReviewSummary struct {
+	Summary     string     `json:"summary,omitempty"`
+	ReviewCount int        `json:"review_count"`
+	UpdatedAt   *time.Time `json:"updated_at,omitempty"`
+}
+
+type CachedSummary struct {
+	Fingerprint string
+	ReviewCount int
+	Summary     string
+	UpdatedAt   time.Time
+	CheckedAt   time.Time
+}
+
+type SummaryState struct {
+	Fingerprint string
+	ReviewCount int
+	Cached      *CachedSummary
+}
+
+type SummaryStore interface {
+	SummaryState(ctx context.Context, actorID uuid.UUID, subject SummarySubject, subjectID uuid.UUID) (SummaryState, error)
+	SaveSummary(ctx context.Context, actorID uuid.UUID, subject SummarySubject, subjectID uuid.UUID, summary CachedSummary) error
+}
+
+type SummaryRequest struct {
+	Subject      SummarySubject
+	Reviews      []Review
+	Current      string
+	CurrentSince *time.Time
+}
+
+type SummaryAnswer struct {
+	Summary       string
+	StillAccurate bool
+}
+
+type Summarizer interface {
+	Summarize(ctx context.Context, request SummaryRequest) (SummaryAnswer, error)
+}
+
+type SummaryReader interface {
+	ListingSummary(ctx context.Context, listingID uuid.UUID) (ReviewSummary, error)
+	BookingGuestSummary(ctx context.Context, hostID, bookingID uuid.UUID) (ReviewSummary, error)
 }
 
 type Store interface {

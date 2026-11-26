@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/BetterGuests/BetterGuests-Server/db"
+	"github.com/BetterGuests/BetterGuests-Server/db/dbtest"
 	"github.com/BetterGuests/BetterGuests-Server/internal/listings"
 	"github.com/BetterGuests/BetterGuests-Server/internal/verification"
 	"github.com/google/uuid"
@@ -64,6 +65,7 @@ func newFixture(t *testing.T) fixture {
 
 func (f fixture) draft(t *testing.T, hostID uuid.UUID) listings.Listing {
 	t.Helper()
+	dbtest.SignUp(t, f.ctx, f.pool, hostID)
 	listing, err := f.listings.CreateListing(f.ctx, hostID, listings.CreateListingInput{
 		Title: "Proof House", Description: "A complete listing used by the proof integration test.",
 		Address: listings.Address{Line1: uuid.NewString()[:6] + " Proof Way", City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1},
@@ -94,7 +96,7 @@ func (f fixture) priceAndPhotograph(t *testing.T, listing listings.Listing) {
 func (f fixture) makeAdmin(t *testing.T) uuid.UUID {
 	t.Helper()
 	adminID := uuid.New()
-	if _, err := f.super.Exec(f.ctx, `INSERT INTO app.accounts (id) VALUES ($1)`, adminID); err != nil {
+	if _, err := f.super.Exec(f.ctx, `INSERT INTO app.accounts (id, clerk_user_id) VALUES ($1, $2)`, adminID, "user_test_"+adminID.String()); err != nil {
 		t.Fatal(err)
 	}
 	_, err := f.super.Exec(f.ctx, `INSERT INTO app.admin_accounts (account_id, email) VALUES ($1, $2)`, adminID, adminID.String()+"@admin.test")
@@ -393,7 +395,7 @@ func TestReviewerSeesTheNameFromTheHostsID(t *testing.T) {
 
 func TestHeldIDNameIsDeletedOnceTheHoldIsReleased(t *testing.T) {
 	f := newFixture(t)
-	hostID, verificationID := uuid.New(), uuid.New()
+	hostID, verificationID := dbtest.SignedUpAccount(t, f.ctx, f.pool), uuid.New()
 	verifications := verification.NewPostgresVerificationStore(f.pool)
 	inquiryID := "inq_" + uuid.NewString()
 	at := time.Now().UTC().Truncate(time.Second)

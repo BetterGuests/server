@@ -26,6 +26,7 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/profiles"
 	"github.com/BetterGuests/BetterGuests-Server/internal/proofs"
 	"github.com/BetterGuests/BetterGuests-Server/internal/realtime"
+	"github.com/BetterGuests/BetterGuests-Server/internal/reviewdigest"
 	"github.com/BetterGuests/BetterGuests-Server/internal/reviews"
 	"github.com/BetterGuests/BetterGuests-Server/internal/screening"
 	"github.com/BetterGuests/BetterGuests-Server/internal/settlements"
@@ -67,7 +68,13 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 	tripPublisher := nudgingPublisher{publisher: realtimeService, nudger: journeyService}
 	stayStore := stays.NewPostgresStayStore(pool)
 	stayService := stays.NewStayService(stayStore, stayStore).WithNudger(journeyService)
-	reviewService := reviews.NewReviewService(reviews.NewPostgresReviewStore(pool)).WithNudger(journeyService)
+	reviewStore := reviews.NewPostgresReviewStore(pool)
+	reviewService := reviews.NewReviewService(reviewStore).WithNudger(journeyService)
+	if config, enabled := reviewdigest.ConfigFromLookup(os.Getenv); enabled {
+		reviewService.WithSummaries(reviewStore, reviewdigest.NewReviewDigestService(config))
+	} else {
+		slog.Warn("review summaries are off: ANTHROPIC_API_KEY is not set")
+	}
 	journeyService.WithLifecycle(stayService, reviewService)
 
 	complianceService := compliance.NewComplianceService(compliance.NewPostgresComplianceStore(pool))
@@ -197,7 +204,7 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 			WithPublicReader(listings.NewPublicListingService(listingStore, objectStore)),
 		proofs:   proofHandler,
 		nearby:   buildNearbyHandler(listingStore),
-		reviews:  reviews.NewHTTPHandler(reviewService, reviewService),
+		reviews:  reviews.NewHTTPHandler(reviewService, reviewService).WithSummaries(reviewService),
 		bookings: bookings.NewHTTPHandler(bookingService).WithReader(bookingService).WithResponder(bookingService),
 		messages: messages.NewHTTPHandler(messageService, messageService, messageService),
 		realtime: realtime.NewHTTPHandler(realtimeService, authService, origins).

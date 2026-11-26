@@ -56,6 +56,8 @@ const (
 	maxListedReports        = 100
 	maxListedListings       = 200
 	maxPopularListings      = 10
+	maxPopularCities        = 200
+	maxPopularCityRunes     = 120
 	PopularityPeriod        = 90 * 24 * time.Hour
 	coverPhotoURLLifetime   = time.Hour
 	maxPauseReasonRunes     = 200
@@ -205,7 +207,7 @@ type Store interface {
 	PendingRefunds(ctx context.Context, limit int) ([]PendingRefund, error)
 	MarkRefunded(ctx context.Context, refund PendingRefund, refundID string) error
 	AdminListings(ctx context.Context, adminID uuid.UUID, cancellationsSince time.Time, limit int) ([]AdminListing, error)
-	PopularListings(ctx context.Context, adminID uuid.UUID, bookedSince time.Time, limit int) ([]PopularListing, error)
+	PopularListings(ctx context.Context, adminID uuid.UUID, bookedSince time.Time, cities []string, limit int) ([]PopularListing, error)
 	PauseListing(ctx context.Context, adminID, listingID uuid.UUID, reason string) (uuid.UUID, error)
 	UnpauseListing(ctx context.Context, adminID, listingID uuid.UUID, at time.Time) (uuid.UUID, error)
 }
@@ -234,7 +236,7 @@ type Canceller interface {
 
 type ListingDesk interface {
 	AdminListings(ctx context.Context, adminID uuid.UUID) ([]AdminListing, error)
-	PopularListings(ctx context.Context, adminID uuid.UUID) ([]PopularListing, error)
+	PopularListings(ctx context.Context, adminID uuid.UUID, cities []string) ([]PopularListing, error)
 	PauseListing(ctx context.Context, adminID, listingID uuid.UUID, reason string) error
 	UnpauseListing(ctx context.Context, adminID, listingID uuid.UUID) error
 }

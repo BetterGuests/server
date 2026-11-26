@@ -244,6 +244,8 @@ var (
 	ErrInvalidPhotoKey      = errors.New("photo key is not valid for this listing")
 	ErrPhotoNotUploaded     = errors.New("photo was not uploaded")
 	ErrPhotoAlreadyAdded    = errors.New("that photo is already on the listing")
+	ErrDuplicatePhoto       = errors.New("it is already on your listing")
+	ErrPhotoOrderMismatch   = errors.New("the photo order must list each photo on the listing once")
 	ErrTooManyPhotos        = errors.New("a listing can have up to 20 photos")
 	ErrPhotoNotFound        = errors.New("photo not found")
 	ErrLastPhoto            = errors.New("a published listing needs at least 5 photos")
@@ -460,11 +462,23 @@ func (service *ListingService) AddPhoto(ctx context.Context, hostID, listingID u
 		service.discard(ctx, key)
 		return Setup{}, ErrPhotoTooLargeToCheck
 	}
-	photo := ListingPhoto{ID: service.newID(), ObjectKey: key, AltText: altText, Screening: ScreeningPassed}
+	data, err := service.objects.Read(ctx, key, maxPhotoBytes)
+	if err != nil {
+		return Setup{}, fmt.Errorf("%w: read upload: %w", ErrPhotoCheckFailed, err)
+	}
+	fingerprint := fingerprintOf(data)
+	if service.alreadyListed(ctx, fingerprint, current.Photos) {
+		service.discard(ctx, key)
+		return Setup{}, ErrDuplicatePhoto
+	}
+	photo := ListingPhoto{ID: service.newID(), ObjectKey: key, AltText: altText, Screening: ScreeningPassed, Fingerprint: fingerprint}
 	if service.screener != nil {
 		photo.Screening = ScreeningPending
 	}
 	if err := service.media.AddPhoto(ctx, hostID.String(), listingID, photo); err != nil {
+		if errors.Is(err, ErrDuplicatePhoto) {
+			service.discard(ctx, key)
+		}
 		return Setup{}, err
 	}
 	if photo.Screening == ScreeningPending {
@@ -477,6 +491,53 @@ func (service *ListingService) AddPhoto(ctx context.Context, hostID, listingID u
 		})
 	}
 	return service.Setup(ctx, hostID, listingID)
+}
+
+func (service *ListingService) ReorderPhotos(ctx context.Context, hostID, listingID uuid.UUID, photoIDs []uuid.UUID) (Setup, error) {
+	if service.media == nil {
+		return Setup{}, ErrUploadsDisabled
+	}
+	if len(photoIDs) == 0 || len(photoIDs) > maxPhotos || hasRepeats(photoIDs) {
+		return Setup{}, ErrPhotoOrderMismatch
+	}
+	if err := service.media.ReorderPhotos(ctx, hostID.String(), listingID, photoIDs); err != nil {
+		return Setup{}, err
+	}
+	return service.Setup(ctx, hostID, listingID)
+}
+
+func hasRepeats(ids []uuid.UUID) bool {
+	seen := make(map[uuid.UUID]bool, len(ids))
+	for _, id := range ids {
+		if seen[id] {
+			return true
+		}
+		seen[id] = true
+	}
+	return false
+}
+
+func (service *ListingService) alreadyListed(ctx context.Context, fingerprint PhotoFingerprint, listed []ListingPhoto) bool {
+	if fingerprint == noFingerprint {
+		return false
+	}
+	known := make([]PhotoFingerprint, len(listed))
+	group, groupCtx := errgroup.WithContext(ctx)
+	for index, photo := range listed {
+		known[index] = photo.Fingerprint
+		if photo.Fingerprint != noFingerprint {
+			continue
+		}
+		group.Go(func() error {
+			data, err := service.objects.Read(groupCtx, photo.ObjectKey, maxPhotoBytes)
+			if err == nil {
+				known[index] = fingerprintOf(data)
+			}
+			return nil
+		})
+	}
+	_ = group.Wait()
+	return slices.ContainsFunc(known, fingerprint.sameImageAs)
 }
 
 func (service *ListingService) screenPhoto(ctx context.Context, hostID, listingID uuid.UUID, photo ListingPhoto) error {

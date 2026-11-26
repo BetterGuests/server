@@ -260,18 +260,20 @@ func insertListingPhotos(ctx context.Context, tx pgx.Tx, listingID uuid.UUID, ph
 	altTexts := make([]string, len(photos))
 	positions := make([]int32, len(photos))
 	screenings := make([]string, len(photos))
+	fingerprints := make([]int64, len(photos))
 	for index, photo := range photos {
 		ids[index] = photo.ID.String()
 		objectKeys[index] = photo.ObjectKey
 		altTexts[index] = photo.AltText
 		positions[index] = int32(photo.Position)
 		screenings[index] = string(cmp.Or(photo.Screening, ScreeningPassed))
+		fingerprints[index] = int64(photo.Fingerprint)
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO app.listing_photos (id, listing_id, object_key, alt_text, position, screening)
-		SELECT input.id::uuid, $2, input.object_key, NULLIF(input.alt_text, ''), input.position, input.screening
-		FROM unnest($1::text[], $3::text[], $4::text[], $5::int[], $6::text[]) AS input(id, object_key, alt_text, position, screening)
-	`, ids, listingID, objectKeys, altTexts, positions, screenings); err != nil {
+		INSERT INTO app.listing_photos (id, listing_id, object_key, alt_text, position, screening, fingerprint)
+		SELECT input.id::uuid, $2, input.object_key, NULLIF(input.alt_text, ''), input.position, input.screening, NULLIF(input.fingerprint, 0)
+		FROM unnest($1::text[], $3::text[], $4::text[], $5::int[], $6::text[], $7::bigint[]) AS input(id, object_key, alt_text, position, screening, fingerprint)
+	`, ids, listingID, objectKeys, altTexts, positions, screenings, fingerprints); err != nil {
 		return fmt.Errorf("insert listing photos: %w", err)
 	}
 	return nil
@@ -543,7 +545,7 @@ func (s *PostgresListingStore) Setup(ctx context.Context, userID string, listing
 			return err
 		}
 		rows, err := tx.Query(ctx, `
-			SELECT id, object_key, coalesce(alt_text, ''), position, screening, coalesce(refusal, '')
+			SELECT id, object_key, coalesce(alt_text, ''), position, screening, coalesce(refusal, ''), coalesce(fingerprint, 0)
 			FROM app.listing_photos WHERE listing_id = $1 ORDER BY position`, listingID)
 		if err != nil {
 			return fmt.Errorf("query listing photos: %w", err)
@@ -551,9 +553,11 @@ func (s *PostgresListingStore) Setup(ctx context.Context, userID string, listing
 		defer rows.Close()
 		for rows.Next() {
 			var photo ListingPhoto
-			if err := rows.Scan(&photo.ID, &photo.ObjectKey, &photo.AltText, &photo.Position, &photo.Screening, &photo.Refusal); err != nil {
+			var fingerprint int64
+			if err := rows.Scan(&photo.ID, &photo.ObjectKey, &photo.AltText, &photo.Position, &photo.Screening, &photo.Refusal, &fingerprint); err != nil {
 				return fmt.Errorf("scan listing photo: %w", err)
 			}
+			photo.Fingerprint = PhotoFingerprint(fingerprint)
 			found.Photos = append(found.Photos, photo)
 		}
 		setup = found
@@ -584,9 +588,32 @@ func (s *PostgresListingStore) AddPhoto(ctx context.Context, userID string, list
 		if count >= maxPhotos {
 			return ErrTooManyPhotos
 		}
+		if err := refuseListedLookalike(ctx, tx, listingID, photo.Fingerprint); err != nil {
+			return err
+		}
 		photo.Position = next
 		return insertListingPhotos(ctx, tx, listingID, []ListingPhoto{photo})
 	})
+}
+
+func refuseListedLookalike(ctx context.Context, tx pgx.Tx, listingID uuid.UUID, fingerprint PhotoFingerprint) error {
+	if fingerprint == noFingerprint {
+		return nil
+	}
+	rows, err := tx.Query(ctx, `SELECT fingerprint FROM app.listing_photos WHERE listing_id = $1 AND fingerprint IS NOT NULL`, listingID)
+	if err != nil {
+		return fmt.Errorf("query listing photo fingerprints: %w", err)
+	}
+	listed, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		return fmt.Errorf("scan listing photo fingerprints: %w", err)
+	}
+	for _, other := range listed {
+		if fingerprint.sameImageAs(PhotoFingerprint(other)) {
+			return ErrDuplicatePhoto
+		}
+	}
+	return nil
 }
 
 func (s *PostgresListingStore) RemovePhoto(ctx context.Context, userID string, listingID, photoID uuid.UUID) (string, error) {
@@ -621,6 +648,43 @@ func (s *PostgresListingStore) RemovePhoto(ctx context.Context, userID string, l
 		return "", err
 	}
 	return key, nil
+}
+
+const positionShiftDuringReorder = 1000
+
+func (s *PostgresListingStore) ReorderPhotos(ctx context.Context, userID string, listingID uuid.UUID, photoIDs []uuid.UUID) error {
+	return db.WithUserTx(ctx, s.DB, userID, func(tx pgx.Tx) error {
+		if _, err := lockOwnedListing(ctx, tx, userID, listingID); err != nil {
+			return err
+		}
+		ids := make([]string, len(photoIDs))
+		for index, id := range photoIDs {
+			ids[index] = id.String()
+		}
+		var listed, matched int
+		if err := tx.QueryRow(ctx, `
+			SELECT count(*), count(*) FILTER (WHERE id::text = ANY($2::text[]))
+			FROM app.listing_photos WHERE listing_id = $1`, listingID, ids,
+		).Scan(&listed, &matched); err != nil {
+			return fmt.Errorf("check listing photo order: %w", err)
+		}
+		if listed != len(ids) || matched != len(ids) {
+			return ErrPhotoOrderMismatch
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE app.listing_photos SET position = position + $2 WHERE listing_id = $1`, listingID, positionShiftDuringReorder,
+		); err != nil {
+			return fmt.Errorf("make room to reorder listing photos: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE app.listing_photos AS photo SET position = ordered.position - 1
+			FROM unnest($2::text[]) WITH ORDINALITY AS ordered(id, position)
+			WHERE photo.listing_id = $1 AND photo.id::text = ordered.id`, listingID, ids,
+		); err != nil {
+			return fmt.Errorf("reorder listing photos: %w", err)
+		}
+		return nil
+	})
 }
 
 func (s *PostgresListingStore) RecordScreening(ctx context.Context, userID string, listingID uuid.UUID, verdict ScreeningVerdict) (bool, error) {

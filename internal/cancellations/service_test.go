@@ -3,6 +3,8 @@ package cancellations
 import (
 	"context"
 	"errors"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -195,5 +197,22 @@ func TestStrandedHoldsAreReleasedAsTheGuestEvenWhenOneFails(t *testing.T) {
 
 	if err == nil || released != 1 || len(holds.released) != 1 || holds.released[0] != second {
 		t.Fatalf("released = %d %+v, err = %v", released, holds.released, err)
+	}
+}
+
+func TestPopularCitiesTrimLowercaseAndDropRepeats(t *testing.T) {
+	got := PopularCities([]string{" Phoenix ", "phoenix", "", "  ", "Tempe", strings.Repeat("a", maxPopularCityRunes+1)})
+	if want := []string{"phoenix", "tempe"}; !slices.Equal(got, want) {
+		t.Fatalf("cities = %v, want %v", got, want)
+	}
+}
+
+func TestPopularCitiesStopAtTheCap(t *testing.T) {
+	many := make([]string, maxPopularCities+5)
+	for index := range many {
+		many[index] = uuid.NewString()
+	}
+	if got := PopularCities(many); len(got) != maxPopularCities {
+		t.Fatalf("kept %d cities, want %d", len(got), maxPopularCities)
 	}
 }

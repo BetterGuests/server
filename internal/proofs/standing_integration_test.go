@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/BetterGuests/BetterGuests-Server/db/dbtest"
 	"github.com/BetterGuests/BetterGuests-Server/internal/listings"
 	"github.com/BetterGuests/BetterGuests-Server/internal/notifications"
 	"github.com/BetterGuests/BetterGuests-Server/internal/verification"
@@ -40,6 +41,7 @@ func (f fixture) pass(t *testing.T, accountID uuid.UUID, name verification.IDNam
 
 func (f fixture) open(t *testing.T, accountID uuid.UUID, at time.Time) string {
 	t.Helper()
+	dbtest.SignUp(t, f.ctx, f.pool, accountID)
 	inquiryID := "inq_" + uuid.NewString()
 	err := verification.NewPostgresVerificationStore(f.pool).Create(f.ctx, verification.Verification{
 		ID: uuid.New(), AccountID: accountID, PersonaInquiryID: inquiryID, Status: verification.StatusCreated, CreatedAt: at, UpdatedAt: at,

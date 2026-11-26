@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/BetterGuests/BetterGuests-Server/db"
+	"github.com/BetterGuests/BetterGuests-Server/db/dbtest"
 	"github.com/BetterGuests/BetterGuests-Server/internal/listings"
 	"github.com/BetterGuests/BetterGuests-Server/internal/payments"
 	"github.com/BetterGuests/BetterGuests-Server/internal/verification"
@@ -36,6 +37,7 @@ func TestMoneyBackWorkflowAgainstPostgres(t *testing.T) {
 	defer pool.Close()
 
 	hostID, guestID, strangerID := uuid.New(), uuid.New(), uuid.New()
+	dbtest.SignUp(t, ctx, pool, hostID, guestID, strangerID)
 	listing, err := listings.NewListingService(listings.NewPostgresListingStore(pool)).CreateListing(ctx, hostID, listings.CreateListingInput{
 		Title: "Cashback House", Description: "A complete listing used by the cashback integration test.",
 		Address: listings.Address{Line1: "1 Test Way " + uuid.NewString(), City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1},
@@ -55,9 +57,6 @@ func TestMoneyBackWorkflowAgainstPostgres(t *testing.T) {
 
 	bookingID := uuid.New()
 	if err := db.WithUserTx(ctx, pool, guestID.String(), func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO app.accounts (id) VALUES ($1)`, guestID); err != nil {
-			return err
-		}
 		_, err := tx.Exec(ctx, `INSERT INTO app.bookings (id, listing_id, guest_id, status, starts_on, ends_on) VALUES ($1,$2,$3,'requested',CURRENT_DATE - 2,CURRENT_DATE)`, bookingID, listing.ID, guestID)
 		return err
 	}); err != nil {

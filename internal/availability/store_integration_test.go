@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/BetterGuests/BetterGuests-Server/db"
+	"github.com/BetterGuests/BetterGuests-Server/db/dbtest"
 	"github.com/BetterGuests/BetterGuests-Server/internal/bookings"
 	"github.com/BetterGuests/BetterGuests-Server/internal/listings"
 	"github.com/google/uuid"
@@ -28,7 +29,7 @@ func TestBookedDatesShowOtherGuestsHoldsButNotCancelledStays(t *testing.T) {
 	}
 	defer pool.Close()
 
-	hostID := uuid.New()
+	hostID := dbtest.SignedUpAccount(t, ctx, pool)
 	listing, err := listings.NewListingService(listings.NewPostgresListingStore(pool)).CreateListing(ctx, hostID, listings.CreateListingInput{
 		Title: "Booked Dates House", Description: "A complete listing used by the booked dates test.",
 		Address: listings.Address{Line1: "3 Test Way " + uuid.NewString(), City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1},
@@ -71,8 +72,8 @@ func TestBookedDatesShowOtherGuestsHoldsButNotCancelledStays(t *testing.T) {
 		}
 		return booking
 	}
-	book(uuid.New(), 0)
-	cancelledGuest := uuid.New()
+	book(dbtest.SignedUpAccount(t, ctx, pool), 0)
+	cancelledGuest := dbtest.SignedUpAccount(t, ctx, pool)
 	cancelled := book(cancelledGuest, 10)
 	setStatus(cancelledGuest, `UPDATE app.bookings SET status = 'cancelled' WHERE id = $1`, cancelled.ID)
 

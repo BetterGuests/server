@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/BetterGuests/BetterGuests-Server/db/dbtest"
 	"github.com/BetterGuests/BetterGuests-Server/internal/bookings"
 	"github.com/BetterGuests/BetterGuests-Server/internal/listings"
 	"github.com/BetterGuests/BetterGuests-Server/internal/teamevents"
@@ -39,6 +40,7 @@ func TestTheTeamFeedShowsBookingsAndPaymentsOnlyToAdmins(t *testing.T) {
 	}
 
 	host, guest, admin := uuid.New(), uuid.New(), uuid.New()
+	dbtest.SignUp(t, ctx, pool, host, guest, admin)
 	listing, err := listings.NewListingService(listings.NewPostgresListingStore(pool)).CreateListing(ctx, host, listings.CreateListingInput{
 		Title: "Feed House", Description: "A complete listing used by the team feed integration test.",
 		Address: listings.Address{Line1: "1 Feed Way " + uuid.NewString(), City: "Phoenix", CountryCode: "US", Latitude: 33.45, Longitude: -112.07},

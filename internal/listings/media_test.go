@@ -17,6 +17,8 @@ type mediaStoreStub struct {
 	added   []ListingPhoto
 	price   int
 	removed string
+
+	racingPhotos []ListingPhoto
 }
 
 func (stub *mediaStoreStub) Setup(_ context.Context, userID string, _ uuid.UUID) (Setup, error) {
@@ -29,6 +31,9 @@ func (stub *mediaStoreStub) Setup(_ context.Context, userID string, _ uuid.UUID)
 }
 
 func (stub *mediaStoreStub) AddPhoto(_ context.Context, _ string, _ uuid.UUID, photo ListingPhoto) error {
+	if slices.ContainsFunc(slices.Concat(stub.setup.Photos, stub.racingPhotos), func(listed ListingPhoto) bool { return photo.Fingerprint.sameImageAs(listed.Fingerprint) }) {
+		return ErrDuplicatePhoto
+	}
 	stub.added = append(stub.added, photo)
 	stub.setup.Photos = append(stub.setup.Photos, photo)
 	return nil
@@ -51,6 +56,22 @@ func (stub *mediaStoreStub) RecordScreening(_ context.Context, _ string, _ uuid.
 		return true, nil
 	}
 	return false, nil
+}
+
+func (stub *mediaStoreStub) ReorderPhotos(_ context.Context, _ string, _ uuid.UUID, photoIDs []uuid.UUID) error {
+	if len(photoIDs) != len(stub.setup.Photos) {
+		return ErrPhotoOrderMismatch
+	}
+	reordered := make([]ListingPhoto, 0, len(photoIDs))
+	for _, id := range photoIDs {
+		index := slices.IndexFunc(stub.setup.Photos, func(photo ListingPhoto) bool { return photo.ID == id })
+		if index < 0 {
+			return ErrPhotoOrderMismatch
+		}
+		reordered = append(reordered, stub.setup.Photos[index])
+	}
+	stub.setup.Photos = reordered
+	return nil
 }
 
 func (stub *mediaStoreStub) SetPrice(_ context.Context, _ string, _ uuid.UUID, nightlyCents int) error {
@@ -202,5 +223,31 @@ func TestADraftCannotNameStorageObjectsAtCreation(t *testing.T) {
 	input.Photos = []CreateListingPhotoInput{{ObjectKey: "property-proofs/x/y.pdf"}}
 	if _, err := NewListingService(nil).CreateListing(context.Background(), uuid.New(), input); !errors.Is(err, ErrInvalidListing) {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestPhotosCanBeReorderedSoAnotherBecomesTheCover(t *testing.T) {
+	service, store, _, listingID := mediaHarness()
+	first, second, third := uuid.New(), uuid.New(), uuid.New()
+	store.setup.Photos = []ListingPhoto{{ID: first, ObjectKey: ownKey(listingID)}, {ID: second, ObjectKey: ownKey(listingID)}, {ID: third, ObjectKey: ownKey(listingID)}}
+	setup, err := service.ReorderPhotos(context.Background(), store.owner, listingID, []uuid.UUID{third, first, second})
+	if err != nil || setup.Photos[0].ID != third || setup.Photos[1].ID != first || setup.Photos[2].ID != second {
+		t.Fatalf("setup = %+v, err = %v", setup.Photos, err)
+	}
+}
+
+func TestAPhotoOrderMustNameEachPhotoOnce(t *testing.T) {
+	service, store, _, listingID := mediaHarness()
+	first, second := uuid.New(), uuid.New()
+	store.setup.Photos = []ListingPhoto{{ID: first, ObjectKey: ownKey(listingID)}, {ID: second, ObjectKey: ownKey(listingID)}}
+	for name, order := range map[string][]uuid.UUID{
+		"empty":    {},
+		"repeated": {first, first},
+		"missing":  {first},
+		"stranger": {first, uuid.New()},
+	} {
+		if _, err := service.ReorderPhotos(context.Background(), store.owner, listingID, order); !errors.Is(err, ErrPhotoOrderMismatch) {
+			t.Fatalf("%s: error = %v", name, err)
+		}
 	}
 }

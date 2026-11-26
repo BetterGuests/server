@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/BetterGuests/BetterGuests-Server/db"
+	"github.com/BetterGuests/BetterGuests-Server/db/dbtest"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -25,7 +26,7 @@ func TestBatchedChildInsertsWriteEveryRowAndRejectUnknownAmenities(t *testing.T)
 	}
 	defer pool.Close()
 
-	hostID := uuid.New()
+	hostID := dbtest.SignedUpAccount(t, ctx, pool)
 	listing, err := NewListingService(NewPostgresListingStore(pool)).CreateListing(ctx, hostID, CreateListingInput{
 		Title: "Batch House", Description: "A complete listing used by the batching integration test.",
 		Address: Address{Line1: "1 Test Way " + uuid.NewString(), City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1},

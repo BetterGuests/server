@@ -40,7 +40,7 @@ func (handler *HTTPHandler) PopularListings(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
-	listings, err := handler.listings.PopularListings(r.Context(), adminID)
+	listings, err := handler.listings.PopularListings(r.Context(), adminID, r.URL.Query()["city"])
 	respond(w, map[string][]PopularListing{"listings": listings}, err)
 }
 

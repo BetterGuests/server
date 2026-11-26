@@ -330,7 +330,7 @@ func (store *PostgresCancellationStore) AdminListings(ctx context.Context, admin
 	return listings, nil
 }
 
-func (store *PostgresCancellationStore) PopularListings(ctx context.Context, adminID uuid.UUID, bookedSince time.Time, limit int) ([]PopularListing, error) {
+func (store *PostgresCancellationStore) PopularListings(ctx context.Context, adminID uuid.UUID, bookedSince time.Time, cities []string, limit int) ([]PopularListing, error) {
 	listings := []PopularListing{}
 	err := db.WithUserTx(ctx, store.DB, adminID.String(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
@@ -352,8 +352,9 @@ func (store *PostgresCancellationStore) PopularListings(ctx context.Context, adm
 			 ) r ON r.listing_id = l.id
 			 WHERE l.status = 'published'
 			   AND NOT EXISTS (SELECT 1 FROM app.listing_suspensions s WHERE s.listing_id = l.id AND s.lifted_at IS NULL)
+			   AND (cardinality($3::text[]) = 0 OR lower(btrim(COALESCE(l.city, ''))) = ANY($3::text[]))
 			 ORDER BY COALESCE(b.bookings, 0) DESC, COALESCE(r.reviews, 0) DESC, COALESCE(r.rating, 0) DESC, l.title, l.id
-			 LIMIT $2`, bookedSince, limit)
+			 LIMIT $2`, bookedSince, limit, cities)
 		if err != nil {
 			return err
 		}

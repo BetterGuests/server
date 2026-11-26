@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/BetterGuests/BetterGuests-Server/db"
+	"github.com/BetterGuests/BetterGuests-Server/db/dbtest"
 	"github.com/BetterGuests/BetterGuests-Server/internal/listings"
 	"github.com/BetterGuests/BetterGuests-Server/internal/payments"
 	"github.com/google/uuid"
@@ -28,6 +29,7 @@ func TestSettlementAgainstPostgres(t *testing.T) {
 	defer pool.Close()
 
 	hostID, guestID, strangerID := uuid.New(), uuid.New(), uuid.New()
+	dbtest.SignUp(t, ctx, pool, hostID, guestID, strangerID)
 	listing, err := listings.NewListingService(listings.NewPostgresListingStore(pool)).CreateListing(ctx, hostID, listings.CreateListingInput{
 		Title: "Settlement House", Description: "A complete listing used by the settlement integration test.",
 		Address: listings.Address{Line1: "2 Test Way " + uuid.NewString(), City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1},
@@ -49,7 +51,6 @@ func TestSettlementAgainstPostgres(t *testing.T) {
 	}
 	asUser(hostID, `UPDATE app.listings SET status = 'published', nightly_price_cents = 30000 WHERE id = $1`, listing.ID)
 	bookingID := uuid.New()
-	asUser(guestID, `INSERT INTO app.accounts (id) VALUES ($1)`, guestID)
 	asUser(guestID, `INSERT INTO app.bookings (id, listing_id, guest_id, status, starts_on, ends_on) VALUES ($1,$2,$3,'requested',DATE '2025-03-01',DATE '2025-03-03')`, bookingID, listing.ID, guestID)
 	asUser(hostID, `UPDATE app.bookings SET status = 'pending', decided_at = now() WHERE id = $1`, bookingID)
 

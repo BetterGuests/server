@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/BetterGuests/BetterGuests-Server/db"
+	"github.com/BetterGuests/BetterGuests-Server/db/dbtest"
 	"github.com/BetterGuests/BetterGuests-Server/internal/listings"
 	"github.com/BetterGuests/BetterGuests-Server/internal/messages"
 	"github.com/BetterGuests/BetterGuests-Server/internal/notifications"
@@ -122,6 +123,7 @@ func newTrip(t *testing.T) *trip {
 		messages: messages.NewMessageService(messages.NewPostgresMessageStore(pool)),
 	}
 	trip.journey.WithLifecycle(trip.stays, trip.reviews)
+	dbtest.SignUp(t, ctx, pool, trip.host, trip.guest, trip.stranger)
 
 	listing, err := listings.NewListingService(listings.NewPostgresListingStore(pool)).CreateListing(ctx, trip.host, listings.CreateListingInput{
 		Title: "Trip Flow House", Description: "A complete listing used by the trip flow integration test.",
@@ -135,9 +137,6 @@ func newTrip(t *testing.T) *trip {
 	}
 	trip.listingID = listing.ID
 	trip.must(trip.host, `UPDATE app.listings SET status = 'published' WHERE id = $1`, listing.ID)
-	for _, account := range []uuid.UUID{trip.guest, trip.stranger} {
-		trip.must(account, `INSERT INTO app.accounts (id) VALUES ($1)`, account)
-	}
 	trip.must(trip.guest, `INSERT INTO app.account_names (account_id, display_name) VALUES ($1, 'Maria S.')`, trip.guest)
 	trip.must(trip.guest,
 		`INSERT INTO app.bookings (id, listing_id, guest_id, status, starts_on, ends_on)

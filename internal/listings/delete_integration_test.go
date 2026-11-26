@@ -11,7 +11,7 @@ func TestHostCanDeleteOnlyAnUntouchedDraft(t *testing.T) {
 	ctx, service := publishFixture(t)
 	draft := func() Listing {
 		t.Helper()
-		listing, err := service.CreateListing(ctx, uuid.New(), CreateListingInput{
+		listing, err := service.CreateListing(ctx, signedUpHost(t, ctx, service), CreateListingInput{
 			Title: "Delete House", Description: "A complete listing used by the delete integration test.",
 			Address: Address{Line1: uuid.NewString()[:8] + " Delete Way", City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1},
 			Type:    EntirePlace, PropertyType: House, MaxGuests: 4, MinimumAgeToBook: 21, Bedrooms: 2, Beds: 2, Bathrooms: 1.5,

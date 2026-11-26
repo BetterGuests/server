@@ -53,6 +53,8 @@ type ListingPhoto struct {
 	Position  int            `json:"position"`
 	Screening PhotoScreening `json:"screening"`
 	Refusal   PhotoRefusal   `json:"refusal,omitempty"`
+
+	Fingerprint PhotoFingerprint `json:"-"`
 }
 
 type PhotoScreening string
@@ -348,6 +350,7 @@ type MediaStore interface {
 	Setup(ctx context.Context, userID string, listingID uuid.UUID) (Setup, error)
 	AddPhoto(ctx context.Context, userID string, listingID uuid.UUID, photo ListingPhoto) error
 	RemovePhoto(ctx context.Context, userID string, listingID, photoID uuid.UUID) (string, error)
+	ReorderPhotos(ctx context.Context, userID string, listingID uuid.UUID, photoIDs []uuid.UUID) error
 	RecordScreening(ctx context.Context, userID string, listingID uuid.UUID, verdict ScreeningVerdict) (bool, error)
 	SetPrice(ctx context.Context, userID string, listingID uuid.UUID, nightlyCents int) error
 }
