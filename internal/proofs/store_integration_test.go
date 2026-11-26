@@ -18,7 +18,9 @@ import (
 
 type verifiedHosts struct{}
 
-func (verifiedHosts) HasCompleted(context.Context, uuid.UUID) (bool, error) { return true, nil }
+func (verifiedHosts) CurrentVerificationID(context.Context, uuid.UUID) (uuid.UUID, bool, error) {
+	return uuid.Nil, true, nil
+}
 
 type uploadedObjects struct{ objectsStub }
 
@@ -535,5 +537,148 @@ func TestPersonaDocumentsAreDeletedWhenNoLongerNeeded(t *testing.T) {
 	}
 	if err := identity.MarkRedacted(f.ctx, approvedID); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestUploadedDocumentsAreDueOnlyWhenNoLongerNeeded(t *testing.T) {
+	f := newFixture(t)
+	store := NewPostgresProofStore(f.pool)
+	adminID := f.makeAdmin(t)
+	decided := func(decision Decision) Proof {
+		proof := f.submit(t, f.draft(t, uuid.New()))
+		if err := f.proofs.Decide(f.ctx, adminID, proof.ID, decision, "Name does not match"); err != nil {
+			t.Fatal(err)
+		}
+		return proof
+	}
+	due := func(proof Proof) bool {
+		files, err := store.FilesDueForDeletion(f.ctx, 500)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, file := range files {
+			if file.ProofID == proof.ID {
+				return true
+			}
+		}
+		return false
+	}
+	age := func(proof Proof, column string, days int) {
+		if _, err := f.super.Exec(f.ctx,
+			`UPDATE app.property_proofs SET `+column+` = now() - make_interval(days => $2) WHERE id = $1`,
+			proof.ID, days); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	waiting := f.submit(t, f.draft(t, uuid.New()))
+	rejected := decided(Reject)
+	approved := decided(Approve)
+	if due(waiting) || !due(rejected) || due(approved) {
+		t.Fatal("only the rejected document is due at first")
+	}
+	if err := store.MarkFileDeleted(f.ctx, approved.ID); err != nil {
+		t.Fatal(err)
+	}
+	age(approved, "reviewed_at", 89)
+	if due(approved) {
+		t.Fatal("an approved document must be kept for 90 days")
+	}
+	age(approved, "reviewed_at", 91)
+	if !due(approved) {
+		t.Fatal("an approved document older than 90 days must be due")
+	}
+	if err := store.MarkFileDeleted(f.ctx, rejected.ID); err != nil {
+		t.Fatal(err)
+	}
+	if due(rejected) {
+		t.Fatal("a deleted document must not be due again")
+	}
+	latest, found, err := store.Latest(f.ctx, rejected.HostID, rejected.ListingID)
+	if err != nil || !found || latest.ObjectKey != "" || latest.Status != Rejected {
+		t.Fatalf("the record must remain without its file: %+v %v", latest, err)
+	}
+
+	withdrawn := decided(Approve)
+	age(withdrawn, "revoked_at", 1)
+	age(withdrawn, "reviewed_at", 1)
+	if _, err := f.super.Exec(f.ctx,
+		`UPDATE app.property_proofs SET status = 'rejected', rejection_reason = 'Withdrawn' WHERE id = $1`, withdrawn.ID); err != nil {
+		t.Fatal(err)
+	}
+	if due(withdrawn) {
+		t.Fatal("a withdrawn approval must be kept for 90 days")
+	}
+	age(withdrawn, "revoked_at", 91)
+	if !due(withdrawn) {
+		t.Fatal("an old withdrawn approval must be due")
+	}
+}
+
+func TestDeletingADraftQueuesItsDocumentsForDeletion(t *testing.T) {
+	f := newFixture(t)
+	store := NewPostgresProofStore(f.pool)
+	listingStore := listings.NewPostgresListingStore(f.pool)
+	identity := verification.NewPostgresVerificationStore(f.pool)
+	listing := f.draft(t, uuid.New())
+	proof := f.submit(t, listing)
+	inquiry := CheckInquiry{ID: uuid.New(), InquiryID: "inq_" + uuid.NewString(), ListingID: listing.ID, HostID: listing.HostID,
+		DocumentType: UtilityBill, CreatedAt: time.Now().UTC()}
+	if err := store.SaveInquiry(f.ctx, inquiry); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := listingStore.DeleteDraft(f.ctx, uuid.NewString(), listing.ID); err == nil {
+		t.Fatal("a stranger must not delete the draft")
+	}
+	if _, err := listingStore.DeleteDraft(f.ctx, listing.HostID.String(), listing.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := store.FilesDueForDeletion(f.ctx, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var queued uuid.UUID
+	for _, file := range files {
+		if file.ObjectKey == proof.ObjectKey {
+			queued = file.ProofID
+		}
+	}
+	if queued != proof.ID {
+		t.Fatalf("the uploaded file must be due: %v", files)
+	}
+	inquiryDue := func() bool {
+		items, err := identity.ListDueForRedaction(f.ctx, 30, 1095, 500)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range items {
+			if item.InquiryID == inquiry.InquiryID {
+				return true
+			}
+		}
+		return false
+	}
+	if !inquiryDue() {
+		t.Fatal("the provider copy must be due")
+	}
+	if err := store.MarkFileDeleted(f.ctx, queued); err != nil {
+		t.Fatal(err)
+	}
+	if err := identity.MarkRedacted(f.ctx, inquiry.ID); err != nil {
+		t.Fatal(err)
+	}
+	files, err = store.FilesDueForDeletion(f.ctx, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		if file.ProofID == queued {
+			t.Fatal("a deleted file must not be due again")
+		}
+	}
+	if inquiryDue() {
+		t.Fatal("a deleted provider copy must not be due again")
 	}
 }

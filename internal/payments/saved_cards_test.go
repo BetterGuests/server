@@ -2,10 +2,13 @@ package payments
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/stripe/stripe-go/v82"
 )
 
 type walletStub struct {
@@ -13,6 +16,28 @@ type walletStub struct {
 	createErr   error
 	sessionErr  error
 	sessionsFor []string
+	cards       []SavedCard
+	listedFor   []string
+	detached    []string
+	linked      map[string]string
+}
+
+func (stub *walletStub) LinkArtCard(_ context.Context, cardID, artCardID string) error {
+	if stub.linked == nil {
+		stub.linked = map[string]string{}
+	}
+	stub.linked[cardID] = artCardID
+	return nil
+}
+
+func (stub *walletStub) DetachCard(_ context.Context, cardID string) error {
+	stub.detached = append(stub.detached, cardID)
+	return nil
+}
+
+func (stub *walletStub) ListCards(_ context.Context, customerID string) ([]SavedCard, error) {
+	stub.listedFor = append(stub.listedFor, customerID)
+	return stub.cards, nil
 }
 
 func (stub *walletStub) CreateCustomer(context.Context, uuid.UUID) (string, error) {
@@ -85,6 +110,85 @@ func TestCheckoutStillWorksWhenSavedCardsFail(t *testing.T) {
 			result, _ := checkoutWith(t, wallet, &customerStoreStub{})
 			if result.ClientSecret == "" || result.CustomerSession != "" {
 				t.Fatalf("result = %+v", result)
+			}
+		})
+	}
+}
+
+func TestGuestWithoutACustomerHasNoCardsAndNoneIsCreated(t *testing.T) {
+	wallet := &walletStub{}
+	service := newService(&fakeStore{}, &fakeIntents{}, fakeParser{}).WithSavedCards(wallet, &customerStoreStub{})
+
+	cards, err := service.SavedCards(context.Background(), uuid.New())
+
+	if err != nil || cards == nil || len(cards) != 0 || wallet.created != 0 || len(wallet.listedFor) != 0 {
+		t.Fatalf("cards = %#v, err = %v, created = %d", cards, err, wallet.created)
+	}
+}
+
+func TestSavedCardsAreListedForTheGuestsOwnCustomer(t *testing.T) {
+	wallet := &walletStub{cards: []SavedCard{{ID: "pm_1", Last4: "4242"}}}
+	service := newService(&fakeStore{}, &fakeIntents{}, fakeParser{}).WithSavedCards(wallet, &customerStoreStub{existing: "cus_old"})
+
+	cards, err := service.SavedCards(context.Background(), uuid.New())
+
+	if err != nil || len(cards) != 1 || cards[0].Last4 != "4242" || wallet.listedFor[0] != "cus_old" {
+		t.Fatalf("cards = %+v, err = %v, listed = %v", cards, err, wallet.listedFor)
+	}
+}
+
+func TestSavedCardKeepsBillingDetailsAndNeverTheFingerprint(t *testing.T) {
+	card, ok := savedCardFrom(&stripe.PaymentMethod{
+		ID: "pm_1",
+		Card: &stripe.PaymentMethodCard{
+			Brand: "visa", Last4: "4242", ExpMonth: 4, ExpYear: 2030, Funding: "credit", Fingerprint: "secret-fingerprint",
+		},
+		BillingDetails: &stripe.PaymentMethodBillingDetails{
+			Name:    "Sam Guest",
+			Address: &stripe.Address{PostalCode: "84101", Country: "US"},
+		},
+	})
+	encoded, err := json.Marshal(card)
+
+	if !ok || err != nil || card.Billing.PostalCode != "84101" || card.Billing.Name != "Sam Guest" {
+		t.Fatalf("card = %+v, err = %v", card, err)
+	}
+	if strings.Contains(string(encoded), "secret-fingerprint") {
+		t.Fatalf("encoded = %s", encoded)
+	}
+}
+
+func TestNonCardPaymentMethodsAreSkipped(t *testing.T) {
+	if _, ok := savedCardFrom(&stripe.PaymentMethod{ID: "pm_bank"}); ok {
+		t.Fatal("a method without card details was listed")
+	}
+}
+
+func TestGuestCanRemoveTheirOwnCard(t *testing.T) {
+	wallet := &walletStub{cards: []SavedCard{{ID: "pm_mine"}}}
+	service := newService(&fakeStore{}, &fakeIntents{}, fakeParser{}).WithSavedCards(wallet, &customerStoreStub{existing: "cus_old"})
+
+	err := service.RemoveCard(context.Background(), uuid.New(), "pm_mine")
+
+	if err != nil || len(wallet.detached) != 1 || wallet.detached[0] != "pm_mine" {
+		t.Fatalf("err = %v, detached = %v", err, wallet.detached)
+	}
+}
+
+func TestGuestCannotRemoveACardThatIsNotTheirs(t *testing.T) {
+	tests := map[string]*customerStoreStub{
+		"another customer's card": {existing: "cus_old"},
+		"no customer yet":         {},
+	}
+	for name, customers := range tests {
+		t.Run(name, func(t *testing.T) {
+			wallet := &walletStub{cards: []SavedCard{{ID: "pm_mine"}}}
+			service := newService(&fakeStore{}, &fakeIntents{}, fakeParser{}).WithSavedCards(wallet, customers)
+
+			err := service.RemoveCard(context.Background(), uuid.New(), "pm_someone_else")
+
+			if !errors.Is(err, ErrCardNotFound) || len(wallet.detached) != 0 {
+				t.Fatalf("err = %v, detached = %v", err, wallet.detached)
 			}
 		})
 	}

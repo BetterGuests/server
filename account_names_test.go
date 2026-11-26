@@ -21,14 +21,15 @@ func (stub provisionerStub) EnsureAccount(context.Context, string) (uuid.UUID, e
 }
 
 type fetcherStub struct {
-	name  string
-	err   error
-	calls atomic.Int32
+	name   string
+	avatar string
+	err    error
+	calls  atomic.Int32
 }
 
-func (stub *fetcherStub) DisplayName(context.Context, string) (string, error) {
+func (stub *fetcherStub) PublicProfile(context.Context, string) (auth.PublicProfile, error) {
 	stub.calls.Add(1)
-	return stub.name, stub.err
+	return auth.PublicProfile{DisplayName: stub.name, AvatarURL: stub.avatar}, stub.err
 }
 
 type namesStub struct {
@@ -36,11 +37,11 @@ type namesStub struct {
 	err    error
 }
 
-func (stub *namesStub) Remember(_ context.Context, _ uuid.UUID, name string) error {
+func (stub *namesStub) Remember(_ context.Context, _ uuid.UUID, name, avatar string) error {
 	if stub.err != nil {
 		return stub.err
 	}
-	stub.stored <- name
+	stub.stored <- name + "|" + avatar
 	return nil
 }
 
@@ -55,9 +56,9 @@ func waitFor(t *testing.T, condition func() bool) {
 	}
 }
 
-func TestFirstSightOfAnAccountStoresItsClerkName(t *testing.T) {
+func TestFirstSightOfAnAccountStoresItsClerkNameAndPhoto(t *testing.T) {
 	names := &namesStub{stored: make(chan string, 1)}
-	fetcher := &fetcherStub{name: "Maria S."}
+	fetcher := &fetcherStub{name: "Maria S.", avatar: "https://img.clerk.com/maria"}
 	provisioner := newNamingProvisioner(provisionerStub{id: uuid.New()}, fetcher, names)
 
 	if _, err := provisioner.EnsureAccount(context.Background(), "user_1"); err != nil {
@@ -66,8 +67,8 @@ func TestFirstSightOfAnAccountStoresItsClerkName(t *testing.T) {
 
 	select {
 	case got := <-names.stored:
-		if got != "Maria S." {
-			t.Fatalf("stored name %q", got)
+		if got != "Maria S.|https://img.clerk.com/maria" {
+			t.Fatalf("stored profile %q", got)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("name was never stored")

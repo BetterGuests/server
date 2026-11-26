@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -17,6 +18,7 @@ const (
 	maxWebhookBodyBytes = 1 << 20
 	signatureHeaderName = "Persona-Signature"
 	replaceQueryParam   = "replace"
+	inquiryQueryParam   = "inquiry_id"
 	handoffQueryParam   = "handoff"
 )
 
@@ -24,8 +26,8 @@ type HTTPHandler struct {
 	starter   Starter
 	processor WebhookProcessor
 	status    StatusReader
-	current   CurrentChecker
 	deletion  IDDeleter
+	reviews   IdentityReviewer
 }
 
 type IDDeleter interface {
@@ -68,11 +70,6 @@ func (handler *HTTPHandler) WithStatusReader(reader StatusReader) *HTTPHandler {
 	return handler
 }
 
-func (handler *HTTPHandler) WithCurrentChecker(checker CurrentChecker) *HTTPHandler {
-	handler.current = checker
-	return handler
-}
-
 func (handler *HTTPHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
 	accountID, ok := accounts.UserID(r.Context())
 	if !ok {
@@ -83,26 +80,16 @@ func (handler *HTTPHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "status is not available")
 		return
 	}
-	status, found, err := handler.status.LatestStatus(r.Context(), accountID)
+	attempts, err := handler.status.Attempts(r.Context(), accountID)
 	if err != nil {
 		slog.Error("Verification status", "error", err)
 		writeError(w, http.StatusInternalServerError, "could not read verification status")
 		return
 	}
-	response := StatusResponse{Status: "none"}
-	if found {
-		response = StatusResponse{Status: string(status), Verified: status == StatusCompleted}
-		if status == StatusCompleted && handler.current != nil {
-			_, current, err := handler.current.CurrentVerificationID(r.Context(), accountID)
-			if err != nil {
-				slog.Error("Verification currency", "error", err)
-				writeError(w, http.StatusInternalServerError, "could not read verification status")
-				return
-			}
-			if !current {
-				response = StatusResponse{Status: StatusStale}
-			}
-		}
+	response, found := summarize(attempts, r.URL.Query().Get(inquiryQueryParam), time.Now())
+	if !found {
+		writeError(w, http.StatusNotFound, "verification inquiry not found")
+		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")

@@ -14,6 +14,7 @@ var (
 	ErrInvalidBooking       = errors.New("invalid booking")
 	ErrBookingOverlaps      = errors.New("listing is already booked for part of that date range")
 	ErrVerificationRequired = errors.New("a current ID verification is required to book")
+	ErrHostIDRequired       = errors.New("verify your ID again to approve bookings")
 	ErrBookingNotFound      = errors.New("booking not found")
 	ErrNotAwaitingApproval  = errors.New("booking is not awaiting approval")
 	ErrNotCancellable       = errors.New("booking can no longer be cancelled")
@@ -125,6 +126,20 @@ func (overlap *TripOverlapError) Unwrap() error {
 	return ErrTripOverlaps
 }
 
+func (service *BookingService) requireHostID(ctx context.Context, hostID uuid.UUID) error {
+	if service.verified == nil {
+		return nil
+	}
+	_, current, err := service.verified.CurrentVerificationID(ctx, hostID)
+	if err != nil {
+		return fmt.Errorf("check host verification: %w", err)
+	}
+	if !current {
+		return ErrHostIDRequired
+	}
+	return nil
+}
+
 func (service *BookingService) clearAbandonedCheckouts(ctx context.Context, guestID uuid.UUID, input CreateBookingInput) error {
 	if service.details == nil {
 		return nil
@@ -184,6 +199,9 @@ func (service *BookingService) Approve(ctx context.Context, hostID, bookingID uu
 	}
 	if detail.StartsOn.Before(truncateToDate(service.now().UTC().Add(-westmostUSOffset))) {
 		return Detail{}, ErrStayAlreadyStarted
+	}
+	if err := service.requireHostID(ctx, hostID); err != nil {
+		return Detail{}, err
 	}
 	switch detail.Status {
 	case StatusRequested:

@@ -1,6 +1,7 @@
 package proofs
 
 import (
+	"regexp"
 	"slices"
 	"strings"
 	"unicode"
@@ -18,6 +19,25 @@ var addressAliases = map[string]string{
 
 var unitMarkers = []string{"apt", "apartment", "unit", "suite", "ste"}
 
+var honorifics = []string{"mr", "mrs", "ms", "dr"}
+
+var countryWords = []string{"us", "usa", "united", "states", "of", "america"}
+
+var peopleSeparators = regexp.MustCompile(`(?i)[&;/+|\n]|\band\b`)
+
+var usStates = map[string]string{
+	"al": "alabama", "ak": "alaska", "az": "arizona", "ar": "arkansas", "ca": "california", "co": "colorado",
+	"ct": "connecticut", "de": "delaware", "dc": "district of columbia", "fl": "florida", "ga": "georgia",
+	"hi": "hawaii", "id": "idaho", "il": "illinois", "in": "indiana", "ia": "iowa", "ks": "kansas",
+	"ky": "kentucky", "la": "louisiana", "me": "maine", "md": "maryland", "ma": "massachusetts",
+	"mi": "michigan", "mn": "minnesota", "ms": "mississippi", "mo": "missouri", "mt": "montana",
+	"ne": "nebraska", "nv": "nevada", "nh": "new hampshire", "nj": "new jersey", "nm": "new mexico",
+	"ny": "new york", "nc": "north carolina", "nd": "north dakota", "oh": "ohio", "ok": "oklahoma",
+	"or": "oregon", "pa": "pennsylvania", "ri": "rhode island", "sc": "south carolina", "sd": "south dakota",
+	"tn": "tennessee", "tx": "texas", "ut": "utah", "vt": "vermont", "va": "virginia", "wa": "washington",
+	"wv": "west virginia", "wi": "wisconsin", "wy": "wyoming",
+}
+
 var generationSuffixes = []string{"jr", "sr", "ii", "iii", "iv"}
 
 func words(value string) []string {
@@ -27,7 +47,7 @@ func words(value string) []string {
 }
 
 func addressWords(value string) []string {
-	split := words(value)
+	split := words(strings.ReplaceAll(value, "#", " unit "))
 	for index, word := range split {
 		if alias, found := addressAliases[word]; found {
 			split[index] = alias
@@ -48,23 +68,67 @@ func containsRun(haystack, needle []string) bool {
 	return false
 }
 
-func suffixesIn(split []string) []string {
-	var found []string
-	for _, suffix := range generationSuffixes {
-		if slices.Contains(split, suffix) {
-			found = append(found, suffix)
-		}
-	}
-	return found
+func nameMatches(documentName string, id IDName) bool {
+	return slices.ContainsFunc(peopleSeparators.Split(documentName, -1), func(person string) bool {
+		return namesOnePerson(person, id)
+	})
 }
 
-func nameMatches(documentName string, id IDName) bool {
-	document := words(documentName)
-	first, last := words(id.First), words(id.Last)
-	if !containsRun(document, first) || !containsRun(document, last) {
+func namesOnePerson(person string, id IDName) bool {
+	first, last, suffix := words(id.First), words(id.Last), words(id.Suffix)
+	if len(first) == 0 || len(last) == 0 {
 		return false
 	}
-	return slices.Equal(suffixesIn(document), suffixesIn(words(id.Suffix)))
+	parts := strings.Split(person, ",")
+	if len(parts) > 1 && slices.Equal(words(parts[len(parts)-1]), suffix) && len(suffix) > 0 {
+		parts = []string{strings.Join(parts, " ")}
+	}
+	switch len(parts) {
+	case 1:
+		given, found := strings.CutSuffix(strings.Join(withoutHonorific(words(parts[0])), " "), joined(last, suffix))
+		return found && strings.HasSuffix(given, " ") && isGivenName(strings.Fields(given), first, words(id.Middle))
+	case 2:
+		surname := words(parts[0])
+		given := words(parts[1])
+		if len(suffix) > 0 {
+			if rest, found := trimTail(given, suffix); found {
+				given = rest
+			} else if rest, found := trimTail(surname, suffix); found {
+				surname = rest
+			} else {
+				return false
+			}
+		}
+		return slices.Equal(surname, last) && isGivenName(given, first, words(id.Middle))
+	}
+	return false
+}
+
+func joined(last, suffix []string) string {
+	return strings.Join(append(slices.Clone(last), suffix...), " ")
+}
+
+func trimTail(split, tail []string) ([]string, bool) {
+	if len(split) < len(tail) || !slices.Equal(split[len(split)-len(tail):], tail) {
+		return split, false
+	}
+	return split[:len(split)-len(tail)], true
+}
+
+func withoutHonorific(split []string) []string {
+	if len(split) > 0 && slices.Contains(honorifics, split[0]) {
+		return split[1:]
+	}
+	return split
+}
+
+func isGivenName(given, first, middle []string) bool {
+	if len(given) < len(first) || !slices.Equal(given[:len(first)], first) {
+		return false
+	}
+	return !slices.ContainsFunc(given[len(first):], func(word string) bool {
+		return len([]rune(word)) > 1 && !slices.Contains(middle, word)
+	})
 }
 
 func addressMatches(documentAddress string, listing PropertyAddress) bool {
@@ -73,6 +137,9 @@ func addressMatches(documentAddress string, listing PropertyAddress) bool {
 		return false
 	}
 	if !unitMatches(document, listing) {
+		return false
+	}
+	if !stateMatches(document, listing.Region) {
 		return false
 	}
 	postal := words(listing.PostalCode)
@@ -95,6 +162,45 @@ func unitMatches(document []string, listing PropertyAddress) bool {
 	remainder := slices.DeleteFunc(slices.Clone(document), isUnitMarker)
 	street := addressWords(listing.Line1)
 	return containsRun(remainder, append(street, unit...))
+}
+
+func stateMatches(document []string, region string) bool {
+	wanted := words(region)
+	if len(wanted) == 0 {
+		return true
+	}
+	name := strings.Join(wanted, " ")
+	for abbreviation, full := range usStates {
+		if name == abbreviation || name == full {
+			ending := withoutCountryAndPostalCode(document)
+			return endsWith(ending, []string{abbreviation}) || endsWithStateName(ending, full)
+		}
+	}
+	return containsRun(document, wanted)
+}
+
+func withoutCountryAndPostalCode(document []string) []string {
+	end := len(document)
+	for end > 0 && (isNumber(document[end-1]) || slices.Contains(countryWords, document[end-1])) {
+		end--
+	}
+	return document[:end]
+}
+
+func isNumber(word string) bool {
+	return !strings.ContainsFunc(word, func(r rune) bool { return !unicode.IsDigit(r) })
+}
+
+func endsWith(split, tail []string) bool {
+	_, found := trimTail(split, tail)
+	return found
+}
+
+func endsWithStateName(ending []string, full string) bool {
+	if full == "virginia" && endsWith(ending, addressWords("west virginia")) {
+		return false
+	}
+	return endsWith(ending, addressWords(full))
 }
 
 func isUnitMarker(word string) bool {

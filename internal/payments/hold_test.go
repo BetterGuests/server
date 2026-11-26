@@ -177,15 +177,22 @@ func TestAuthorizedEventTellsTheHostAboutTheRequest(t *testing.T) {
 	}
 }
 
-func TestSucceededEventDoesNotRepeatTheHostAnnouncement(t *testing.T) {
-	store := &fakeStore{}
+func TestSucceededEventTellsGuestAndHostTheBookingChanged(t *testing.T) {
+	hostID, guestID, bookingID := uuid.New(), uuid.New(), uuid.New()
+	store := &fakeStore{quote: Quote{HostID: hostID, BookingStatus: "confirmed"}}
 	publisher := &publisherStub{}
-	parser := fakeParser{event: Event{Type: EventSucceeded, IntentID: "pi_1", GuestID: uuid.New(), BookingID: uuid.New()}}
+	parser := fakeParser{event: Event{Type: EventSucceeded, IntentID: "pi_1", GuestID: guestID, BookingID: bookingID}}
 
 	if err := newService(store, &fakeIntents{}, parser).WithPublisher(publisher).HandleWebhook(context.Background(), "sig", nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(publisher.events) != 0 {
+	want := bookingEvent{BookingID: bookingID, Status: "confirmed"}
+	if len(publisher.events) != 2 || publisher.events[0].userID != guestID || publisher.events[1].userID != hostID {
 		t.Fatalf("events = %+v", publisher.events)
+	}
+	for _, event := range publisher.events {
+		if event.kind != "booking" || event.payload != want {
+			t.Fatalf("event = %+v", event)
+		}
 	}
 }

@@ -280,6 +280,17 @@ func TestApproveCapturesTheHeldCard(t *testing.T) {
 	}
 }
 
+func TestApproveRefusesAHostWithoutACurrentID(t *testing.T) {
+	service, details, hold, detail := holdFixture("authorized")
+	service.WithVerification(verificationStub{current: false})
+
+	_, err := service.Approve(context.Background(), detail.HostID, detail.ID)
+
+	if !errors.Is(err, ErrHostIDRequired) || details.decidedTo != "" || hold.captured != 0 {
+		t.Fatalf("error = %v, decided = %q, captured = %d", err, details.decidedTo, hold.captured)
+	}
+}
+
 func TestApproveRefusesARequestWithoutAHeldCard(t *testing.T) {
 	for _, status := range []string{"", "pending", "canceled", "failed"} {
 		service, details, hold, detail := holdFixture(status)

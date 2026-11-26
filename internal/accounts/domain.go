@@ -20,5 +20,5 @@ type AccountStore interface {
 }
 
 type NameStore interface {
-	Remember(ctx context.Context, accountID uuid.UUID, displayName string) error
+	Remember(ctx context.Context, accountID uuid.UUID, displayName, avatarURL string) error
 }

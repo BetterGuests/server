@@ -28,10 +28,11 @@ func (store *PostgresNotificationStore) List(ctx context.Context, actorID uuid.U
 			return fmt.Errorf("count unread: %w", err)
 		}
 		rows, err := tx.Query(ctx,
-			`SELECT n.id, n.booking_id, CASE WHEN b.guest_id = n.account_id THEN 'guest' ELSE 'host' END,
+			`SELECT n.id, COALESCE(n.booking_id, '00000000-0000-0000-0000-000000000000'::uuid),
+			        CASE WHEN n.for_team THEN 'team' WHEN b.guest_id = n.account_id THEN 'guest' ELSE 'host' END,
 			        n.kind, n.title, n.body, n.created_at, n.read_at
 			 FROM app.notifications n
-			 JOIN app.bookings b ON b.id = n.booking_id
+			 LEFT JOIN app.bookings b ON b.id = n.booking_id
 			 WHERE n.account_id = $1
 			 ORDER BY n.created_at DESC, n.id DESC
 			 LIMIT $2`, actorID, limit)
@@ -140,4 +141,45 @@ func (store *PostgresNotificationStore) PostNote(ctx context.Context, bookingID,
 		return Posted{}, false, fmt.Errorf("post stay message: %w", err)
 	}
 	return posted, true, nil
+}
+
+func (store *PostgresNotificationStore) QueueTeamAlerts(ctx context.Context) ([]TeamAlert, error) {
+	rows, err := store.DB.Query(ctx,
+		`SELECT account_id, COALESCE(booking_id, '00000000-0000-0000-0000-000000000000'::uuid), kind, title, body, for_team
+		 FROM app.queue_team_alerts()`)
+	if err != nil {
+		return nil, fmt.Errorf("queue team alerts: %w", err)
+	}
+	alerts, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (TeamAlert, error) {
+		var alert TeamAlert
+		err := row.Scan(&alert.Recipient, &alert.BookingID, &alert.Kind, &alert.Title, &alert.Body, &alert.ForTeam)
+		return alert, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("queue team alerts: %w", err)
+	}
+	return alerts, nil
+}
+
+func (store *PostgresNotificationStore) AwaitingEmail(ctx context.Context, limit int) ([]PendingEmail, error) {
+	rows, err := store.DB.Query(ctx,
+		`SELECT notification_id, account_id, COALESCE(booking_id, '00000000-0000-0000-0000-000000000000'::uuid),
+		        kind, title, body, for_team, COALESCE(team_email, '')
+		 FROM app.notifications_awaiting_email($1)`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query waiting email: %w", err)
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (PendingEmail, error) {
+		var item PendingEmail
+		err := row.Scan(&item.NotificationID, &item.AccountID, &item.BookingID, &item.Kind,
+			&item.Title, &item.Body, &item.ForTeam, &item.TeamEmail)
+		return item, err
+	})
+}
+
+func (store *PostgresNotificationStore) RecordEmailAttempt(ctx context.Context, notificationID uuid.UUID, delivered bool) error {
+	if _, err := store.DB.Exec(ctx, `SELECT app.record_email_attempt($1, $2)`, notificationID, delivered); err != nil {
+		return fmt.Errorf("record email attempt: %w", err)
+	}
+	return nil
 }

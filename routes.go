@@ -87,6 +87,10 @@ func (deps routeDeps) mountPayments(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/webhooks/stripe", deps.payments.StripeWebhook)
 	if deps.authenticate != nil {
 		mux.Handle("POST /api/v1/payments/checkout", deps.authenticate(deps.compliance.RequireAdult(http.HandlerFunc(deps.payments.StartCheckout))))
+		mux.Handle("GET /api/v1/payments/cards", deps.authenticate(http.HandlerFunc(deps.payments.ListSavedCards)))
+		mux.Handle("DELETE /api/v1/payments/cards/{card_id}", deps.authenticate(http.HandlerFunc(deps.payments.RemoveSavedCard)))
+		mux.Handle("POST /api/v1/payments/cards/{card_id}/art/session", deps.authenticate(deps.compliance.RequireAdult(http.HandlerFunc(deps.payments.StartCardArt))))
+		mux.Handle("PUT /api/v1/payments/cards/{card_id}/art", deps.authenticate(deps.compliance.RequireAdult(http.HandlerFunc(deps.payments.LinkCardArt))))
 	}
 }
 
@@ -154,7 +158,10 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.Handle("PUT /api/v1/listings/{listing_id}/price", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.SetPrice)))
 	api.Handle("DELETE /api/v1/listings/{listing_id}", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.DeleteListing)))
 	api.HandleFunc("GET /api/v1/admin/me", deps.proofs.Me)
-	api.HandleFunc("GET /api/v1/admin/property-proofs", deps.proofs.ListSubmitted)
+	api.HandleFunc("GET /api/v1/admin/property-proofs", deps.proofs.ListForReview)
+	api.HandleFunc("POST /api/v1/admin/property-proofs/{proof_id}/revoke", deps.proofs.Revoke)
+	api.HandleFunc("GET /api/v1/admin/identity-reviews", deps.verification.ListReviews)
+	api.HandleFunc("POST /api/v1/admin/identity-reviews/{verification_id}/decision", deps.verification.DecideReview)
 	api.HandleFunc("POST /api/v1/admin/property-proofs/{proof_id}/decision", deps.proofs.Decide)
 	api.HandleFunc("POST /api/v1/reviews", deps.reviews.CreateReview)
 	api.HandleFunc("GET /api/v1/reviews/pending", deps.reviews.PendingReviews)
@@ -170,6 +177,9 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.HandleFunc("POST /api/v1/bookings/{booking_id}/cancellation", deps.cancellations.Cancel)
 	api.HandleFunc("POST /api/v1/bookings/{booking_id}/report", deps.cancellations.Report)
 	api.HandleFunc("GET /api/v1/admin/stay-reports", deps.cancellations.OpenReports)
+	api.HandleFunc("GET /api/v1/admin/listings", deps.cancellations.AdminListings)
+	api.HandleFunc("POST /api/v1/admin/listings/{listing_id}/pause", deps.cancellations.PauseListing)
+	api.HandleFunc("DELETE /api/v1/admin/listings/{listing_id}/pause", deps.cancellations.UnpauseListing)
 	api.HandleFunc("POST /api/v1/admin/stay-reports/{booking_id}/decision", deps.cancellations.Resolve)
 	api.HandleFunc("GET /api/v1/notifications", deps.inbox.List)
 	api.HandleFunc("POST /api/v1/notifications/read", deps.inbox.MarkAllRead)

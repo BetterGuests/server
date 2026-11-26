@@ -648,6 +648,13 @@ func (s *PostgresListingStore) DeleteDraft(ctx context.Context, userID string, l
 		if err != nil {
 			return fmt.Errorf("read listing photos: %w", err)
 		}
+		var released bool
+		if err := tx.QueryRow(ctx, `SELECT app.release_draft_listing_documents($1)`, listingID).Scan(&released); err != nil {
+			return fmt.Errorf("release listing documents: %w", err)
+		}
+		if !released {
+			return ErrListingInUse
+		}
 		_, err = tx.Exec(ctx, `DELETE FROM app.listings WHERE id = $1`, listingID)
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == foreignKeyViolationCode {

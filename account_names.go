@@ -15,7 +15,7 @@ import (
 const nameLookupTimeout = 10 * time.Second
 
 type nameFetcher interface {
-	DisplayName(ctx context.Context, clerkUserID string) (string, error)
+	PublicProfile(ctx context.Context, clerkUserID string) (auth.PublicProfile, error)
 }
 
 type namingProvisioner struct {
@@ -44,7 +44,7 @@ func (provisioner *namingProvisioner) remember(accountID uuid.UUID, clerkUserID 
 	ctx, cancel := context.WithTimeout(context.Background(), nameLookupTimeout)
 	defer cancel()
 
-	name, err := provisioner.fetcher.DisplayName(ctx, clerkUserID)
+	profile, err := provisioner.fetcher.PublicProfile(ctx, clerkUserID)
 	if errors.Is(err, auth.ErrNoDisplayName) {
 		return
 	}
@@ -53,7 +53,7 @@ func (provisioner *namingProvisioner) remember(accountID uuid.UUID, clerkUserID 
 		provisioner.remembered.Delete(accountID)
 		return
 	}
-	if err := provisioner.names.Remember(ctx, accountID, name); err != nil {
+	if err := provisioner.names.Remember(ctx, accountID, profile.DisplayName, profile.AvatarURL); err != nil {
 		slog.Warn("Store account name", "error", err)
 		provisioner.remembered.Delete(accountID)
 	}

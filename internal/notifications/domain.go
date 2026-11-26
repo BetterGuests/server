@@ -35,9 +35,10 @@ const (
 )
 
 const (
-	NotificationEventKind = "notification"
-	messageEventKind      = "message"
-	systemSenderRole      = "system"
+	NotificationEventKind      = "notification"
+	RoleTeam              Role = "team"
+	messageEventKind           = "message"
+	systemSenderRole           = "system"
 )
 
 const (
@@ -60,6 +61,19 @@ const (
 	sweepTimeout         = 45 * time.Second
 	journeyPageSize      = 200
 	maxListed            = 50
+	emailBatchSize       = 50
+	reportsPath          = "/admin/stay-reports"
+	adminListingsPath    = "/admin/listings"
+	hostingPath          = "/hosting"
+	verifyPath           = "/verify"
+	identityReviewsPath  = "/admin/identity-reviews"
+	kindIDExpiring       = "id_expiring"
+	kindIdentityInReview = "identity_in_review"
+	kindIdentityReview   = "identity_review"
+	tripPathPrefix       = "/trips/"
+	kindReportFiled      = "report_filed"
+	kindListingPaused    = "listing_paused"
+	kindListingUnpaused  = "listing_unpaused"
 	missingGuestName     = "Your guest"
 	dayLayout            = "Jan 2"
 )
@@ -143,6 +157,7 @@ type AlertEvent struct {
 	Kind      Kind      `json:"kind"`
 	Title     string    `json:"title"`
 	Body      string    `json:"body"`
+	Role      Role      `json:"role,omitempty"`
 }
 
 type ThreadMessage struct {
@@ -179,8 +194,57 @@ type ReviewPublisher interface {
 	PublishDue(ctx context.Context) (int, error)
 }
 
+type TeamAlert struct {
+	Recipient uuid.UUID
+	BookingID uuid.UUID
+	Kind      Kind
+	Title     string
+	Body      string
+	ForTeam   bool
+}
+
+type PendingEmail struct {
+	NotificationID uuid.UUID
+	AccountID      uuid.UUID
+	BookingID      uuid.UUID
+	Kind           Kind
+	Title          string
+	Body           string
+	ForTeam        bool
+	TeamEmail      string
+}
+
+type Email struct {
+	To             string
+	Subject        string
+	Text           string
+	IdempotencyKey string
+}
+
+type TeamAlertQueue interface {
+	QueueTeamAlerts(ctx context.Context) ([]TeamAlert, error)
+}
+
+type EmailQueue interface {
+	AwaitingEmail(ctx context.Context, limit int) ([]PendingEmail, error)
+	RecordEmailAttempt(ctx context.Context, notificationID uuid.UUID, delivered bool) error
+}
+
+type EmailSender interface {
+	Send(ctx context.Context, email Email) error
+}
+
+type EmailAddresses interface {
+	VerifiedEmail(ctx context.Context, accountID uuid.UUID) (string, error)
+}
+
+type OutboundMail interface {
+	SendDue(ctx context.Context) (int, error)
+}
+
 type BookingUpkeep interface {
 	ExpireRequests(ctx context.Context) (int, error)
+	ReleaseStrandedHolds(ctx context.Context) (int, error)
 	SendPendingRefunds(ctx context.Context) (int, error)
 }
 

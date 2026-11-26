@@ -109,22 +109,29 @@ Create a second Railway service from the same repo.
     through Persona's redact call.
   - The Persona webhook must include related objects in its payload. The server
     saves the host's name from the passed `verification/government-id` entry and
-    shows it to proof reviewers. Without it, reviewers see "No ID name on file".
+    shows it to proof reviewers. Without it, reviewers see "No ID name on file",
+    nobody's age is checked against their ID, and a host who verifies again is
+    held for review because the names cannot be compared.
+  - Optional `ID_FINGERPRINT_KEY` (at least 32 random characters) turns on
+    detection of one person on several accounts. Keep it stable: changing it
+    stops new checks matching earlier ones.
   - Optional `PERSONA_PROPERTY_TEMPLATE_ID` turns on automatic ownership
     document checks. Without it hosts upload and an admin reviews. Checked files
     stay in Persona and are never copied to our storage. In the Persona dashboard:
     1. Create an inquiry template that only collects a document (Document
        Verification), limited to utility bills, deeds, leases and property tax
        bills, with the fraud and recency checks you want turned on.
-    2. Add two text extractions named exactly `owner_name` and
-       `property_address`. The server compares both with the host's ID name and
-       the listing address. A missing or differently named extraction sends every
-       document to manual review.
+    2. Add text extractions named exactly `owner_name`, `property_address` and
+       `issue_date` (formatted `YYYY-MM-DD`). The server compares the first two
+       with the host's ID name and the listing address. A missing or differently
+       named extraction sends the document to manual review. Only deeds, and
+       property tax bills issued in the last 90 days, can be approved without an
+       admin.
     3. Keep the same webhook, subscribed to `inquiry.completed`,
        `inquiry.approved`, `inquiry.failed`, `inquiry.declined` and
        `inquiry.marked-for-review`, with related objects included (documents and
        verifications).
-    4. In sandbox, run one passing and one mismatched document and confirm the
+    4. In sandbox, run one passing and one mismatched deed and confirm the
        first is approved and the second appears at `/admin/property-proofs`.
   - `ID_RETENTION_DAYS` (default 30), `ID_HOLD_CAP_DAYS` (default 1095),
     `ID_PURGE_INTERVAL` (default 6h), `ID_PURGE_BATCH` (default 50),
@@ -136,6 +143,11 @@ Create a second Railway service from the same repo.
     that ended earlier are never settled), `PLATFORM_FEE_PERCENT` (default 12),
     `SETTLEMENT_INTERVAL` (default 1h), `SETTLEMENT_BATCH` (default 50) and
     `PAYOUTS_WEB_URL` (the web origin hosts return to after Stripe onboarding)
+  - Optional email: `RESEND_API_KEY`, `EMAIL_FROM` (an address on a domain
+    verified in Resend) and `APP_WEB_URL` (the web origin used in email links).
+    Without the key no email is sent; with it the other two are required.
+    Reports and listing pauses are emailed to the hosts, guests and admins
+    involved. Admin mail goes to the address in `app.admin_accounts`.
   - `S3_ENDPOINT`, `S3_BUCKET`, `S3_REGION`, `S3_ACCESS_KEY_ID`,
     `S3_SECRET_ACCESS_KEY` — listing photos and cashback photos; optional
     `S3_URL_STYLE=path` for path-style buckets. Profile banners upload from the

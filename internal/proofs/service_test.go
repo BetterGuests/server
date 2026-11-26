@@ -41,6 +41,15 @@ func (store *storeStub) ListSubmitted(context.Context, uuid.UUID) ([]ReviewItem,
 	return store.items, nil
 }
 
+func (store *storeStub) ListApproved(context.Context, uuid.UUID) ([]ReviewItem, error) {
+	return store.items, nil
+}
+
+func (store *storeStub) Revoke(_ context.Context, _, _ uuid.UUID, reason string, _ time.Time) error {
+	store.reason = reason
+	return store.decideErr
+}
+
 func (store *storeStub) Decide(_ context.Context, _, _ uuid.UUID, status Status, reason string, _ time.Time) error {
 	store.decided, store.reason = status, reason
 	return store.decideErr

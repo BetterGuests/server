@@ -66,6 +66,10 @@ type submitRequest struct {
 	ObjectKey    string       `json:"object_key"`
 }
 
+type revokeRequest struct {
+	Reason string `json:"reason"`
+}
+
 type decisionRequest struct {
 	Decision Decision `json:"decision"`
 	Reason   string   `json:"reason"`
@@ -136,13 +140,17 @@ func (handler *HTTPHandler) Me(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"admin": admin})
 }
 
-func (handler *HTTPHandler) ListSubmitted(w http.ResponseWriter, r *http.Request) {
+func (handler *HTTPHandler) ListForReview(w http.ResponseWriter, r *http.Request) {
 	adminID, ok := accounts.UserID(r.Context())
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	items, err := handler.queue.ListSubmitted(r.Context(), adminID)
+	list := handler.queue.ListSubmitted
+	if Status(r.URL.Query().Get("status")) == Approved {
+		list = handler.queue.ListApproved
+	}
+	items, err := list(r.Context(), adminID)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -173,6 +181,28 @@ func (handler *HTTPHandler) Decide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"id": proofID.String(), "decision": string(request.Decision)})
+}
+
+func (handler *HTTPHandler) Revoke(w http.ResponseWriter, r *http.Request) {
+	adminID, ok := accounts.UserID(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	proofID, err := uuid.Parse(r.PathValue("proof_id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "proof not found")
+		return
+	}
+	var request revokeRequest
+	if !decodeBody(w, r, &request) {
+		return
+	}
+	if err := handler.queue.Revoke(r.Context(), adminID, proofID, request.Reason); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"id": proofID.String()})
 }
 
 func hostAndListing(w http.ResponseWriter, r *http.Request) (uuid.UUID, uuid.UUID, bool) {
@@ -220,6 +250,7 @@ var statusByError = []struct {
 	{ErrOwnListing, http.StatusForbidden},
 	{ErrProofPending, http.StatusConflict},
 	{ErrNotAwaitingReview, http.StatusConflict},
+	{ErrNotApproved, http.StatusConflict},
 	{ErrUploadsDisabled, http.StatusServiceUnavailable},
 	{ErrChecksDisabled, http.StatusServiceUnavailable},
 	{ErrIDRequired, http.StatusForbidden},

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/stripe/stripe-go/v82"
 	"github.com/stripe/stripe-go/v82/webhook"
 )
 
@@ -82,5 +83,22 @@ func TestParseEventRejectsReplayedOldTimestamp(t *testing.T) {
 	_, err := NewStripeGateway(Config{WebhookSecret: testWebhookSecret}).ParseEvent(body, header)
 	if !errors.Is(err, ErrInvalidSignature) {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestCancellingAnAlreadyCanceledIntentIsNotAFailure(t *testing.T) {
+	cases := map[string]struct {
+		err  error
+		want bool
+	}{
+		"already canceled": {&stripe.Error{Code: stripe.ErrorCodePaymentIntentUnexpectedState, PaymentIntent: &stripe.PaymentIntent{Status: stripe.PaymentIntentStatusCanceled}}, true},
+		"already charged":  {&stripe.Error{Code: stripe.ErrorCodePaymentIntentUnexpectedState, PaymentIntent: &stripe.PaymentIntent{Status: stripe.PaymentIntentStatusSucceeded}}, false},
+		"no intent":        {&stripe.Error{Code: stripe.ErrorCodePaymentIntentUnexpectedState}, false},
+		"network":          {errors.New("timeout"), false},
+	}
+	for name, test := range cases {
+		if got := alreadyCanceled(test.err); got != test.want {
+			t.Fatalf("%s: alreadyCanceled = %v", name, got)
+		}
 	}
 }

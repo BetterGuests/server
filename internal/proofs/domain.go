@@ -93,6 +93,8 @@ type Store interface {
 	IsAdmin(ctx context.Context, accountID uuid.UUID) (bool, error)
 	ListSubmitted(ctx context.Context, adminID uuid.UUID) ([]ReviewItem, error)
 	Decide(ctx context.Context, adminID, proofID uuid.UUID, status Status, reason string, at time.Time) error
+	ListApproved(ctx context.Context, adminID uuid.UUID) ([]ReviewItem, error)
+	Revoke(ctx context.Context, adminID, proofID uuid.UUID, reason string, at time.Time) error
 }
 
 type UploadRequester interface {
@@ -114,10 +116,13 @@ type AdminChecker interface {
 type ReviewQueue interface {
 	ListSubmitted(ctx context.Context, adminID uuid.UUID) ([]ReviewItem, error)
 	Decide(ctx context.Context, adminID, proofID uuid.UUID, decision Decision, reason string) error
+	ListApproved(ctx context.Context, adminID uuid.UUID) ([]ReviewItem, error)
+	Revoke(ctx context.Context, adminID, proofID uuid.UUID, reason string) error
 }
 
 type IDName struct {
 	First  string
+	Middle string
 	Last   string
 	Suffix string
 }
@@ -126,6 +131,7 @@ type PropertyAddress struct {
 	Line1       string
 	Line2       string
 	City        string
+	Region      string
 	PostalCode  string
 	CountryCode string
 }
@@ -169,6 +175,7 @@ type CheckStore interface {
 	HasProofForInquiry(ctx context.Context, hostID uuid.UUID, inquiryID string) (bool, error)
 	SaveFromInquiry(ctx context.Context, proof Proof) error
 	ApproveFromInquiry(ctx context.Context, hostID uuid.UUID, inquiryID string, at time.Time) (bool, error)
+	DeclineFromInquiry(ctx context.Context, hostID uuid.UUID, inquiryID string, at time.Time) (bool, error)
 }
 
 type InquiryStarter interface {
@@ -181,4 +188,18 @@ type IDChecker interface {
 
 type CheckStarter interface {
 	Start(ctx context.Context, hostID, listingID uuid.UUID, documentType DocumentType) (CheckTicket, error)
+}
+
+type DueFile struct {
+	ProofID   uuid.UUID
+	ObjectKey string
+}
+
+type FileRetentionStore interface {
+	FilesDueForDeletion(ctx context.Context, batchSize int) ([]DueFile, error)
+	MarkFileDeleted(ctx context.Context, proofID uuid.UUID) error
+}
+
+type FileRemover interface {
+	Remove(ctx context.Context, key string) error
 }

@@ -30,8 +30,8 @@ type hostVerifierStub struct {
 	err      error
 }
 
-func (verifier hostVerifierStub) HasCompleted(context.Context, uuid.UUID) (bool, error) {
-	return verifier.verified, verifier.err
+func (verifier hostVerifierStub) CurrentVerificationID(context.Context, uuid.UUID) (uuid.UUID, bool, error) {
+	return uuid.Nil, verifier.verified, verifier.err
 }
 
 func TestPublishListing(t *testing.T) {

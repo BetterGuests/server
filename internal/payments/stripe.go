@@ -12,6 +12,7 @@ import (
 	"github.com/stripe/stripe-go/v82/customer"
 	"github.com/stripe/stripe-go/v82/customersession"
 	"github.com/stripe/stripe-go/v82/paymentintent"
+	"github.com/stripe/stripe-go/v82/paymentmethod"
 	"github.com/stripe/stripe-go/v82/webhook"
 )
 
@@ -94,6 +95,80 @@ func customerSessionParams(customerID string) *stripe.CustomerSessionParams {
 	}
 }
 
+func (gateway *StripeGateway) ListCards(ctx context.Context, customerID string) ([]SavedCard, error) {
+	params := &stripe.PaymentMethodListParams{
+		Customer: stripe.String(customerID),
+		Type:     stripe.String(string(stripe.PaymentMethodTypeCard)),
+	}
+	params.Context = ctx
+	client := paymentmethod.Client{B: stripe.GetBackend(stripe.APIBackend), Key: gateway.secretKey}
+	found := client.List(params)
+	cards := []SavedCard{}
+	for found.Next() {
+		if card, ok := savedCardFrom(found.PaymentMethod()); ok {
+			cards = append(cards, card)
+		}
+	}
+	if err := found.Err(); err != nil {
+		return nil, fmt.Errorf("stripe list cards: %w", err)
+	}
+	return cards, nil
+}
+
+func (gateway *StripeGateway) DetachCard(ctx context.Context, cardID string) error {
+	params := &stripe.PaymentMethodDetachParams{}
+	params.Context = ctx
+	client := paymentmethod.Client{B: stripe.GetBackend(stripe.APIBackend), Key: gateway.secretKey}
+	if _, err := client.Detach(cardID, params); err != nil {
+		return fmt.Errorf("stripe detach card: %w", err)
+	}
+	return nil
+}
+
+const metadataArtCardID = "vgs_card_id"
+
+func (gateway *StripeGateway) LinkArtCard(ctx context.Context, cardID, artCardID string) error {
+	params := &stripe.PaymentMethodParams{}
+	params.Context = ctx
+	params.AddMetadata(metadataArtCardID, artCardID)
+	client := paymentmethod.Client{B: stripe.GetBackend(stripe.APIBackend), Key: gateway.secretKey}
+	if _, err := client.Update(cardID, params); err != nil {
+		return fmt.Errorf("stripe link card art: %w", err)
+	}
+	return nil
+}
+
+func savedCardFrom(method *stripe.PaymentMethod) (SavedCard, bool) {
+	if method == nil || method.Card == nil {
+		return SavedCard{}, false
+	}
+	card := SavedCard{
+		ID:       method.ID,
+		Brand:    string(method.Card.Brand),
+		Last4:    method.Card.Last4,
+		ExpMonth: int(method.Card.ExpMonth),
+		ExpYear:  int(method.Card.ExpYear),
+		Funding:  string(method.Card.Funding),
+
+		ArtCardID: method.Metadata[metadataArtCardID],
+	}
+	if method.Card.Wallet != nil {
+		card.Wallet = string(method.Card.Wallet.Type)
+	}
+	if details := method.BillingDetails; details != nil {
+		card.Billing.Name = details.Name
+		if address := details.Address; address != nil {
+			card.Billing.Line1 = address.Line1
+			card.Billing.Line2 = address.Line2
+			card.Billing.City = address.City
+			card.Billing.State = address.State
+			card.Billing.PostalCode = address.PostalCode
+			card.Billing.Country = address.Country
+		}
+	}
+	return card, true
+}
+
 func (gateway *StripeGateway) client() paymentintent.Client {
 	return paymentintent.Client{B: stripe.GetBackend(stripe.APIBackend), Key: gateway.secretKey}
 }
@@ -111,11 +186,19 @@ func (gateway *StripeGateway) Capture(ctx context.Context, intentID string) erro
 func (gateway *StripeGateway) Cancel(ctx context.Context, intentID string) error {
 	params := &stripe.PaymentIntentCancelParams{}
 	params.Context = ctx
-	params.SetIdempotencyKey("cancel-" + intentID)
-	if _, err := gateway.client().Cancel(intentID, params); err != nil {
+	_, err := gateway.client().Cancel(intentID, params)
+	if err != nil && !alreadyCanceled(err) {
 		return fmt.Errorf("stripe cancel payment intent: %w", err)
 	}
 	return nil
+}
+
+func alreadyCanceled(err error) bool {
+	var failure *stripe.Error
+	return errors.As(err, &failure) &&
+		failure.Code == stripe.ErrorCodePaymentIntentUnexpectedState &&
+		failure.PaymentIntent != nil &&
+		failure.PaymentIntent.Status == stripe.PaymentIntentStatusCanceled
 }
 
 func (gateway *StripeGateway) ParseEvent(body []byte, signature string) (Event, error) {

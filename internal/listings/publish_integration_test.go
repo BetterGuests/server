@@ -15,7 +15,9 @@ import (
 
 type alwaysVerified struct{}
 
-func (alwaysVerified) HasCompleted(context.Context, uuid.UUID) (bool, error) { return true, nil }
+func (alwaysVerified) CurrentVerificationID(context.Context, uuid.UUID) (uuid.UUID, bool, error) {
+	return uuid.Nil, true, nil
+}
 
 func publishFixture(t *testing.T) (context.Context, *ListingService) {
 	t.Helper()

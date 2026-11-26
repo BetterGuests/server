@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/bookings"
 	"github.com/BetterGuests/BetterGuests-Server/internal/cancellations"
 	"github.com/BetterGuests/BetterGuests-Server/internal/listings"
+	"github.com/BetterGuests/BetterGuests-Server/internal/notifications"
 	"github.com/BetterGuests/BetterGuests-Server/internal/settlements"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -68,6 +71,47 @@ func (w *world) book(startsIn int, status string) (uuid.UUID, uuid.UUID) {
 		       VALUES ($1, $2, $3, $4, $5, 40000, 'usd', 'succeeded')`, uuid.New(), booking.ID, guest, w.host, "pi_"+uuid.NewString())
 	}
 	return booking.ID, guest
+}
+
+func TestOnlyHoldsOnDeadBookingsAreStranded(t *testing.T) {
+	w := newWorld(t)
+	cases := map[string]bool{"declined": true, "cancelled": true, "requested": false}
+	want := map[uuid.UUID]uuid.UUID{}
+	unwanted := map[uuid.UUID]string{}
+	startsIn := 10
+	for status, stranded := range cases {
+		booking, guest := w.book(startsIn, "requested")
+		startsIn += 10
+		w.sql(`INSERT INTO app.payments (id, booking_id, guest_id, host_id, stripe_payment_intent_id, amount_cents, currency, status)
+		       VALUES ($1, $2, $3, $4, $5, 40000, 'usd', 'authorized')`, uuid.New(), booking, guest, w.host, "pi_"+uuid.NewString())
+		w.sql(`UPDATE app.bookings SET status = $2 WHERE id = $1`, booking, status)
+		if stranded {
+			want[booking] = guest
+		} else {
+			unwanted[booking] = status
+		}
+	}
+	released, guest := w.book(startsIn, "requested")
+	w.sql(`INSERT INTO app.payments (id, booking_id, guest_id, host_id, stripe_payment_intent_id, amount_cents, currency, status)
+	       VALUES ($1, $2, $3, $4, $5, 40000, 'usd', 'canceled')`, uuid.New(), released, guest, w.host, "pi_"+uuid.NewString())
+	w.sql(`UPDATE app.bookings SET status = 'declined' WHERE id = $1`, released)
+	unwanted[released] = "already released"
+
+	found, err := cancellations.NewPostgresCancellationStore(w.pool).StrandedHolds(w.ctx, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, hold := range found {
+		if reason, bad := unwanted[hold.BookingID]; bad {
+			t.Fatalf("a %s booking was listed", reason)
+		}
+		if guest, ok := want[hold.BookingID]; ok && guest == hold.GuestID {
+			delete(want, hold.BookingID)
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing stranded holds: %v", want)
+	}
 }
 
 func newWorld(t *testing.T) *world {
@@ -223,5 +267,122 @@ func TestOnlyTheTeamDecidesAProblemReport(t *testing.T) {
 	options, err := w.service.Options(w.ctx, guest, booking)
 	if err != nil || options.Report == nil || options.Report.RefundStatus != cancellations.RefundSucceeded {
 		t.Fatalf("refund not recorded: %+v %v", options.Report, err)
+	}
+}
+
+func TestTheTeamPausesAndReopensAListingAndEveryoneIsTold(t *testing.T) {
+	w := newWorld(t)
+	team := uuid.New()
+	teamEmail := team.String() + "@example.test"
+	w.sql(`INSERT INTO app.admin_accounts (account_id, email) VALUES ($1, $2)`, team, teamEmail)
+	inbox := notifications.NewPostgresNotificationStore(w.pool)
+	book := func(startsIn int) error {
+		start := time.Now().UTC().AddDate(0, 0, startsIn)
+		_, err := w.bookings.CreateBooking(w.ctx, uuid.New(), bookings.CreateBookingInput{ListingID: w.listingID, StartsOn: start, EndsOn: start.AddDate(0, 0, 2)})
+		return err
+	}
+	queued := func(account uuid.UUID) []notifications.Kind {
+		t.Helper()
+		alerts, err := inbox.QueueTeamAlerts(w.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		kinds := []notifications.Kind{}
+		for _, alert := range alerts {
+			if alert.Recipient == account {
+				kinds = append(kinds, alert.Kind)
+			}
+		}
+		return kinds
+	}
+
+	if err := w.service.PauseListing(w.ctx, w.host, w.listingID, "Mine"); !errors.Is(err, cancellations.ErrNotAdmin) {
+		t.Fatalf("a host used the team control: %v", err)
+	}
+	if err := w.service.PauseListing(w.ctx, team, w.listingID, "Safety check"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.service.PauseListing(w.ctx, team, w.listingID, "Again"); !errors.Is(err, cancellations.ErrAlreadyPaused) {
+		t.Fatalf("paused twice: %v", err)
+	}
+	if err := book(40); !errors.Is(err, bookings.ErrListingPaused) {
+		t.Fatalf("booked a paused listing: %v", err)
+	}
+	alerts, err := inbox.QueueTeamAlerts(w.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	told := map[uuid.UUID]int{}
+	for _, alert := range alerts {
+		if strings.Contains(alert.Body, "Safety check") {
+			told[alert.Recipient]++
+		}
+	}
+	if told[w.host] != 1 || told[team] != 1 {
+		t.Fatalf("paused alerts = %+v", alerts)
+	}
+	if again := queued(w.host); len(again) != 0 {
+		t.Fatalf("told twice: %v", again)
+	}
+
+	waiting, err := inbox.AwaitingEmail(w.ctx, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var teamMail *notifications.PendingEmail
+	for _, item := range waiting {
+		if item.AccountID == team {
+			teamMail = &item
+		}
+	}
+	if teamMail == nil || !teamMail.ForTeam || teamMail.TeamEmail != teamEmail {
+		t.Fatalf("team mail = %+v", teamMail)
+	}
+	if err := inbox.RecordEmailAttempt(w.ctx, teamMail.NotificationID, true); err != nil {
+		t.Fatal(err)
+	}
+	after, err := inbox.AwaitingEmail(w.ctx, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range after {
+		if item.NotificationID == teamMail.NotificationID {
+			t.Fatal("a delivered email is still waiting")
+		}
+	}
+
+	err = db.WithUserTx(w.ctx, w.pool, w.host.String(), func(tx pgx.Tx) error {
+		tag, err := tx.Exec(w.ctx, `UPDATE app.listing_suspensions SET lifted_at = now(), lifted_by = $2 WHERE listing_id = $1`, w.listingID, w.host)
+		if err == nil && tag.RowsAffected() != 0 {
+			return errors.New("the host lifted the pause")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed, err := w.service.AdminListings(w.ctx, team)
+	ours := slices.IndexFunc(listed, func(item cancellations.AdminListing) bool { return item.ListingID == w.listingID })
+	if err != nil || ours < 0 || !listed[ours].Paused || listed[ours].Reason != "Safety check" {
+		t.Fatalf("admin listings: %+v %v", listed, err)
+	}
+	if err := w.service.UnpauseListing(w.ctx, team, w.listingID); err != nil {
+		t.Fatal(err)
+	}
+	if kinds := queued(w.host); len(kinds) != 1 || kinds[0] != "listing_unpaused" {
+		t.Fatalf("unpause alerts = %v", kinds)
+	}
+	if err := book(50); err != nil {
+		t.Fatalf("a reopened listing refused a booking: %v", err)
+	}
+
+	for _, startsIn := range []int{10, 20, 30} {
+		booking, _ := w.book(startsIn, "confirmed")
+		if _, err := w.service.Cancel(w.ctx, w.host, booking, 40000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := book(70); !errors.Is(err, bookings.ErrListingPaused) {
+		t.Fatalf("three cancellations after reopening did not pause again: %v", err)
 	}
 }

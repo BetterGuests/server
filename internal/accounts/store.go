@@ -30,14 +30,16 @@ func (store *PostgresAccountStore) Ensure(ctx context.Context, account Account) 
 	})
 }
 
-func (store *PostgresAccountStore) Remember(ctx context.Context, accountID uuid.UUID, displayName string) error {
+func (store *PostgresAccountStore) Remember(ctx context.Context, accountID uuid.UUID, displayName, avatarURL string) error {
 	return db.WithUserTx(ctx, store.DB, accountID.String(), func(tx pgx.Tx) error {
 		if _, err := tx.Exec(
 			ctx,
-			`INSERT INTO app.account_names (account_id, display_name) VALUES ($1, $2)
-			 ON CONFLICT (account_id) DO UPDATE SET display_name = EXCLUDED.display_name, updated_at = now()`,
+			`INSERT INTO app.account_names (account_id, display_name, avatar_url) VALUES ($1, $2, NULLIF($3, ''))
+			 ON CONFLICT (account_id) DO UPDATE
+			 SET display_name = EXCLUDED.display_name, avatar_url = EXCLUDED.avatar_url, updated_at = now()`,
 			accountID,
 			displayName,
+			avatarURL,
 		); err != nil {
 			return fmt.Errorf("remember account name: %w", err)
 		}

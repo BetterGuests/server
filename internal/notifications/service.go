@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/BetterGuests/BetterGuests-Server/internal/reviews"
@@ -42,6 +43,8 @@ type JourneyService struct {
 	reviews   ReviewPublisher
 	publisher Publisher
 	upkeep    BookingUpkeep
+	team      TeamAlertQueue
+	mail      OutboundMail
 	nudges    chan struct{}
 	now       func() time.Time
 	newID     func() uuid.UUID
@@ -65,6 +68,16 @@ func (service *JourneyService) WithLifecycle(stays StayCompleter, reviews Review
 
 func (service *JourneyService) WithUpkeep(upkeep BookingUpkeep) *JourneyService {
 	service.upkeep = upkeep
+	return service
+}
+
+func (service *JourneyService) WithTeamAlerts(team TeamAlertQueue) *JourneyService {
+	service.team = team
+	return service
+}
+
+func (service *JourneyService) WithMail(mail OutboundMail) *JourneyService {
+	service.mail = mail
 	return service
 }
 
@@ -99,6 +112,9 @@ func (service *JourneyService) Sweep(ctx context.Context) error {
 		if _, err := service.upkeep.ExpireRequests(ctx); err != nil {
 			failures = append(failures, err)
 		}
+		if _, err := service.upkeep.ReleaseStrandedHolds(ctx); err != nil {
+			failures = append(failures, err)
+		}
 		if _, err := service.upkeep.SendPendingRefunds(ctx); err != nil {
 			failures = append(failures, err)
 		}
@@ -125,10 +141,102 @@ func (service *JourneyService) Sweep(ctx context.Context) error {
 			}
 		}
 		if len(journeys) < journeyPageSize {
-			return errors.Join(failures...)
+			return errors.Join(append(failures, service.announce(ctx)...)...)
 		}
 		after = journeys[len(journeys)-1].BookingID
 	}
+}
+
+func (service *JourneyService) announce(ctx context.Context) []error {
+	var failures []error
+	if service.team != nil {
+		alerts, err := service.team.QueueTeamAlerts(ctx)
+		if err != nil {
+			failures = append(failures, err)
+		}
+		for _, alert := range alerts {
+			event := AlertEvent{BookingID: alert.BookingID, Kind: alert.Kind, Title: alert.Title, Body: alert.Body}
+			if alert.ForTeam {
+				event.Role = RoleTeam
+			}
+			service.publisher.Publish(alert.Recipient, NotificationEventKind, event)
+		}
+	}
+	if service.mail != nil {
+		if _, err := service.mail.SendDue(ctx); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return failures
+}
+
+type MailService struct {
+	queue     EmailQueue
+	sender    EmailSender
+	addresses EmailAddresses
+	webURL    string
+}
+
+func NewMailService(queue EmailQueue, sender EmailSender, addresses EmailAddresses, webURL string) *MailService {
+	return &MailService{queue: queue, sender: sender, addresses: addresses, webURL: strings.TrimRight(webURL, "/")}
+}
+
+func (service *MailService) SendDue(ctx context.Context) (int, error) {
+	pending, err := service.queue.AwaitingEmail(ctx, emailBatchSize)
+	if err != nil {
+		return 0, fmt.Errorf("list waiting email: %w", err)
+	}
+	sent := 0
+	var failures []error
+	for _, item := range pending {
+		if ctx.Err() != nil {
+			return sent, errors.Join(append(failures, ctx.Err())...)
+		}
+		sendErr := service.send(ctx, item)
+		if sendErr != nil {
+			failures = append(failures, fmt.Errorf("email notification %s: %w", item.NotificationID, sendErr))
+		} else {
+			sent++
+		}
+		if err := service.queue.RecordEmailAttempt(ctx, item.NotificationID, sendErr == nil); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return sent, errors.Join(failures...)
+}
+
+func (service *MailService) send(ctx context.Context, item PendingEmail) error {
+	address := item.TeamEmail
+	if !item.ForTeam {
+		found, err := service.addresses.VerifiedEmail(ctx, item.AccountID)
+		if err != nil {
+			return fmt.Errorf("find address: %w", err)
+		}
+		address = found
+	}
+	return service.sender.Send(ctx, Email{
+		To:             address,
+		Subject:        item.Title,
+		Text:           item.Body + "\n\n" + service.webURL + emailPath(item),
+		IdempotencyKey: "notification/" + item.NotificationID.String(),
+	})
+}
+
+func emailPath(item PendingEmail) string {
+	switch item.Kind {
+	case kindReportFiled:
+		return reportsPath
+	case kindListingPaused, kindListingUnpaused:
+		if item.ForTeam {
+			return adminListingsPath
+		}
+		return hostingPath
+	case kindIDExpiring, kindIdentityInReview:
+		return verifyPath
+	case kindIdentityReview:
+		return identityReviewsPath
+	}
+	return tripPathPrefix + item.BookingID.String()
 }
 
 func (service *JourneyService) advance(ctx context.Context, journey Journey) error {

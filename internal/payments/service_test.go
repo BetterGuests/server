@@ -184,8 +184,17 @@ func TestHandleWebhookIgnoresUnrelatedEvents(t *testing.T) {
 	}
 }
 
-func TestHandleWebhookRejectsEventWithoutGuestMetadata(t *testing.T) {
+func TestHandleWebhookIgnoresPaymentsThisAppDidNotCreate(t *testing.T) {
+	store := &fakeStore{}
 	parser := fakeParser{event: Event{Type: EventSucceeded, IntentID: "pi_1"}}
+	err := newService(store, &fakeIntents{}, parser).HandleWebhook(context.Background(), "sig", []byte("{}"))
+	if err != nil || len(store.applied) != 0 {
+		t.Fatalf("error = %v, applied = %+v", err, store.applied)
+	}
+}
+
+func TestHandleWebhookRejectsEventWithoutAnIntent(t *testing.T) {
+	parser := fakeParser{event: Event{Type: EventSucceeded, GuestID: uuid.New()}}
 	err := newService(&fakeStore{}, &fakeIntents{}, parser).HandleWebhook(context.Background(), "sig", []byte("{}"))
 	if !errors.Is(err, ErrInvalidPayload) {
 		t.Fatalf("error = %v", err)
@@ -200,11 +209,26 @@ func TestHandleWebhookPropagatesBadSignature(t *testing.T) {
 	}
 }
 
-func TestHandleWebhookPropagatesUnknownPayment(t *testing.T) {
-	store := &fakeStore{applyErr: ErrPaymentNotFound}
+func TestHandleWebhookAcknowledgesUnmatchedPaymentsWithoutAnnouncing(t *testing.T) {
+	for _, eventType := range []string{EventAuthorized, EventSucceeded, EventFailed, EventCanceled} {
+		store := &fakeStore{applyErr: ErrPaymentNotFound}
+		publisher := &publisherStub{}
+		parser := fakeParser{event: Event{Type: eventType, IntentID: "pi_x", GuestID: uuid.New(), BookingID: uuid.New()}}
+
+		err := newService(store, &fakeIntents{}, parser).WithPublisher(publisher).HandleWebhook(context.Background(), "sig", []byte("{}"))
+
+		if err != nil || len(publisher.events) != 0 {
+			t.Fatalf("%s: error = %v, events = %+v", eventType, err, publisher.events)
+		}
+	}
+}
+
+func TestHandleWebhookStillFailsWhenTheStoreFails(t *testing.T) {
+	failure := errors.New("database down")
+	store := &fakeStore{applyErr: failure}
 	parser := fakeParser{event: Event{Type: EventSucceeded, IntentID: "pi_x", GuestID: uuid.New()}}
 	err := newService(store, &fakeIntents{}, parser).HandleWebhook(context.Background(), "sig", []byte("{}"))
-	if !errors.Is(err, ErrPaymentNotFound) {
+	if !errors.Is(err, failure) {
 		t.Fatalf("error = %v", err)
 	}
 }

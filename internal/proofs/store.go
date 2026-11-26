@@ -65,7 +65,8 @@ func (s *PostgresProofStore) Save(ctx context.Context, proof Proof) error {
 }
 
 const proofColumns = `
-	p.id, p.listing_id, p.host_id, p.document_type, coalesce(p.object_key, ''), coalesce(p.content_type, ''),
+	p.id, p.listing_id, p.host_id, p.document_type, CASE WHEN p.file_deleted_at IS NULL THEN coalesce(p.object_key, '') ELSE '' END,
+	coalesce(p.content_type, ''),
 	coalesce(p.size_bytes, 0),
 	p.status, coalesce(p.rejection_reason, ''), p.reviewed_by, p.reviewed_at, p.created_at, p.updated_at,
 	coalesce(p.persona_inquiry_id, ''), p.address_key, p.unit_key`
@@ -117,6 +118,14 @@ func (s *PostgresProofStore) IsAdmin(ctx context.Context, accountID uuid.UUID) (
 }
 
 func (s *PostgresProofStore) ListSubmitted(ctx context.Context, adminID uuid.UUID) ([]ReviewItem, error) {
+	return s.listForReview(ctx, adminID, Submitted)
+}
+
+func (s *PostgresProofStore) ListApproved(ctx context.Context, adminID uuid.UUID) ([]ReviewItem, error) {
+	return s.listForReview(ctx, adminID, Approved)
+}
+
+func (s *PostgresProofStore) listForReview(ctx context.Context, adminID uuid.UUID, status Status) ([]ReviewItem, error) {
 	var items []ReviewItem
 	err := db.WithUserTx(ctx, s.DB, adminID.String(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
@@ -133,11 +142,11 @@ func (s *PostgresProofStore) ListSubmitted(ctx context.Context, adminID uuid.UUI
 				ORDER BY verified_at DESC, verification_id
 				LIMIT 1
 			) n ON true
-			WHERE p.status = 'submitted'
-			ORDER BY p.created_at, p.id
-			LIMIT 200`)
+			WHERE p.status = $1
+			ORDER BY CASE WHEN p.status = 'submitted' THEN p.created_at END, p.reviewed_at DESC, p.id
+			LIMIT 200`, string(status))
 		if err != nil {
-			return fmt.Errorf("query submitted proofs: %w", err)
+			return fmt.Errorf("query proofs for review: %w", err)
 		}
 		defer rows.Close()
 		for rows.Next() {
@@ -147,7 +156,7 @@ func (s *PostgresProofStore) ListSubmitted(ctx context.Context, adminID uuid.UUI
 				&item.Region, &item.PostalCode, &item.CountryCode,
 				&item.IDFirstName, &item.IDMiddleName, &item.IDLastName, &item.IDNameSuffix)
 			if err != nil {
-				return fmt.Errorf("scan submitted proof: %w", err)
+				return fmt.Errorf("scan proof for review: %w", err)
 			}
 			item.Proof = proof
 			items = append(items, item)
@@ -193,11 +202,12 @@ func (s *PostgresProofStore) CheckSubject(ctx context.Context, hostID, listingID
 	var subject CheckSubject
 	err := db.WithUserTx(ctx, s.DB, hostID.String(), func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx, `
-			SELECT coalesce(address_line1, ''), coalesce(address_line2, ''), city, coalesce(postal_code, ''),
-				country_code, address_key, unit_key
+			SELECT coalesce(address_line1, ''), coalesce(address_line2, ''), city, coalesce(region, ''),
+				coalesce(postal_code, ''), country_code, address_key, unit_key
 			FROM app.listings
 			WHERE id = $1 AND host_id = $2`, listingID, hostID).Scan(
-			&subject.Address.Line1, &subject.Address.Line2, &subject.Address.City, &subject.Address.PostalCode,
+			&subject.Address.Line1, &subject.Address.Line2, &subject.Address.City, &subject.Address.Region,
+			&subject.Address.PostalCode,
 			&subject.Address.CountryCode, &subject.AddressKey, &subject.UnitKey)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrListingNotFound
@@ -215,11 +225,13 @@ func (s *PostgresProofStore) IDName(ctx context.Context, hostID uuid.UUID) (IDNa
 	found := false
 	err := db.WithUserTx(ctx, s.DB, hostID.String(), func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx, `
-			SELECT first_name, last_name, suffix
-			FROM app.identity_names
-			WHERE account_id = $1
-			ORDER BY verified_at DESC, verification_id
-			LIMIT 1`, hostID).Scan(&name.First, &name.Last, &name.Suffix)
+			SELECT n.first_name, n.middle_name, n.last_name, n.suffix
+			FROM app.identity_names n
+			JOIN app.identity_verifications v ON v.id = n.verification_id
+			WHERE n.account_id = $1 AND v.revoked_at IS NULL
+			  AND (v.review_state IS NULL OR v.review_state = 'cleared')
+			ORDER BY n.verified_at DESC, n.verification_id
+			LIMIT 1`, hostID).Scan(&name.First, &name.Middle, &name.Last, &name.Suffix)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
@@ -319,4 +331,55 @@ func (s *PostgresProofStore) ApproveFromInquiry(ctx context.Context, hostID uuid
 		return false, fmt.Errorf("approve checked property proof: %w", err)
 	}
 	return approved, nil
+}
+
+func (s *PostgresProofStore) DeclineFromInquiry(ctx context.Context, hostID uuid.UUID, inquiryID string, at time.Time) (bool, error) {
+	var revoked bool
+	err := db.WithUserTx(ctx, s.DB, hostID.String(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT app.decline_persona_property_proof($1, $2)`, inquiryID, at).Scan(&revoked)
+	})
+	if err != nil {
+		return false, fmt.Errorf("record declined property document: %w", err)
+	}
+	return revoked, nil
+}
+
+var revokeOutcomes = map[string]error{
+	"done": nil, "forbidden": ErrNotAdmin, "not_found": ErrProofNotFound, "own": ErrOwnListing, "wrong_state": ErrNotApproved,
+}
+
+func (s *PostgresProofStore) Revoke(ctx context.Context, adminID, proofID uuid.UUID, reason string, at time.Time) error {
+	return db.WithUserTx(ctx, s.DB, adminID.String(), func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO app.accounts (id) VALUES ($1) ON CONFLICT (id) DO NOTHING`, adminID); err != nil {
+			return fmt.Errorf("ensure account: %w", err)
+		}
+		var outcome string
+		if err := tx.QueryRow(ctx, `SELECT app.revoke_property_proof($1, $2, $3)`, proofID, reason, at).Scan(&outcome); err != nil {
+			return fmt.Errorf("revoke property proof: %w", err)
+		}
+		mapped, known := revokeOutcomes[outcome]
+		if !known {
+			return fmt.Errorf("revoke property proof: unknown outcome %q", outcome)
+		}
+		return mapped
+	})
+}
+
+func (s *PostgresProofStore) FilesDueForDeletion(ctx context.Context, batchSize int) ([]DueFile, error) {
+	rows, err := s.DB.Query(ctx, `SELECT id, object_key FROM app.property_proof_files_due_for_deletion($1)`, batchSize)
+	if err != nil {
+		return nil, fmt.Errorf("list documents due for deletion: %w", err)
+	}
+	due, err := pgx.CollectRows(rows, pgx.RowToStructByPos[DueFile])
+	if err != nil {
+		return nil, fmt.Errorf("read documents due for deletion: %w", err)
+	}
+	return due, nil
+}
+
+func (s *PostgresProofStore) MarkFileDeleted(ctx context.Context, proofID uuid.UUID) error {
+	if _, err := s.DB.Exec(ctx, `SELECT app.mark_property_proof_file_deleted($1)`, proofID); err != nil {
+		return fmt.Errorf("mark document deleted: %w", err)
+	}
+	return nil
 }

@@ -21,6 +21,12 @@ type checkStoreStub struct {
 	kept      []Proof
 	keepErr   error
 	approved  int
+	declined  int
+}
+
+func (store *checkStoreStub) DeclineFromInquiry(context.Context, uuid.UUID, string, time.Time) (bool, error) {
+	store.declined++
+	return true, nil
 }
 
 func (store *checkStoreStub) Latest(context.Context, uuid.UUID, uuid.UUID) (Proof, bool, error) {
@@ -85,12 +91,12 @@ func checkStore(hostID uuid.UUID) *checkStoreStub {
 		storeStub: ownedBy(hostID),
 		name:      IDName{First: "Jordan", Last: "Rivera"},
 		subject:   CheckSubject{Address: PropertyAddress{Line1: "42 North Palm Street", City: "Phoenix", PostalCode: "85004", CountryCode: "US"}},
-		inquiry:   &CheckInquiry{InquiryID: "inq_doc", ListingID: uuid.New(), HostID: hostID, DocumentType: UtilityBill},
+		inquiry:   &CheckInquiry{InquiryID: "inq_doc", ListingID: uuid.New(), HostID: hostID, DocumentType: Deed},
 	}
 }
 
 type payload struct {
-	status, check, name, address string
+	status, check, name, address, issued string
 }
 
 func goodPayload() payload {
@@ -106,7 +112,7 @@ func (p payload) body(t *testing.T) []byte {
 		"included": []any{map[string]any{"type": "verification/document", "attributes": map[string]any{
 			"status":               p.status,
 			"checks":               []any{map[string]any{"name": "document_type_detection", "status": p.check}},
-			"extraction-responses": []any{extracted("owner-name", p.name), extracted("property_address", p.address)},
+			"extraction-responses": []any{extracted("owner-name", p.name), extracted("property_address", p.address), extracted("issue-date", p.issued)},
 		}}},
 	}}}})
 	if err != nil {
@@ -224,7 +230,125 @@ func TestMatching(t *testing.T) {
 	if addressMatches("10 Elm Rd Unit 5 Mesa 85201", listing) {
 		t.Fatal("a unit the listing does not name must not match")
 	}
-	if nameMatches("Jordan Rivera Jr", IDName{First: "Jordan", Last: "Rivera"}) {
-		t.Fatal("a generation suffix on only one side must not match")
+}
+
+func TestNameMustBelongToOnePerson(t *testing.T) {
+	smith := IDName{First: "John", Middle: "Michael", Last: "Smith"}
+	junior := IDName{First: "John", Last: "Smith", Suffix: "Jr"}
+	cases := []struct {
+		document string
+		id       IDName
+		want     bool
+	}{
+		{"John Smith", smith, true},
+		{"JOHN M SMITH", smith, true},
+		{"Mr. John Michael Smith", smith, true},
+		{"Smith, John M", smith, true},
+		{"Mary Jones and John Smith", smith, true},
+		{"John Smith & Mary Jones", smith, true},
+		{"Mary Smith and John Doe", smith, false},
+		{"Mary Smith & John Doe", smith, false},
+		{"John Doe, Mary Smith", smith, false},
+		{"Mary Smith, John Doe", smith, false},
+		{"John Doe Smith", smith, false},
+		{"John Smith Properties LLC", smith, false},
+		{"Smith John", smith, false},
+		{"John Smith Jr", junior, true},
+		{"John Smith, Jr.", junior, true},
+		{"Smith, John Jr", junior, true},
+		{"John Smith", junior, false},
+		{"John Smith Jr", smith, false},
+	}
+	for _, testCase := range cases {
+		if got := nameMatches(testCase.document, testCase.id); got != testCase.want {
+			t.Errorf("%q: matched = %v, want %v", testCase.document, got, testCase.want)
+		}
+	}
+}
+
+func TestAddressMustAgreeOnStateAndUnit(t *testing.T) {
+	listing := PropertyAddress{Line1: "42 Elm Street", City: "Springfield", Region: "Illinois", PostalCode: "62701"}
+	for document, want := range map[string]bool{
+		"42 Elm St, Springfield, IL 62701":     true,
+		"42 Elm St Springfield Illinois 62701": true,
+		"42 Elm St, Springfield, MO 62701":     false,
+		"42 Elm St, Springfield 62701":         false,
+		"42 Elm St #4, Springfield, IL 62701":  false,
+	} {
+		if got := addressMatches(document, listing); got != want {
+			t.Errorf("%q: matched = %v, want %v", document, got, want)
+		}
+	}
+}
+
+func TestStateIsReadFromTheEndOfTheAddress(t *testing.T) {
+	cases := []struct {
+		region, document string
+		want             bool
+	}{
+		{"IL", "42 Oak Court, Springfield, IL 62701-1234, USA", true},
+		{"CT", "42 Oak Court, Springfield, MA 01101", false},
+		{"CT", "42 Oak Court, Hartford, CT 01101", true},
+		{"North Carolina", "42 Oak Court, Raleigh, North Carolina 01101", true},
+		{"NE", "42 Oak Court NE, Albany, NY 01101", false},
+		{"Kansas", "42 Oak Court, Kansas City, MO 01101", false},
+		{"Virginia", "42 Oak Court, Charleston, West Virginia 01101", false},
+	}
+	for _, testCase := range cases {
+		postal := "01101"
+		if testCase.region == "IL" {
+			postal = "62701"
+		}
+		listing := PropertyAddress{Line1: "42 Oak Court", Region: testCase.region, PostalCode: postal}
+		if got := addressMatches(testCase.document, listing); got != testCase.want {
+			t.Errorf("%s against %q: matched = %v, want %v", testCase.region, testCase.document, got, testCase.want)
+		}
+	}
+}
+
+func TestOnlyDeedsAndFreshTaxBillsApproveThemselves(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name     string
+		document DocumentType
+		issued   string
+		approved int
+	}{
+		{"deed needs no date", Deed, "", 1},
+		{"utility bill is reviewed by hand", UtilityBill, "2026-11-01", 0},
+		{"lease is reviewed by hand", Lease, "2026-11-01", 0},
+		{"fresh tax bill", PropertyTaxBill, "2026-10-01", 1},
+		{"old tax bill", PropertyTaxBill, "2026-01-01", 0},
+		{"tax bill without a date", PropertyTaxBill, "", 0},
+		{"tax bill dated in the future", PropertyTaxBill, "2027-01-01", 0},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			hostID := uuid.New()
+			store := checkStore(hostID)
+			store.inquiry.DocumentType = testCase.document
+			service := NewCheckService(store, nil, idStub(true))
+			service.now = func() time.Time { return now }
+			document := goodPayload()
+			document.issued = testCase.issued
+
+			_, err := service.Process(context.Background(), CheckEvent{AccountID: hostID, InquiryID: "inq_doc", Name: "inquiry.completed", Body: document.body(t)})
+
+			if err != nil || store.approved != testCase.approved {
+				t.Fatalf("approved %d, error %v", store.approved, err)
+			}
+		})
+	}
+}
+
+func TestDeclineRevokesEvenWithoutADocumentInThePayload(t *testing.T) {
+	hostID := uuid.New()
+	store := checkStore(hostID)
+	service := NewCheckService(store, nil, idStub(true))
+
+	claimed, err := service.Process(context.Background(), CheckEvent{AccountID: hostID, InquiryID: "inq_doc", Name: "inquiry.declined", Body: []byte(`{}`)})
+
+	if !claimed || err != nil || store.declined != 1 || store.approved != 0 {
+		t.Fatalf("claimed %v, error %v, declined %d", claimed, err, store.declined)
 	}
 }

@@ -37,6 +37,52 @@ type Config struct {
 	BaseURL       string
 
 	PropertyTemplateID string
+	FingerprintKey     string
+}
+
+type ReviewState string
+
+const (
+	ReviewPending  ReviewState = "pending"
+	ReviewCleared  ReviewState = "cleared"
+	ReviewRejected ReviewState = "rejected"
+)
+
+type ReviewReason string
+
+const (
+	ReasonNameChanged        ReviewReason = "name_changed"
+	ReasonNameUnconfirmed    ReviewReason = "name_unconfirmed"
+	ReasonUnderAge           ReviewReason = "under_age"
+	ReasonDuplicateIdentity  ReviewReason = "duplicate_identity"
+	ReasonPreviouslyDeclined ReviewReason = "previously_declined"
+)
+
+type Completion struct {
+	AccountID   uuid.UUID
+	InquiryID   string
+	OccurredAt  time.Time
+	Name        IDName
+	Fingerprint []byte
+	UnderAge    bool
+}
+
+type History struct {
+	PreviousName      IDName
+	HasEarlierPass    bool
+	HasApprovedProof  bool
+	DuplicateIdentity bool
+	HasDecline        bool
+}
+
+type Judge func(History) []ReviewReason
+
+type Attempt struct {
+	InquiryID   string
+	Status      Status
+	Review      ReviewState
+	Revoked     bool
+	CompletedAt time.Time
 }
 
 type Verification struct {
@@ -75,6 +121,7 @@ type WebhookEvent struct {
 	AccountID  uuid.UUID
 	OccurredAt time.Time
 	IDName     IDName
+	BirthDate  string
 }
 
 type InquiryCreator interface {
@@ -94,6 +141,7 @@ type Store interface {
 	Create(ctx context.Context, verification Verification) error
 	ApplyStatus(ctx context.Context, accountID uuid.UUID, inquiryID string, status Status, occurredAt time.Time) error
 	SyncIDName(ctx context.Context, accountID uuid.UUID, inquiryID string, name IDName) error
+	Complete(ctx context.Context, completion Completion, judge Judge) ([]ReviewReason, error)
 }
 
 type StatusResponse struct {
@@ -102,7 +150,7 @@ type StatusResponse struct {
 }
 
 type StatusReader interface {
-	LatestStatus(ctx context.Context, accountID uuid.UUID) (Status, bool, error)
+	Attempts(ctx context.Context, accountID uuid.UUID) ([]Attempt, error)
 }
 
 type Starter interface {

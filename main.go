@@ -53,9 +53,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	documents, err := buildDocumentRetention(pool)
+	if err != nil {
+		return err
+	}
 	jobs, stopJobs := context.WithCancel(context.Background())
 	defer stopJobs()
 	go redaction.Run(jobs)
+	go documents.Run(jobs)
 	go settlement.Run(jobs)
 	go deps.tripUpdates.Run(jobs)
 

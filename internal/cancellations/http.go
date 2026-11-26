@@ -14,10 +14,62 @@ import (
 type HTTPHandler struct {
 	canceller Canceller
 	desk      ReportDesk
+	listings  ListingDesk
 }
 
 func NewHTTPHandler(canceller Canceller, desk ReportDesk) *HTTPHandler {
 	return &HTTPHandler{canceller: canceller, desk: desk}
+}
+
+func (handler *HTTPHandler) WithListingDesk(listings ListingDesk) *HTTPHandler {
+	handler.listings = listings
+	return handler
+}
+
+func (handler *HTTPHandler) AdminListings(w http.ResponseWriter, r *http.Request) {
+	adminID, ok := authenticated(w, r)
+	if !ok {
+		return
+	}
+	listings, err := handler.listings.AdminListings(r.Context(), adminID)
+	respond(w, map[string][]AdminListing{"listings": listings}, err)
+}
+
+func (handler *HTTPHandler) PauseListing(w http.ResponseWriter, r *http.Request) {
+	adminID, listingID, ok := identifyListing(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	err := handler.listings.PauseListing(r.Context(), adminID, listingID, body.Reason)
+	respond(w, ListingEvent{ListingID: listingID, Paused: true}, err)
+}
+
+func (handler *HTTPHandler) UnpauseListing(w http.ResponseWriter, r *http.Request) {
+	adminID, listingID, ok := identifyListing(w, r)
+	if !ok {
+		return
+	}
+	err := handler.listings.UnpauseListing(r.Context(), adminID, listingID)
+	respond(w, ListingEvent{ListingID: listingID, Paused: false}, err)
+}
+
+func identifyListing(w http.ResponseWriter, r *http.Request) (uuid.UUID, uuid.UUID, bool) {
+	actorID, ok := authenticated(w, r)
+	if !ok {
+		return uuid.Nil, uuid.Nil, false
+	}
+	listingID, err := uuid.Parse(r.PathValue("listing_id"))
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": ErrListingNotFound.Error()})
+		return uuid.Nil, uuid.Nil, false
+	}
+	return actorID, listingID, true
 }
 
 func (handler *HTTPHandler) Options(w http.ResponseWriter, r *http.Request) {
@@ -123,12 +175,13 @@ func respond(w http.ResponseWriter, body any, err error) {
 	}
 	status, message := http.StatusInternalServerError, "something went wrong"
 	switch {
-	case errors.Is(err, ErrBookingNotFound), errors.Is(err, ErrNotAdmin):
+	case errors.Is(err, ErrBookingNotFound), errors.Is(err, ErrNotAdmin), errors.Is(err, ErrListingNotFound):
 		status, message = http.StatusNotFound, err.Error()
-	case errors.Is(err, ErrInvalidReport):
+	case errors.Is(err, ErrInvalidReport), errors.Is(err, ErrInvalidReason):
 		status, message = http.StatusBadRequest, err.Error()
 	case errors.Is(err, ErrNotCancellable), errors.Is(err, ErrRefundChanged), errors.Is(err, ErrReportClosed),
-		errors.Is(err, ErrAlreadyReported), errors.Is(err, ErrAlreadyDecided):
+		errors.Is(err, ErrAlreadyReported), errors.Is(err, ErrAlreadyDecided),
+		errors.Is(err, ErrAlreadyPaused), errors.Is(err, ErrNotPaused):
 		status, message = http.StatusConflict, err.Error()
 	default:
 		slog.Error("Cancellation request", "error", err)

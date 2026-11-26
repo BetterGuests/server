@@ -18,6 +18,14 @@ func (queue failingQueue) ListSubmitted(context.Context, uuid.UUID) ([]ReviewIte
 	return nil, queue.err
 }
 
+func (queue failingQueue) ListApproved(context.Context, uuid.UUID) ([]ReviewItem, error) {
+	return nil, queue.err
+}
+
+func (queue failingQueue) Revoke(context.Context, uuid.UUID, uuid.UUID, string) error {
+	return queue.err
+}
+
 func (queue failingQueue) Decide(context.Context, uuid.UUID, uuid.UUID, Decision, string) error {
 	return queue.err
 }
@@ -60,7 +68,8 @@ func TestAdminEndpointsMapErrorsToStatusCodes(t *testing.T) {
 func TestAdminEndpointsRequireAuthentication(t *testing.T) {
 	handler := NewHTTPHandler(nil, nil, nil, nil, failingQueue{})
 	for name, call := range map[string]func(http.ResponseWriter, *http.Request){
-		"list":   handler.ListSubmitted,
+		"list":   handler.ListForReview,
+		"revoke": handler.Revoke,
 		"decide": handler.Decide,
 		"me":     handler.Me,
 	} {

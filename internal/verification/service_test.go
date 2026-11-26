@@ -40,6 +40,19 @@ type fakeStore struct {
 	createErr   error
 	applied     int
 	syncedNames []IDName
+	history     History
+	completions []Completion
+	held        []ReviewReason
+}
+
+func (store *fakeStore) Complete(ctx context.Context, completion Completion, judge Judge) ([]ReviewReason, error) {
+	if err := store.ApplyStatus(ctx, completion.AccountID, completion.InquiryID, StatusCompleted, completion.OccurredAt); err != nil {
+		return nil, err
+	}
+	store.completions = append(store.completions, completion)
+	store.syncedNames = append(store.syncedNames, completion.Name)
+	store.held = judge(store.history)
+	return store.held, nil
 }
 
 func newFakeStore() *fakeStore { return &fakeStore{rows: map[string]*Verification{}} }

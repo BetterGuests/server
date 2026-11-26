@@ -96,10 +96,15 @@ func (store *PostgresCancellationStore) Cancel(ctx context.Context, actorID uuid
 			`INSERT INTO app.listing_suspensions (listing_id, host_id, reason)
 			 SELECT $1, $2, $3
 			 WHERE (
-			     SELECT count(*) FROM app.booking_cancellations
-			     WHERE listing_id = $1 AND cancelled_by = 'host' AND created_at > $4
+			     SELECT count(*) FROM app.booking_cancellations c
+			     WHERE c.listing_id = $1 AND c.cancelled_by = 'host' AND c.created_at > GREATEST(
+			         $4::timestamptz,
+			         COALESCE((SELECT s.lifted_at FROM app.listing_suspensions s WHERE s.listing_id = $1 AND s.lifted_by IS NOT NULL), $4::timestamptz))
 			 ) >= $5
-			 ON CONFLICT (listing_id) DO NOTHING`,
+			 ON CONFLICT (listing_id) DO UPDATE
+			 SET reason = EXCLUDED.reason, paused_by = 'host_cancellations', created_at = now(),
+			     lifted_at = NULL, lifted_by = NULL
+			 WHERE app.listing_suspensions.lifted_at IS NOT NULL OR app.listing_suspensions.paused_by = 'verification'`,
 			cancellation.ListingID, cancellation.HostID, suspensionReason, hostCancellationsSince, HostCancellationLimit,
 		); err != nil {
 			return fmt.Errorf("pause listing: %w", err)
@@ -134,6 +139,18 @@ func (store *PostgresCancellationStore) Expire(ctx context.Context, request Expi
 			return err
 		}
 		return markCancelled(ctx, tx, request.BookingID, "requested")
+	})
+}
+
+func (store *PostgresCancellationStore) StrandedHolds(ctx context.Context, limit int) ([]StrandedHold, error) {
+	rows, err := store.DB.Query(ctx, `SELECT booking_id, guest_id FROM app.stranded_booking_holds($1)`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query stranded holds: %w", err)
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (StrandedHold, error) {
+		var hold StrandedHold
+		err := row.Scan(&hold.BookingID, &hold.GuestID)
+		return hold, err
 	})
 }
 
@@ -273,6 +290,97 @@ func (store *PostgresCancellationStore) MarkRefunded(ctx context.Context, refund
 		}
 		return nil
 	})
+}
+
+func (store *PostgresCancellationStore) AdminListings(ctx context.Context, adminID uuid.UUID, cancellationsSince time.Time, limit int) ([]AdminListing, error) {
+	listings := []AdminListing{}
+	err := db.WithUserTx(ctx, store.DB, adminID.String(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT l.id, l.title, COALESCE(l.host_name, ''), COALESCE(l.city, ''), l.status,
+			        s.listing_id IS NOT NULL, COALESCE(s.reason, ''), s.created_at,
+			        (SELECT count(*)::integer FROM app.booking_cancellations c
+			         WHERE c.listing_id = l.id AND c.cancelled_by = 'host' AND c.created_at > $1)
+			 FROM app.listings l
+			 LEFT JOIN app.listing_suspensions s ON s.listing_id = l.id AND s.lifted_at IS NULL
+			 WHERE l.status = 'published' OR s.listing_id IS NOT NULL
+			 ORDER BY (s.listing_id IS NULL), s.created_at DESC, l.title, l.id
+			 LIMIT $2`, cancellationsSince, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var listing AdminListing
+			if err := rows.Scan(
+				&listing.ListingID, &listing.Title, &listing.HostName, &listing.City, &listing.Status,
+				&listing.Paused, &listing.Reason, &listing.PausedAt, &listing.HostCancellations,
+			); err != nil {
+				return err
+			}
+			listings = append(listings, listing)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list listings for the team: %w", err)
+	}
+	return listings, nil
+}
+
+func (store *PostgresCancellationStore) PauseListing(ctx context.Context, adminID, listingID uuid.UUID, reason string) (uuid.UUID, error) {
+	var hostID uuid.UUID
+	err := db.WithUserTx(ctx, store.DB, adminID.String(), func(tx pgx.Tx) error {
+		err := tx.QueryRow(ctx, `SELECT host_id FROM app.listings WHERE id = $1`, listingID).Scan(&hostID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrListingNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("select listing: %w", err)
+		}
+		tag, err := tx.Exec(ctx,
+			`INSERT INTO app.listing_suspensions (listing_id, host_id, reason, paused_by)
+			 VALUES ($1, $2, $3, 'team')
+			 ON CONFLICT (listing_id) DO UPDATE
+			 SET reason = EXCLUDED.reason, paused_by = 'team', created_at = now(), lifted_at = NULL, lifted_by = NULL
+			 WHERE app.listing_suspensions.lifted_at IS NOT NULL OR app.listing_suspensions.paused_by = 'verification'`,
+			listingID, hostID, reason)
+		if err != nil {
+			return fmt.Errorf("pause listing: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrAlreadyPaused
+		}
+		return nil
+	})
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return hostID, nil
+}
+
+func (store *PostgresCancellationStore) UnpauseListing(ctx context.Context, adminID, listingID uuid.UUID, at time.Time) (uuid.UUID, error) {
+	var hostID uuid.UUID
+	err := db.WithUserTx(ctx, store.DB, adminID.String(), func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO app.accounts (id) VALUES ($1) ON CONFLICT (id) DO NOTHING`, adminID); err != nil {
+			return fmt.Errorf("ensure account: %w", err)
+		}
+		err := tx.QueryRow(ctx,
+			`UPDATE app.listing_suspensions SET lifted_at = $2, lifted_by = $3
+			 WHERE listing_id = $1 AND lifted_at IS NULL
+			 RETURNING host_id`,
+			listingID, at, adminID).Scan(&hostID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotPaused
+		}
+		if err != nil {
+			return fmt.Errorf("lift pause: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return uuid.Nil, err
+	}
+	return hostID, nil
 }
 
 func uniqueAs(err, conflict error, operation string) error {

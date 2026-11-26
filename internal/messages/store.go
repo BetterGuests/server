@@ -15,7 +15,7 @@ import (
 const summaryColumns = `c.id, c.listing_id, COALESCE(l.title, ''), c.guest_id, c.host_id,
 	CASE WHEN c.host_id = $1 THEN 'host' ELSE 'guest' END,
 	CASE WHEN c.host_id = $1 THEN COALESCE(gn.display_name, '` + missingGuestName + `') ELSE COALESCE(l.host_name, '` + missingHostName + `') END,
-	CASE WHEN c.host_id = $1 THEN '' ELSE COALESCE(l.host_avatar_url, '') END,
+	CASE WHEN c.host_id = $1 THEN COALESCE(gn.avatar_url, '') ELSE COALESCE(l.host_avatar_url, hn.avatar_url, '') END,
 	c.last_message_at, COALESCE(c.last_message_preview, ''),
 	(SELECT count(*) FROM app.messages m
 	 WHERE m.conversation_id = c.id AND m.sender_id <> $1
@@ -23,7 +23,8 @@ const summaryColumns = `c.id, c.listing_id, COALESCE(l.title, ''), c.guest_id, c
 
 const summaryFrom = `FROM app.conversations c
 	LEFT JOIN app.listings l ON l.id = c.listing_id
-	LEFT JOIN app.account_names gn ON gn.account_id = c.guest_id`
+	LEFT JOIN app.account_names gn ON gn.account_id = c.guest_id
+	LEFT JOIN app.account_names hn ON hn.account_id = c.host_id`
 
 type PostgresMessageStore struct{ DB *pgxpool.Pool }
 

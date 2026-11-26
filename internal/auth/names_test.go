@@ -42,29 +42,51 @@ func (stub userGetterStub) Get(context.Context, string) (*clerk.User, error) {
 	return stub.user, stub.err
 }
 
-func TestDisplayNameReadsTheClerkProfile(t *testing.T) {
-	first, last := "Maria", "Santos"
-	fetcher := &ClerkNameFetcher{users: userGetterStub{user: &clerk.User{FirstName: &first, LastName: &last}}}
+func TestPublicProfileReadsTheNameAndUploadedPhoto(t *testing.T) {
+	first, last, photo := "Maria", "Santos", "https://img.clerk.com/maria"
+	fetcher := &ClerkNameFetcher{users: userGetterStub{user: &clerk.User{FirstName: &first, LastName: &last, HasImage: true, ImageURL: &photo}}}
 
-	name, err := fetcher.DisplayName(context.Background(), "user_1")
-	if err != nil || name != "Maria S." {
-		t.Fatalf("DisplayName = %q, %v", name, err)
+	profile, err := fetcher.PublicProfile(context.Background(), "user_1")
+	if err != nil || profile != (PublicProfile{DisplayName: "Maria S.", AvatarURL: photo}) {
+		t.Fatalf("PublicProfile = %+v, %v", profile, err)
 	}
 }
 
-func TestDisplayNameReportsAProfileWithoutNames(t *testing.T) {
+func TestPublicProfileLeavesOutUnusablePhotos(t *testing.T) {
+	first := "Maria"
+	cases := map[string]struct {
+		hasImage bool
+		url      string
+	}{
+		"clerk placeholder": {false, "https://img.clerk.com/default"},
+		"plain http":        {true, "http://img.clerk.com/maria"},
+		"overlong":          {true, "https://img.clerk.com/" + strings.Repeat("a", maxPhotoURLBytes)},
+		"missing":           {true, ""},
+	}
+	for name, test := range cases {
+		t.Run(name, func(t *testing.T) {
+			fetcher := &ClerkNameFetcher{users: userGetterStub{user: &clerk.User{FirstName: &first, HasImage: test.hasImage, ImageURL: &test.url}}}
+			profile, err := fetcher.PublicProfile(context.Background(), "user_1")
+			if err != nil || profile.AvatarURL != "" {
+				t.Fatalf("PublicProfile = %+v, %v", profile, err)
+			}
+		})
+	}
+}
+
+func TestPublicProfileReportsAProfileWithoutNames(t *testing.T) {
 	fetcher := &ClerkNameFetcher{users: userGetterStub{user: &clerk.User{}}}
 
-	if _, err := fetcher.DisplayName(context.Background(), "user_1"); !errors.Is(err, ErrNoDisplayName) {
+	if _, err := fetcher.PublicProfile(context.Background(), "user_1"); !errors.Is(err, ErrNoDisplayName) {
 		t.Fatalf("expected ErrNoDisplayName, got %v", err)
 	}
 }
 
-func TestDisplayNameWrapsClerkFailures(t *testing.T) {
+func TestPublicProfileWrapsClerkFailures(t *testing.T) {
 	failure := errors.New("clerk down")
 	fetcher := &ClerkNameFetcher{users: userGetterStub{err: failure}}
 
-	if _, err := fetcher.DisplayName(context.Background(), "user_1"); !errors.Is(err, failure) {
+	if _, err := fetcher.PublicProfile(context.Background(), "user_1"); !errors.Is(err, failure) {
 		t.Fatalf("expected wrapped clerk error, got %v", err)
 	}
 }

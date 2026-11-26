@@ -194,13 +194,13 @@ func TestMoneyBackWorkflowAgainstPostgres(t *testing.T) {
 	})
 
 	t.Run("verification status reads completed for the guest", func(t *testing.T) {
-		status, found, err := verificationStore.LatestStatus(ctx, guestID)
-		if err != nil || !found || status != verification.StatusCompleted {
-			t.Fatalf("status = %s, found = %v, err = %v", status, found, err)
+		attempts, err := verificationStore.Attempts(ctx, guestID)
+		if err != nil || len(attempts) != 1 || attempts[0].Status != verification.StatusCompleted {
+			t.Fatalf("attempts = %+v, err = %v", attempts, err)
 		}
-		_, found, err = verificationStore.LatestStatus(ctx, strangerID)
-		if err != nil || found {
-			t.Fatalf("stranger found = %v, err = %v", found, err)
+		attempts, err = verificationStore.Attempts(ctx, strangerID)
+		if err != nil || len(attempts) != 0 {
+			t.Fatalf("stranger attempts = %+v, err = %v", attempts, err)
 		}
 	})
 

@@ -25,6 +25,7 @@ const (
 	governmentIDType      = "verification/government-id"
 	passedCheckStatus     = "passed"
 	maxNamePartLength     = 200
+	minFingerprintKey     = 32
 )
 
 var (
@@ -52,6 +53,7 @@ type VerificationService struct {
 	inquiries     InquiryCreator
 	templateID    string
 	webhookSecret []byte
+	fingerprints  []byte
 	now           func() time.Time
 	newID         func() uuid.UUID
 }
@@ -68,6 +70,7 @@ func configFromLookup(lookup func(string) string) (Config, error) {
 		BaseURL:       lookup("PERSONA_BASE_URL"),
 
 		PropertyTemplateID: lookup("PERSONA_PROPERTY_TEMPLATE_ID"),
+		FingerprintKey:     lookup("ID_FINGERPRINT_KEY"),
 	}
 	for name, value := range map[string]string{
 		"PERSONA_API_KEY":        config.APIKey,
@@ -77,6 +80,9 @@ func configFromLookup(lookup func(string) string) (Config, error) {
 		if value == "" {
 			return Config{}, fmt.Errorf("%s is required", name)
 		}
+	}
+	if config.FingerprintKey != "" && len(config.FingerprintKey) < minFingerprintKey {
+		return Config{}, fmt.Errorf("ID_FINGERPRINT_KEY must be at least %d characters", minFingerprintKey)
 	}
 	if config.BaseURL == "" {
 		config.BaseURL = DefaultPersonaBaseURL
@@ -90,6 +96,7 @@ func NewVerificationService(store Store, inquiries InquiryCreator, config Config
 		inquiries:     inquiries,
 		templateID:    config.TemplateID,
 		webhookSecret: []byte(config.WebhookSecret),
+		fingerprints:  []byte(config.FingerprintKey),
 		now:           time.Now,
 		newID:         uuid.New,
 	}
@@ -174,15 +181,35 @@ func (service *VerificationService) HandleWebhook(ctx context.Context, signature
 			return nil
 		}
 	}
-	err = service.store.ApplyStatus(ctx, event.AccountID, event.InquiryID, status, event.OccurredAt)
+	if status == StatusCompleted {
+		return service.complete(ctx, event)
+	}
+	if err := service.store.ApplyStatus(ctx, event.AccountID, event.InquiryID, status, event.OccurredAt); err != nil {
+		return fmt.Errorf("apply %s: %w", event.Name, err)
+	}
+	if err := service.store.SyncIDName(ctx, event.AccountID, event.InquiryID, IDName{}); err != nil {
+		return fmt.Errorf("sync ID name for %s: %w", event.Name, err)
+	}
+	return nil
+}
+
+func (service *VerificationService) complete(ctx context.Context, event WebhookEvent) error {
+	if event.IDName == (IDName{}) {
+		slog.Warn("Persona event has no government ID name", "event", event.Name, "inquiry_id", event.InquiryID)
+	}
+	completion := Completion{
+		AccountID: event.AccountID, InquiryID: event.InquiryID, OccurredAt: event.OccurredAt, Name: event.IDName,
+		Fingerprint: fingerprint(service.fingerprints, event.IDName, event.BirthDate),
+		UnderAge:    underAge(event.BirthDate, event.OccurredAt),
+	}
+	reasons, err := service.store.Complete(ctx, completion, func(history History) []ReviewReason {
+		return judgeCompletion(completion, history)
+	})
 	if err != nil {
 		return fmt.Errorf("apply %s: %w", event.Name, err)
 	}
-	if status == StatusCompleted && event.IDName == (IDName{}) {
-		slog.Warn("Persona event has no government ID name", "event", event.Name, "inquiry_id", event.InquiryID)
-	}
-	if err := service.store.SyncIDName(ctx, event.AccountID, event.InquiryID, event.IDName); err != nil {
-		return fmt.Errorf("sync ID name for %s: %w", event.Name, err)
+	if len(reasons) > 0 {
+		slog.Info("ID check held for review", "inquiry_id", event.InquiryID, "reasons", reasons)
 	}
 	return nil
 }
@@ -243,10 +270,12 @@ type governmentIDAttributes struct {
 	Middle string `json:"name-middle"`
 	Last   string `json:"name-last"`
 	Suffix string `json:"name-suffix"`
+	Born   string `json:"birthdate"`
 }
 
-func governmentIDName(included []includedObject) IDName {
+func passedGovernmentID(included []includedObject) (IDName, string) {
 	var name IDName
+	var birthDate string
 	for _, object := range included {
 		if object.Type != governmentIDType {
 			continue
@@ -262,10 +291,10 @@ func governmentIDName(included []includedObject) IDName {
 			Suffix: namePart(attributes.Suffix),
 		}
 		if candidate.First != "" || candidate.Last != "" {
-			name = candidate
+			name, birthDate = candidate, strings.TrimSpace(attributes.Born)
 		}
 	}
-	return name
+	return name, birthDate
 }
 
 func namePart(value string) string {
@@ -323,7 +352,7 @@ func parseWebhookEvent(body []byte, signedAt time.Time) (WebhookEvent, error) {
 	event.InquiryID = inquiry.ID
 	event.AccountID = accountID
 	if eventStatuses[attributes.Name] == StatusCompleted {
-		event.IDName = governmentIDName(attributes.Payload.Included)
+		event.IDName, event.BirthDate = passedGovernmentID(attributes.Payload.Included)
 	}
 	return event, nil
 }

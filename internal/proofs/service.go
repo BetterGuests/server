@@ -27,6 +27,7 @@ var (
 	ErrInvalidDecision   = errors.New("decision must be approve or reject")
 	ErrReasonRequired    = errors.New("a rejection needs a reason of 500 characters or fewer")
 	ErrOwnListing        = errors.New("admins cannot review proof for their own listing")
+	ErrNotApproved       = errors.New("proof is not approved")
 )
 
 const (
@@ -172,6 +173,41 @@ func (service *ProofService) ListSubmitted(ctx context.Context, adminID uuid.UUI
 		return nil, err
 	}
 	items, err := service.store.ListSubmitted(ctx, adminID)
+	return service.withDocumentLinks(ctx, items, err)
+}
+
+func (service *ProofService) ListApproved(ctx context.Context, adminID uuid.UUID) ([]ReviewItem, error) {
+	if err := service.requireAdmin(ctx, adminID); err != nil {
+		return nil, err
+	}
+	items, err := service.store.ListApproved(ctx, adminID)
+	return service.withDocumentLinks(ctx, items, err)
+}
+
+func (service *ProofService) Revoke(ctx context.Context, adminID, proofID uuid.UUID, reason string) error {
+	if err := service.requireAdmin(ctx, adminID); err != nil {
+		return err
+	}
+	reason, err := requiredReason(reason)
+	if err != nil {
+		return err
+	}
+	if err := service.store.Revoke(ctx, adminID, proofID, reason, service.now().UTC()); err != nil {
+		return err
+	}
+	slog.Info("property proof revoked", "proof_id", proofID, "admin_id", adminID)
+	return nil
+}
+
+func requiredReason(reason string) (string, error) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" || len(reason) > maxReasonLength {
+		return "", ErrReasonRequired
+	}
+	return reason, nil
+}
+
+func (service *ProofService) withDocumentLinks(ctx context.Context, items []ReviewItem, err error) ([]ReviewItem, error) {
 	if err != nil {
 		return nil, err
 	}
@@ -197,16 +233,16 @@ func (service *ProofService) Decide(ctx context.Context, adminID, proofID uuid.U
 	if err := service.requireAdmin(ctx, adminID); err != nil {
 		return err
 	}
-	reason = strings.TrimSpace(reason)
 	var status Status
 	switch decision {
 	case Approve:
 		status, reason = Approved, ""
 	case Reject:
-		if reason == "" || len(reason) > maxReasonLength {
-			return ErrReasonRequired
+		trimmed, err := requiredReason(reason)
+		if err != nil {
+			return err
 		}
-		status = Rejected
+		status, reason = Rejected, trimmed
 	default:
 		return ErrInvalidDecision
 	}

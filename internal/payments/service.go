@@ -22,6 +22,7 @@ var (
 	ErrPaymentNotFound     = errors.New("payment not found")
 	ErrMissingCredentials  = errors.New("stripe credentials are required")
 	ErrNoAuthorizedPayment = errors.New("no authorized payment for this booking")
+	ErrCardNotFound        = errors.New("card not found")
 )
 
 const (
@@ -44,6 +45,7 @@ type PaymentService struct {
 	publisher  Publisher
 	wallet     Wallet
 	customers  CustomerStore
+	art        CardArtVault
 	currency   string
 	now        func() time.Time
 	newID      func() uuid.UUID
@@ -96,6 +98,41 @@ func (service *PaymentService) WithSavedCards(wallet Wallet, customers CustomerS
 	service.wallet = wallet
 	service.customers = customers
 	return service
+}
+
+func (service *PaymentService) SavedCards(ctx context.Context, accountID uuid.UUID) ([]SavedCard, error) {
+	cards, err := service.listCards(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	service.addArt(ctx, cards)
+	return cards, nil
+}
+
+func (service *PaymentService) listCards(ctx context.Context, accountID uuid.UUID) ([]SavedCard, error) {
+	if service.wallet == nil || service.customers == nil {
+		return []SavedCard{}, nil
+	}
+	customerID, found, err := service.customers.CustomerID(ctx, accountID)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return []SavedCard{}, nil
+	}
+	return service.wallet.ListCards(ctx, customerID)
+}
+
+func (service *PaymentService) RemoveCard(ctx context.Context, accountID uuid.UUID, cardID string) error {
+	card, err := service.ownedCard(ctx, accountID, cardID)
+	if err != nil {
+		return err
+	}
+	if err := service.wallet.DetachCard(ctx, cardID); err != nil {
+		return err
+	}
+	service.forgetArt(ctx, card.ArtCardID)
+	return nil
 }
 
 func (service *PaymentService) savedCards(ctx context.Context, accountID uuid.UUID) (customerID, session string) {
@@ -225,27 +262,53 @@ func (service *PaymentService) HandleWebhook(ctx context.Context, signature stri
 	if !relevant {
 		return nil
 	}
-	if event.IntentID == "" || event.GuestID == uuid.Nil {
+	if event.IntentID == "" {
 		return ErrInvalidPayload
 	}
-	if err := service.store.ApplyOutcome(ctx, event.GuestID, event.IntentID, status, event.OccurredAt); err != nil {
+	if event.GuestID == uuid.Nil {
+		slog.Info("Ignoring a Stripe event for a payment without booking metadata", "event_id", event.ID, "type", event.Type)
+		return nil
+	}
+	err = service.store.ApplyOutcome(ctx, event.GuestID, event.IntentID, status, event.OccurredAt)
+	if errors.Is(err, ErrPaymentNotFound) {
+		reportUnmatched(ctx, event, status)
+		return nil
+	}
+	if err != nil {
 		return err
 	}
-	if status == StatusAuthorized {
-		service.announceRequest(ctx, event)
-	}
+	service.announce(ctx, event, status)
 	return nil
 }
 
-func (service *PaymentService) announceRequest(ctx context.Context, event Event) {
+func reportUnmatched(ctx context.Context, event Event, status Status) {
+	level := slog.LevelWarn
+	if status == StatusAuthorized || status == StatusSucceeded {
+		level = slog.LevelError
+	}
+	slog.Log(ctx, level, "Stripe event matches no recorded payment",
+		"event_id", event.ID, "type", event.Type, "intent_id", event.IntentID, "booking_id", event.BookingID)
+}
+
+func (service *PaymentService) announce(ctx context.Context, event Event, status Status) {
+	if status != StatusAuthorized && status != StatusSucceeded {
+		return
+	}
 	if service.publisher == nil || event.BookingID == uuid.Nil {
 		return
 	}
 	quote, err := service.store.QuoteBooking(ctx, event.GuestID, event.BookingID)
 	if err != nil {
+		slog.Warn("Announce payment change", "error", err, "booking_id", event.BookingID)
 		return
 	}
-	service.publisher.Publish(quote.HostID, bookingEventKind, bookingEvent{BookingID: event.BookingID, Status: bookingRequested})
+	if status == StatusAuthorized {
+		service.publisher.Publish(quote.HostID, bookingEventKind, bookingEvent{BookingID: event.BookingID, Status: bookingRequested})
+		return
+	}
+	changed := bookingEvent{BookingID: event.BookingID, Status: quote.BookingStatus}
+	service.publisher.Publish(event.GuestID, bookingEventKind, changed)
+	service.publisher.Publish(quote.HostID, bookingEventKind, changed)
 }
 
 func tooLateToPay(quote Quote, holdOnly bool, now time.Time) bool {

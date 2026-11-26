@@ -22,6 +22,10 @@ var (
 	ErrInvalidReport   = errors.New("invalid report")
 	ErrNotAdmin        = errors.New("not found")
 	ErrAlreadyDecided  = errors.New("this report was already decided")
+	ErrListingNotFound = errors.New("listing not found")
+	ErrAlreadyPaused   = errors.New("this listing is already paused")
+	ErrNotPaused       = errors.New("this listing is not paused")
+	ErrInvalidReason   = errors.New("give a reason of 1-200 characters")
 )
 
 type CancellationService struct {
@@ -152,6 +156,44 @@ func (service *CancellationService) Resolve(ctx context.Context, adminID, bookin
 	return report, nil
 }
 
+func (service *CancellationService) AdminListings(ctx context.Context, adminID uuid.UUID) ([]AdminListing, error) {
+	if err := service.requireAdmin(ctx, adminID); err != nil {
+		return nil, err
+	}
+	since := service.now().UTC().Add(-HostCancellationPeriod)
+	return service.store.AdminListings(ctx, adminID, since, maxListedListings)
+}
+
+func (service *CancellationService) PauseListing(ctx context.Context, adminID, listingID uuid.UUID, reason string) error {
+	if err := service.requireAdmin(ctx, adminID); err != nil {
+		return err
+	}
+	reason = strings.TrimSpace(reason)
+	if length := utf8.RuneCountInString(reason); length == 0 || length > maxPauseReasonRunes || !utf8.ValidString(reason) {
+		return ErrInvalidReason
+	}
+	hostID, err := service.store.PauseListing(ctx, adminID, listingID, reason)
+	if err != nil {
+		return err
+	}
+	slog.Info("Listing paused by the team", "listing_id", listingID, "admin_id", adminID)
+	service.publisher.Publish(hostID, listingEventKind, ListingEvent{ListingID: listingID, Paused: true})
+	return nil
+}
+
+func (service *CancellationService) UnpauseListing(ctx context.Context, adminID, listingID uuid.UUID) error {
+	if err := service.requireAdmin(ctx, adminID); err != nil {
+		return err
+	}
+	hostID, err := service.store.UnpauseListing(ctx, adminID, listingID, service.now().UTC())
+	if err != nil {
+		return err
+	}
+	slog.Info("Listing pause lifted", "listing_id", listingID, "admin_id", adminID)
+	service.publisher.Publish(hostID, listingEventKind, ListingEvent{ListingID: listingID, Paused: false})
+	return nil
+}
+
 func (service *CancellationService) ExpireRequests(ctx context.Context) (int, error) {
 	requests, err := service.store.ExpiredRequests(ctx, jobBatchSize)
 	if err != nil {
@@ -173,6 +215,23 @@ func (service *CancellationService) ExpireRequests(ctx context.Context) (int, er
 		expired++
 	}
 	return expired, errors.Join(failures...)
+}
+
+func (service *CancellationService) ReleaseStrandedHolds(ctx context.Context) (int, error) {
+	stranded, err := service.store.StrandedHolds(ctx, jobBatchSize)
+	if err != nil {
+		return 0, fmt.Errorf("list stranded holds: %w", err)
+	}
+	released := 0
+	var failures []error
+	for _, hold := range stranded {
+		if err := service.holds.Release(ctx, hold.GuestID, hold.BookingID); err != nil {
+			failures = append(failures, fmt.Errorf("release hold for booking %s: %w", hold.BookingID, err))
+			continue
+		}
+		released++
+	}
+	return released, errors.Join(failures...)
 }
 
 func (service *CancellationService) SendPendingRefunds(ctx context.Context) (int, error) {

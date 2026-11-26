@@ -54,6 +54,9 @@ const (
 	maxReportRunes          = 4000
 	maxNoteRunes            = 1000
 	maxListedReports        = 100
+	maxListedListings       = 200
+	maxPauseReasonRunes     = 200
+	listingEventKind        = "listing"
 	jobBatchSize            = 100
 	bookingEventKind        = "booking"
 	statusConfirmed         = "confirmed"
@@ -132,6 +135,23 @@ type Decision struct {
 	Note        string `json:"note"`
 }
 
+type AdminListing struct {
+	ListingID         uuid.UUID  `json:"listing_id"`
+	Title             string     `json:"title"`
+	HostName          string     `json:"host_name"`
+	City              string     `json:"city"`
+	Status            string     `json:"status"`
+	Paused            bool       `json:"paused"`
+	Reason            string     `json:"reason,omitempty"`
+	PausedAt          *time.Time `json:"paused_at,omitempty"`
+	HostCancellations int        `json:"host_cancellations"`
+}
+
+type ListingEvent struct {
+	ListingID uuid.UUID `json:"listing_id"`
+	Paused    bool      `json:"paused"`
+}
+
 type PendingRefund struct {
 	BookingID       uuid.UUID
 	GuestID         uuid.UUID
@@ -141,6 +161,11 @@ type PendingRefund struct {
 }
 
 type ExpiredRequest struct {
+	BookingID uuid.UUID
+	GuestID   uuid.UUID
+}
+
+type StrandedHold struct {
 	BookingID uuid.UUID
 	GuestID   uuid.UUID
 }
@@ -155,12 +180,16 @@ type Store interface {
 	Cancel(ctx context.Context, actorID uuid.UUID, cancellation Cancellation, hostCancellationsSince time.Time) error
 	ExpiredRequests(ctx context.Context, limit int) ([]ExpiredRequest, error)
 	Expire(ctx context.Context, request ExpiredRequest) error
+	StrandedHolds(ctx context.Context, limit int) ([]StrandedHold, error)
 	CreateReport(ctx context.Context, report Report) error
 	IsAdmin(ctx context.Context, accountID uuid.UUID) (bool, error)
 	OpenReports(ctx context.Context, adminID uuid.UUID, limit int) ([]Report, error)
 	Resolve(ctx context.Context, adminID, bookingID uuid.UUID, decision Decision, at time.Time) (Report, error)
 	PendingRefunds(ctx context.Context, limit int) ([]PendingRefund, error)
 	MarkRefunded(ctx context.Context, refund PendingRefund, refundID string) error
+	AdminListings(ctx context.Context, adminID uuid.UUID, cancellationsSince time.Time, limit int) ([]AdminListing, error)
+	PauseListing(ctx context.Context, adminID, listingID uuid.UUID, reason string) (uuid.UUID, error)
+	UnpauseListing(ctx context.Context, adminID, listingID uuid.UUID, at time.Time) (uuid.UUID, error)
 }
 
 type Gateway interface {
@@ -179,6 +208,12 @@ type Canceller interface {
 	Options(ctx context.Context, actorID, bookingID uuid.UUID) (Options, error)
 	Cancel(ctx context.Context, actorID, bookingID uuid.UUID, expectedRefundCents int) (Options, error)
 	Report(ctx context.Context, guestID, bookingID uuid.UUID, details string) (Options, error)
+}
+
+type ListingDesk interface {
+	AdminListings(ctx context.Context, adminID uuid.UUID) ([]AdminListing, error)
+	PauseListing(ctx context.Context, adminID, listingID uuid.UUID, reason string) error
+	UnpauseListing(ctx context.Context, adminID, listingID uuid.UUID) error
 }
 
 type ReportDesk interface {

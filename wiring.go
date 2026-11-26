@@ -16,6 +16,7 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/cancellations"
 	"github.com/BetterGuests/BetterGuests-Server/internal/cashback"
 	"github.com/BetterGuests/BetterGuests-Server/internal/compliance"
+	"github.com/BetterGuests/BetterGuests-Server/internal/email"
 	"github.com/BetterGuests/BetterGuests-Server/internal/listings"
 	"github.com/BetterGuests/BetterGuests-Server/internal/messages"
 	"github.com/BetterGuests/BetterGuests-Server/internal/monitoring"
@@ -83,6 +84,9 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 	deletionService := verification.NewDeletionService(verificationStore, personaClient)
 
 	currentVerifier := verification.NewCurrentVerifier(verificationStore)
+	if personaConfig.FingerprintKey == "" {
+		slog.Warn("one person on several accounts is not detected: ID_FINGERPRINT_KEY is not set")
+	}
 
 	messageService := messages.NewMessageService(messages.NewPostgresMessageStore(pool)).WithPublisher(realtimeService)
 
@@ -96,6 +100,13 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		WithSavedCards(stripeGateway, paymentStore).
 		WithController(stripeGateway).
 		WithPublisher(tripPublisher)
+	vgsConfig, cardArtEnabled, err := payments.VGSConfigFromLookup(os.Getenv)
+	if err != nil {
+		return routeDeps{}, fmt.Errorf("card art configuration: %w", err)
+	}
+	if cardArtEnabled {
+		paymentService.WithCardArt(payments.NewVGSClient(vgsConfig))
+	}
 
 	cancellationService := cancellations.NewCancellationService(
 		cancellations.NewPostgresCancellationStore(pool),
@@ -103,7 +114,21 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		paymentService,
 		tripPublisher,
 	)
-	journeyService.WithUpkeep(cancellationService)
+	journeyService.WithUpkeep(cancellationService).WithTeamAlerts(notificationStore)
+	mailConfig, mailEnabled, err := email.ConfigFromEnv()
+	if err != nil {
+		return routeDeps{}, fmt.Errorf("email configuration: %w", err)
+	}
+	if mailEnabled {
+		journeyService.WithMail(notifications.NewMailService(
+			notificationStore,
+			resendSender{client: email.NewResendClient(mailConfig, nil)},
+			accountEmails{accounts: accountStore, fetcher: nameFetcher},
+			mailConfig.WebURL,
+		))
+	} else {
+		slog.Warn("email is off: RESEND_API_KEY is not set")
+	}
 
 	bookingStore := bookings.NewPostgresBookingStore(pool)
 	bookingService := bookings.NewBookingService(bookingStore).
@@ -135,7 +160,7 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 
 	listingStore := listings.NewPostgresListingStore(pool)
 	listingService := listings.NewListingService(listingStore).
-		WithPublishing(listingStore, verificationStore).
+		WithPublishing(listingStore, currentVerifier).
 		WithMedia(listingStore, listingObjectsFrom(objectStore))
 	if config, enabled := screening.ConfigFromLookup(os.Getenv); enabled {
 		listingService.WithScreening(screening.NewScreeningService(config))
@@ -170,15 +195,16 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 			WithMedia(listingService).
 			WithHostReader(listingStore).
 			WithPublicReader(listings.NewPublicListingService(listingStore, objectStore)),
-		proofs:        proofHandler,
-		nearby:        buildNearbyHandler(listingStore),
-		reviews:       reviews.NewHTTPHandler(reviewService, reviewService),
-		bookings:      bookings.NewHTTPHandler(bookingService).WithReader(bookingService).WithResponder(bookingService),
-		messages:      messages.NewHTTPHandler(messageService, messageService, messageService),
-		realtime:      realtime.NewHTTPHandler(realtimeService, authService, origins),
-		cashback:      cashback.NewHTTPHandler(cashbackService, cashbackService, cashbackService, cashbackService, cashbackService),
-		verification:  verification.NewHTTPHandler(verificationService, verificationService).WithStatusReader(verificationStore).WithCurrentChecker(currentVerifier).WithDeletion(deletionService),
-		payments:      payments.NewHTTPHandler(paymentService, paymentService),
+		proofs:   proofHandler,
+		nearby:   buildNearbyHandler(listingStore),
+		reviews:  reviews.NewHTTPHandler(reviewService, reviewService),
+		bookings: bookings.NewHTTPHandler(bookingService).WithReader(bookingService).WithResponder(bookingService),
+		messages: messages.NewHTTPHandler(messageService, messageService, messageService),
+		realtime: realtime.NewHTTPHandler(realtimeService, authService, origins),
+		cashback: cashback.NewHTTPHandler(cashbackService, cashbackService, cashbackService, cashbackService, cashbackService),
+		verification: verification.NewHTTPHandler(verificationService, verificationService).WithStatusReader(verificationStore).WithDeletion(deletionService).
+			WithReviews(verification.NewReviewService(verificationStore)),
+		payments:      payments.NewHTTPHandler(paymentService, paymentService).WithCards(paymentService),
 		payouts:       settlements.NewHTTPHandler(payoutService, payoutService),
 		compliance:    compliance.NewHTTPHandler(complianceService, complianceService, complianceService),
 		profiles:      profiles.NewHTTPHandler(profileService, profileService, profileService, profileService),
@@ -187,7 +213,7 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		stays:         stays.NewHTTPHandler(stayService, stayService),
 		inbox:         notifications.NewHTTPHandler(notifications.NewNotificationService(notificationStore)),
 		tripUpdates:   journeyService,
-		cancellations: cancellations.NewHTTPHandler(cancellationService, cancellationService),
+		cancellations: cancellations.NewHTTPHandler(cancellationService, cancellationService).WithListingDesk(cancellationService),
 	}, nil
 }
 
@@ -207,6 +233,17 @@ type nudgingPublisher struct {
 func (trip nudgingPublisher) Publish(userID uuid.UUID, kind string, payload any) {
 	trip.publisher.Publish(userID, kind, payload)
 	trip.nudger.Nudge()
+}
+
+type resendSender struct{ client *email.ResendClient }
+
+func (sender resendSender) Send(ctx context.Context, message notifications.Email) error {
+	return sender.client.Send(ctx, email.Message{
+		To:             message.To,
+		Subject:        message.Subject,
+		Text:           message.Text,
+		IdempotencyKey: message.IdempotencyKey,
+	})
 }
 
 func buildNearbyHandler(listingStore *listings.PostgresListingStore) *nearby.HTTPHandler {
@@ -421,6 +458,18 @@ func buildSettlementService(pool *pgxpool.Pool) (*settlements.SettlementService,
 		settlements.NewStripeGateway(paymentConfig.SecretKey),
 		settlementConfig,
 	), nil
+}
+
+func buildDocumentRetention(pool *pgxpool.Pool) (*proofs.FileRetentionService, error) {
+	objectStore, err := cashback.NewObjectStoreFromEnv()
+	if err != nil {
+		return nil, fmt.Errorf("document storage configuration: %w", err)
+	}
+	var files proofs.FileRemover
+	if remover, ok := objectStore.(objectRemover); ok {
+		files = remover
+	}
+	return proofs.NewFileRetentionService(proofs.NewPostgresProofStore(pool), files), nil
 }
 
 func buildRedactionService(pool *pgxpool.Pool) (*verification.RedactionService, error) {

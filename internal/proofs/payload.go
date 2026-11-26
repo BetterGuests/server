@@ -14,6 +14,7 @@ const (
 	failedStatus             = "failed"
 	ownerNameField           = "owner_name"
 	propertyAddressField     = "property_address"
+	issueDateField           = "issue_date"
 )
 
 type extraction struct {

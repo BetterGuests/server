@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/BetterGuests/BetterGuests-Server/internal/accounts"
 	"github.com/google/uuid"
@@ -137,8 +138,11 @@ type stubStatus struct {
 	err    error
 }
 
-func (stub stubStatus) LatestStatus(context.Context, uuid.UUID) (Status, bool, error) {
-	return stub.status, stub.found, stub.err
+func (stub stubStatus) Attempts(context.Context, uuid.UUID) ([]Attempt, error) {
+	if !stub.found {
+		return nil, stub.err
+	}
+	return []Attempt{{InquiryID: "inq_1", Status: stub.status, CompletedAt: time.Now()}}, stub.err
 }
 
 func statusRequest(authenticated bool) *http.Request {

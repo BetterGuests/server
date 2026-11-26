@@ -116,7 +116,42 @@ type IntentController interface {
 	Cancel(ctx context.Context, intentID string) error
 }
 
+type BillingDetails struct {
+	Name       string `json:"name"`
+	Line1      string `json:"line1"`
+	Line2      string `json:"line2"`
+	City       string `json:"city"`
+	State      string `json:"state"`
+	PostalCode string `json:"postal_code"`
+	Country    string `json:"country"`
+}
+
+type SavedCard struct {
+	ID       string         `json:"id"`
+	Brand    string         `json:"brand"`
+	Last4    string         `json:"last4"`
+	ExpMonth int            `json:"exp_month"`
+	ExpYear  int            `json:"exp_year"`
+	Funding  string         `json:"funding"`
+	Wallet   string         `json:"wallet"`
+	Billing  BillingDetails `json:"billing"`
+
+	ArtURL    string `json:"art_url"`
+	ArtCardID string `json:"-"`
+}
+
+type CardManager interface {
+	SavedCards(ctx context.Context, accountID uuid.UUID) ([]SavedCard, error)
+	RemoveCard(ctx context.Context, accountID uuid.UUID, cardID string) error
+	CardArtEnabled() bool
+	StartCardArt(ctx context.Context, accountID uuid.UUID, cardID string) (CollectSession, error)
+	LinkCardArt(ctx context.Context, accountID uuid.UUID, cardID, artCardID string) error
+}
+
 type Wallet interface {
+	ListCards(ctx context.Context, customerID string) ([]SavedCard, error)
+	DetachCard(ctx context.Context, cardID string) error
+	LinkArtCard(ctx context.Context, cardID, artCardID string) error
 	CreateCustomer(ctx context.Context, accountID uuid.UUID) (string, error)
 	CreateCustomerSession(ctx context.Context, customerID string) (string, error)
 }

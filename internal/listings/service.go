@@ -226,10 +226,10 @@ func validPropertyType(value PropertyType) bool {
 
 var (
 	ErrListingNotFound      = errors.New("listing not found")
-	ErrListingInUse         = errors.New("only a draft with no bookings or ownership documents can be deleted")
+	ErrListingInUse         = errors.New("only a draft with no bookings and no recently withdrawn proof can be deleted")
 	ErrDuplicateListing     = errors.New("a published listing already exists at this address")
 	ErrNotListingOwner      = errors.New("only the host can publish this listing")
-	ErrVerificationRequired = errors.New("identity verification is required to publish a listing")
+	ErrVerificationRequired = errors.New("a current ID verification is required to publish a listing")
 	ErrProofRequired        = errors.New("approved proof of property control is required to publish a listing")
 	ErrPriceRequired        = errors.New("set a nightly price before publishing")
 	ErrPhotoRequired        = errors.New("add at least 5 photos before publishing")
@@ -252,7 +252,7 @@ type ListingPublishStore interface {
 }
 
 type HostVerifier interface {
-	HasCompleted(ctx context.Context, accountID uuid.UUID) (bool, error)
+	CurrentVerificationID(ctx context.Context, accountID uuid.UUID) (uuid.UUID, bool, error)
 }
 
 func (service *ListingService) WithPublishing(store ListingPublishStore, verifier HostVerifier) *ListingService {
@@ -265,7 +265,7 @@ func (service *ListingService) PublishListing(ctx context.Context, hostID, listi
 	if service.publishStore == nil || service.verifier == nil {
 		return ErrVerificationRequired
 	}
-	verified, err := service.verifier.HasCompleted(ctx, hostID)
+	_, verified, err := service.verifier.CurrentVerificationID(ctx, hostID)
 	if err != nil {
 		return fmt.Errorf("check host verification: %w", err)
 	}

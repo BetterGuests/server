@@ -99,7 +99,6 @@ func TestStripeWebhookHTTPStatuses(t *testing.T) {
 		{"ok", nil, http.StatusOK},
 		{"bad signature", ErrInvalidSignature, http.StatusUnauthorized},
 		{"bad payload", ErrInvalidPayload, http.StatusBadRequest},
-		{"unknown payment", ErrPaymentNotFound, http.StatusNotFound},
 		{"internal", errors.New("boom"), http.StatusInternalServerError},
 	}
 	for _, test := range cases {

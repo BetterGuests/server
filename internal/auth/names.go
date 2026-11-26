@@ -13,6 +13,7 @@ import (
 
 const (
 	maxNamePartRunes = 40
+	maxPhotoURLBytes = 2000
 	namePlaceholder  = ""
 )
 
@@ -24,6 +25,11 @@ const verifiedStatus = "verified"
 
 type userGetter interface {
 	Get(ctx context.Context, id string) (*clerk.User, error)
+}
+
+type PublicProfile struct {
+	DisplayName string
+	AvatarURL   string
 }
 
 type ClerkNameFetcher struct{ users userGetter }
@@ -38,16 +44,24 @@ func NewClerkNameFetcher(cfg ClerkConfig) (*ClerkNameFetcher, error) {
 	return &ClerkNameFetcher{users: client}, nil
 }
 
-func (fetcher *ClerkNameFetcher) DisplayName(ctx context.Context, clerkUserID string) (string, error) {
+func (fetcher *ClerkNameFetcher) PublicProfile(ctx context.Context, clerkUserID string) (PublicProfile, error) {
 	profile, err := fetcher.users.Get(ctx, clerkUserID)
 	if err != nil {
-		return namePlaceholder, fmt.Errorf("fetch clerk user: %w", err)
+		return PublicProfile{}, fmt.Errorf("fetch clerk user: %w", err)
 	}
 	name := PublicName(deref(profile.FirstName), deref(profile.LastName))
 	if name == namePlaceholder {
-		return namePlaceholder, ErrNoDisplayName
+		return PublicProfile{}, ErrNoDisplayName
 	}
-	return name, nil
+	return PublicProfile{DisplayName: name, AvatarURL: uploadedPhoto(profile)}, nil
+}
+
+func uploadedPhoto(profile *clerk.User) string {
+	url := deref(profile.ImageURL)
+	if !profile.HasImage || !strings.HasPrefix(url, "https://") || len(url) > maxPhotoURLBytes {
+		return ""
+	}
+	return url
 }
 
 func (fetcher *ClerkNameFetcher) VerifiedEmail(ctx context.Context, clerkUserID string) (string, error) {

@@ -186,15 +186,40 @@ equally deep. A few are worth reading before you trust them blindly:
   stay `pending`, are retried by the job, and hold the host payout.
 - Only an admin who is neither the guest nor the host can decide a problem
   report; a database trigger enforces it.
-- Paused listings live in `app.listing_suspensions`. The API role cannot remove
-  a row, so lifting a pause is a manual database change.
+- Paused listings live in `app.listing_suspensions`. Rows are never removed; an
+  admin lifts a pause from `/admin/listings`, and a database trigger stops
+  anyone else doing it.
+- Email carries the notification title, body and a link, never entry codes or
+  report details. Provider errors are logged without the address.
+
+## Identity standing
+
+- A check counts only while it passed, is not revoked, is not waiting for or
+  refused at review, and is under 365 days old. Booking, publishing, approving a
+  booking and starting a document check need such a check. Earning cashback needs
+  one that passed and was not revoked, at any age.
+- A check is held for an admin when the name differs from the last accepted ID or
+  cannot be compared, the ID shows someone under 18, the identity is on another
+  account, or an earlier check was declined. Admins cannot review themselves.
+  Persona deletes the inquiry after `ID_RETENTION_DAYS`, so decide before then.
+- A Persona decline revokes earlier passes.
+- Listings pause at once when a host's verification is revoked or a proof is
+  withdrawn, and 30 days after it expires. They resume when the cause is gone.
+  The 365 and 30 day figures also appear in `app.queue_team_alerts`.
+- The duplicate check stores an HMAC of name and birth date under
+  `ID_FINGERPRINT_KEY`, never the birth date. It is deleted with the ID name.
 
 ## Automatic property document checks
 
+- Only deeds, and property tax bills issued in the last 90 days, can skip an
+  admin. Utility bills and leases are always read by a person.
 - A proof is approved without an admin only when the signed Persona webhook says
   the inquiry completed, the document verification passed with no failed check,
   and the extracted name and address match the host's ID name and the listing.
-  Everything else stays in the admin queue.
+  The name must belong to one person on the document, and the state and unit must
+  agree. Everything else stays in the admin queue.
+- A Persona decline revokes the proof and stops that inquiry ever approving.
+  Admins can withdraw any approved proof.
 - Only inquiries this server created are accepted, tied to one host, listing and
   address. `app.approve_persona_property_proof` is `SECURITY DEFINER` and limited
   to that host's submitted proof while the listing address is unchanged. It
@@ -205,6 +230,15 @@ equally deep. A few are worth reading before you trust them blindly:
 - The ID deletion job redacts rejected document inquiries, inquiries that never
   produced a result after `ID_RETENTION_DAYS`, and unapproved ones when a host
   asks to delete ID data.
+- Manually uploaded files are deleted from storage by a six hourly job: rejected
+  ones on its next run, approved ones 90 days after approval, withdrawn approvals
+  90 days after withdrawal. The proof row stays.
 - Approved document inquiries are kept 90 days after approval for disputes, then
   redacted. A host's deletion request does not shorten this, and identity holds do
   not extend it. The listing stays approved.
+
+- A host may delete a draft listing that has ownership documents, unless an
+  approval on it was withdrawn in the last 90 days.
+  `app.release_draft_listing_documents` queues each stored file and Persona
+  inquiry for the deletion jobs, then removes the proof rows. The application
+  role still cannot delete a proof directly.

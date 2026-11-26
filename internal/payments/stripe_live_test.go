@@ -96,3 +96,20 @@ func TestStripeCreateIntentIsIdempotent(t *testing.T) {
 		t.Fatalf("intent ids differ: %s %s", first.ID, second.ID)
 	}
 }
+
+func TestStripeReleasingAHoldTwiceSucceeds(t *testing.T) {
+	key := os.Getenv("STRIPE_SECRET_KEY")
+	if !strings.HasPrefix(key, "sk_test_") {
+		t.Skip("STRIPE_SECRET_KEY must be a sk_test_ key to run live Stripe test-mode checks")
+	}
+	gateway := NewStripeGateway(Config{SecretKey: key, WebhookSecret: "whsec_unused"})
+	intent, err := gateway.CreateIntent(context.Background(), IntentParams{AmountCents: 5000, Currency: "usd", BookingID: uuid.New(), GuestID: uuid.New(), IdempotencyKey: "live-release-" + uuid.NewString(), ManualCapture: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := range 2 {
+		if err := gateway.Cancel(context.Background(), intent.ID); err != nil {
+			t.Fatalf("attempt %d: %v", attempt+1, err)
+		}
+	}
+}

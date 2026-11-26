@@ -43,11 +43,14 @@ func TestHostCanDeleteOnlyAnUntouchedDraft(t *testing.T) {
 		}
 	})
 
-	t.Run("a draft with an ownership document is kept", func(t *testing.T) {
+	t.Run("a draft with an ownership document takes the document with it", func(t *testing.T) {
 		listing := draft()
 		approveProof(t, ctx, listing)
-		if err := service.DeleteListing(ctx, listing.HostID, listing.ID); !errors.Is(err, ErrListingInUse) {
+		if err := service.DeleteListing(ctx, listing.HostID, listing.ID); err != nil {
 			t.Fatalf("delete with proof = %v", err)
+		}
+		if err := service.DeleteListing(ctx, listing.HostID, listing.ID); !errors.Is(err, ErrListingNotFound) {
+			t.Fatalf("second delete = %v", err)
 		}
 	})
 

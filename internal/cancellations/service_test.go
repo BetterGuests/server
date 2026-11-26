@@ -86,6 +86,11 @@ type storeStub struct {
 	cancelled []Cancellation
 	expired   []ExpiredRequest
 	marked    []PendingRefund
+	stranded  []StrandedHold
+}
+
+func (stub *storeStub) StrandedHolds(context.Context, int) ([]StrandedHold, error) {
+	return stub.stranded, nil
 }
 
 func (stub *storeStub) Booking(context.Context, uuid.UUID, uuid.UUID) (Booking, error) {
@@ -165,5 +170,30 @@ func TestARequestDoesNotExpireWhileItsCardCannotBeReleased(t *testing.T) {
 	}
 	if len(store.expired) != 0 {
 		t.Fatal("expired a booking that may still be charged")
+	}
+}
+
+type releaseLog struct {
+	failing  uuid.UUID
+	released []StrandedHold
+}
+
+func (log *releaseLog) Release(_ context.Context, guestID, bookingID uuid.UUID) error {
+	if bookingID == log.failing {
+		return errors.New("stripe down")
+	}
+	log.released = append(log.released, StrandedHold{BookingID: bookingID, GuestID: guestID})
+	return nil
+}
+
+func TestStrandedHoldsAreReleasedAsTheGuestEvenWhenOneFails(t *testing.T) {
+	first := StrandedHold{BookingID: uuid.New(), GuestID: uuid.New()}
+	second := StrandedHold{BookingID: uuid.New(), GuestID: uuid.New()}
+	holds := &releaseLog{failing: first.BookingID}
+
+	released, err := serviceWith(&storeStub{stranded: []StrandedHold{first, second}}, gatewayStub{}, holds).ReleaseStrandedHolds(context.Background())
+
+	if err == nil || released != 1 || len(holds.released) != 1 || holds.released[0] != second {
+		t.Fatalf("released = %d %+v, err = %v", released, holds.released, err)
 	}
 }

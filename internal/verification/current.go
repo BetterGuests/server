@@ -2,6 +2,7 @@ package verification
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -40,4 +41,42 @@ func (verifier *CurrentVerifier) CurrentVerificationID(ctx context.Context, acco
 		return uuid.Nil, false, nil
 	}
 	return completed.ID, true, nil
+}
+
+func summarize(attempts []Attempt, inquiryID string, now time.Time) (StatusResponse, bool) {
+	response := StatusResponse{Status: "none", Verified: slices.ContainsFunc(attempts, func(attempt Attempt) bool {
+		return effectiveStatus(attempt, now) == string(StatusCompleted)
+	})}
+	if inquiryID != "" {
+		index := slices.IndexFunc(attempts, func(attempt Attempt) bool { return attempt.InquiryID == inquiryID })
+		if index < 0 {
+			return StatusResponse{}, false
+		}
+		response.Status = effectiveStatus(attempts[index], now)
+		return response, true
+	}
+	if len(attempts) == 0 {
+		return response, true
+	}
+	latest := max(slices.IndexFunc(attempts, wentSomewhere), 0)
+	response.Status = effectiveStatus(attempts[latest], now)
+	return response, true
+}
+
+func wentSomewhere(attempt Attempt) bool {
+	return attempt.Status != StatusCreated && attempt.Status != StatusExpired
+}
+
+func effectiveStatus(attempt Attempt, now time.Time) string {
+	switch {
+	case attempt.Status != StatusCompleted:
+		return string(attempt.Status)
+	case attempt.Revoked || attempt.Review == ReviewRejected:
+		return string(StatusDeclined)
+	case attempt.Review == ReviewPending:
+		return string(StatusNeedsReview)
+	case now.Sub(attempt.CompletedAt) > ReverifyAfter:
+		return StatusStale
+	}
+	return string(StatusCompleted)
 }

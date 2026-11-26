@@ -16,6 +16,14 @@ var (
 	ErrAlreadyProven  = errors.New("this listing already has an approved proof")
 )
 
+const (
+	declinedEvent      = "inquiry.declined"
+	maxTaxBillAge      = 90 * 24 * time.Hour
+	documentDateLayout = "2006-01-02"
+)
+
+var autoApprovable = map[DocumentType]bool{Deed: true, PropertyTaxBill: true}
+
 var approvingEvents = map[string]bool{"inquiry.completed": true, "inquiry.approved": true}
 
 var reviewableEvents = map[string]bool{
@@ -129,6 +137,11 @@ func (service *CheckService) Process(ctx context.Context, event CheckEvent) (boo
 	if !reviewableEvents[event.Name] {
 		return true, nil
 	}
+	if event.Name == declinedEvent {
+		if err := service.decline(ctx, inquiry); err != nil {
+			return true, err
+		}
+	}
 	document, present, err := chosenDocument(event.Body)
 	if err != nil {
 		return true, err
@@ -171,6 +184,12 @@ func (service *CheckService) record(ctx context.Context, inquiry CheckInquiry) e
 }
 
 func (service *CheckService) approveIfMatching(ctx context.Context, inquiry CheckInquiry, document documentResult) error {
+	if !autoApprovable[inquiry.DocumentType] {
+		return service.leaveForReview(inquiry, "this document type is always reviewed by hand")
+	}
+	if inquiry.DocumentType == PropertyTaxBill && !service.recentlyIssued(document) {
+		return service.leaveForReview(inquiry, "document date is missing or too old")
+	}
 	if !document.clean() {
 		return service.leaveForReview(inquiry, "persona checks did not all pass")
 	}
@@ -196,6 +215,30 @@ func (service *CheckService) approveIfMatching(ctx context.Context, inquiry Chec
 	}
 	if approved {
 		slog.Info("property proof approved automatically", "inquiry_id", inquiry.InquiryID, "listing_id", inquiry.ListingID)
+	}
+	return nil
+}
+
+func (service *CheckService) recentlyIssued(document documentResult) bool {
+	value, found := document.extracted(issueDateField)
+	if !found {
+		return false
+	}
+	issued, err := time.Parse(documentDateLayout, value)
+	if err != nil {
+		return false
+	}
+	age := service.now().UTC().Sub(issued)
+	return age >= 0 && age <= maxTaxBillAge
+}
+
+func (service *CheckService) decline(ctx context.Context, inquiry CheckInquiry) error {
+	revoked, err := service.store.DeclineFromInquiry(ctx, inquiry.HostID, inquiry.InquiryID, service.now().UTC())
+	if err != nil {
+		return err
+	}
+	if revoked {
+		slog.Info("property proof revoked after Persona declined it", "inquiry_id", inquiry.InquiryID, "listing_id", inquiry.ListingID)
 	}
 	return nil
 }
