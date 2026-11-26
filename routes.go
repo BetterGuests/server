@@ -21,6 +21,7 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/reviews"
 	"github.com/BetterGuests/BetterGuests-Server/internal/settlements"
 	"github.com/BetterGuests/BetterGuests-Server/internal/stays"
+	"github.com/BetterGuests/BetterGuests-Server/internal/usermap"
 	"github.com/BetterGuests/BetterGuests-Server/internal/verification"
 	"github.com/BetterGuests/BetterGuests-Server/internal/waitlist"
 	"github.com/go-chi/cors"
@@ -49,6 +50,7 @@ type routeDeps struct {
 	inbox         *notifications.HTTPHandler
 	tripUpdates   backgroundJob
 	cancellations *cancellations.HTTPHandler
+	userMap       *usermap.HTTPHandler
 }
 
 type backgroundJob interface {
@@ -151,7 +153,6 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.Handle("POST /api/v1/listings/{listing_id}/proof/uploads", deps.compliance.RequireAdult(http.HandlerFunc(deps.proofs.RequestUpload)))
 	api.Handle("POST /api/v1/listings/{listing_id}/proof", deps.compliance.RequireAdult(http.HandlerFunc(deps.proofs.Submit)))
 	api.HandleFunc("GET /api/v1/listings/{listing_id}/proof", deps.proofs.Status)
-	api.Handle("POST /api/v1/listings/{listing_id}/proof/inquiries", deps.compliance.RequireAdult(http.HandlerFunc(deps.proofs.StartCheck)))
 	api.HandleFunc("GET /api/v1/listings/{listing_id}/setup", deps.listings.GetSetup)
 	api.Handle("POST /api/v1/listings/{listing_id}/photos/uploads", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.RequestPhotoUpload)))
 	api.Handle("POST /api/v1/listings/{listing_id}/photos", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.AddPhoto)))
@@ -159,6 +160,7 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.Handle("PUT /api/v1/listings/{listing_id}/price", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.SetPrice)))
 	api.Handle("DELETE /api/v1/listings/{listing_id}", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.DeleteListing)))
 	api.HandleFunc("GET /api/v1/admin/me", deps.proofs.Me)
+	api.HandleFunc("GET /api/v1/admin/user-map", deps.userMap.Summary)
 	api.HandleFunc("GET /api/v1/admin/property-proofs", deps.proofs.ListForReview)
 	api.HandleFunc("POST /api/v1/admin/property-proofs/{proof_id}/revoke", deps.proofs.Revoke)
 	api.HandleFunc("GET /api/v1/admin/identity-reviews", deps.verification.ListReviews)
@@ -200,6 +202,9 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.HandleFunc("GET /api/v1/conversations/{conversation_id}/messages", deps.messages.ListMessages)
 	api.HandleFunc("POST /api/v1/conversations/{conversation_id}/messages", deps.messages.SendMessage)
 	api.HandleFunc("POST /api/v1/conversations/{conversation_id}/read", deps.messages.MarkRead)
+	api.HandleFunc("POST /api/v1/conversations/{conversation_id}/typing", deps.messages.Typing)
+	api.HandleFunc("DELETE /api/v1/conversations/{conversation_id}/messages/{message_id}", deps.messages.DeleteMessage)
+	api.HandleFunc("POST /api/v1/conversations/{conversation_id}/messages/{message_id}/reactions", deps.messages.ReactToMessage)
 	api.HandleFunc("GET /api/v1/bookings/{booking_id}/cashback", deps.cashback.GetTrip)
 	api.HandleFunc("POST /api/v1/bookings/{booking_id}/cashback/tasks/{task_key}/photo-upload", deps.cashback.RequestUpload)
 	api.HandleFunc("POST /api/v1/bookings/{booking_id}/cashback/tasks/{task_key}/photo", deps.cashback.SubmitPhoto)

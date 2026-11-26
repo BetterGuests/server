@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -28,7 +29,10 @@ type Opener interface {
 }
 
 type Sender interface {
-	Send(ctx context.Context, actorID, conversationID uuid.UUID, body string) (Message, error)
+	Send(ctx context.Context, actorID, conversationID uuid.UUID, draft Draft) (Message, error)
+	Delete(ctx context.Context, actorID, conversationID, messageID uuid.UUID) error
+	React(ctx context.Context, actorID, conversationID, messageID uuid.UUID, emoji string) ([]Reaction, error)
+	Typing(ctx context.Context, actorID, conversationID uuid.UUID, update TypingUpdate) error
 }
 
 type HTTPHandler struct {
@@ -47,7 +51,39 @@ type OpenRequest struct {
 }
 
 type SendRequest struct {
-	Body string `json:"body"`
+	ID        uuid.UUID `json:"id"`
+	Body      string    `json:"body"`
+	ReplyToID uuid.UUID `json:"reply_to_id"`
+}
+
+type TypingFrame struct {
+	ConversationID uuid.UUID `json:"conversation_id"`
+	Draft          string    `json:"draft"`
+	Idle           bool      `json:"idle"`
+}
+
+type Typist interface {
+	Typing(ctx context.Context, actorID, conversationID uuid.UUID, update TypingUpdate) error
+}
+
+type TypingReceiver struct {
+	typist Typist
+}
+
+func NewTypingReceiver(typist Typist) *TypingReceiver {
+	return &TypingReceiver{typist: typist}
+}
+
+func (receiver *TypingReceiver) Receive(ctx context.Context, actorID uuid.UUID, data json.RawMessage) error {
+	var frame TypingFrame
+	if err := json.Unmarshal(data, &frame); err != nil || frame.ConversationID == uuid.Nil {
+		return fmt.Errorf("%w: typing frames need a conversation_id", ErrInvalidConversation)
+	}
+	return receiver.typist.Typing(ctx, actorID, frame.ConversationID, TypingUpdate{Draft: frame.Draft, Idle: frame.Idle})
+}
+
+type ReactRequest struct {
+	Emoji string `json:"emoji"`
 }
 
 func (handler *HTTPHandler) ListConversations(w http.ResponseWriter, r *http.Request) {
@@ -119,12 +155,54 @@ func (handler *HTTPHandler) SendMessage(w http.ResponseWriter, r *http.Request) 
 	if !decode(w, r, &request) {
 		return
 	}
-	message, err := handler.sender.Send(r.Context(), actorID, conversationID, request.Body)
+	draft := Draft{ID: request.ID, Body: request.Body, ReplyToID: request.ReplyToID}
+	message, err := handler.sender.Send(r.Context(), actorID, conversationID, draft)
 	if err != nil {
 		writeServiceError(w, "Send message", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, message)
+}
+
+func (handler *HTTPHandler) DeleteMessage(w http.ResponseWriter, r *http.Request) {
+	actorID, conversationID, messageID, ok := actorConversationAndMessage(w, r)
+	if !ok {
+		return
+	}
+	if err := handler.sender.Delete(r.Context(), actorID, conversationID, messageID); err != nil {
+		writeServiceError(w, "Delete message", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (handler *HTTPHandler) ReactToMessage(w http.ResponseWriter, r *http.Request) {
+	actorID, conversationID, messageID, ok := actorConversationAndMessage(w, r)
+	if !ok {
+		return
+	}
+	var request ReactRequest
+	if !decode(w, r, &request) {
+		return
+	}
+	reactions, err := handler.sender.React(r.Context(), actorID, conversationID, messageID, request.Emoji)
+	if err != nil {
+		writeServiceError(w, "React to message", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string][]Reaction{"reactions": reactions})
+}
+
+func (handler *HTTPHandler) Typing(w http.ResponseWriter, r *http.Request) {
+	actorID, conversationID, ok := actorAndConversation(w, r)
+	if !ok {
+		return
+	}
+	if err := handler.sender.Typing(r.Context(), actorID, conversationID, TypingUpdate{}); err != nil {
+		writeServiceError(w, "Typing", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (handler *HTTPHandler) MarkRead(w http.ResponseWriter, r *http.Request) {
@@ -158,6 +236,19 @@ func actorAndConversation(w http.ResponseWriter, r *http.Request) (uuid.UUID, uu
 		return uuid.Nil, uuid.Nil, false
 	}
 	return actorID, conversationID, true
+}
+
+func actorConversationAndMessage(w http.ResponseWriter, r *http.Request) (uuid.UUID, uuid.UUID, uuid.UUID, bool) {
+	actorID, conversationID, ok := actorAndConversation(w, r)
+	if !ok {
+		return uuid.Nil, uuid.Nil, uuid.Nil, false
+	}
+	messageID, err := uuid.Parse(r.PathValue("message_id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "message_id must be a UUID")
+		return uuid.Nil, uuid.Nil, uuid.Nil, false
+	}
+	return actorID, conversationID, messageID, true
 }
 
 func pageParams(w http.ResponseWriter, r *http.Request) (*time.Time, int, bool) {
@@ -200,7 +291,9 @@ func writeServiceError(w http.ResponseWriter, operation string, err error) {
 	switch {
 	case errors.Is(err, ErrConversationNotFound):
 		writeError(w, http.StatusNotFound, "conversation not found")
-	case errors.Is(err, ErrInvalidConversation), errors.Is(err, ErrInvalidMessage):
+	case errors.Is(err, ErrMessageNotFound):
+		writeError(w, http.StatusNotFound, "message not found")
+	case errors.Is(err, ErrInvalidConversation), errors.Is(err, ErrInvalidMessage), errors.Is(err, ErrInvalidReaction):
 		writeError(w, http.StatusBadRequest, err.Error())
 	default:
 		slog.Error(operation, "error", err)

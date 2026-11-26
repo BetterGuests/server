@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/sync/errgroup"
 )
 
 type ListingService struct {
@@ -22,15 +23,17 @@ type ListingService struct {
 	media        MediaStore
 	objects      PhotoObjects
 	screener     PhotoScreener
+	inBackground func(func())
 	now          func() time.Time
 	newID        func() uuid.UUID
 }
 
 func NewListingService(store ListingStore) *ListingService {
 	return &ListingService{
-		store: store,
-		now:   time.Now,
-		newID: uuid.New,
+		store:        store,
+		inBackground: func(work func()) { go work() },
+		now:          time.Now,
+		newID:        uuid.New,
 	}
 }
 
@@ -244,6 +247,7 @@ var (
 	ErrTooManyPhotos        = errors.New("a listing can have up to 20 photos")
 	ErrPhotoNotFound        = errors.New("photo not found")
 	ErrLastPhoto            = errors.New("a published listing needs at least 5 photos")
+	ErrPhotosRefused        = errors.New("some photos cannot be used, remove them to publish")
 	ErrInvalidPrice         = errors.New("nightly price must be between $1 and $100,000")
 )
 
@@ -271,6 +275,9 @@ func (service *ListingService) PublishListing(ctx context.Context, hostID, listi
 	}
 	if !verified {
 		return ErrVerificationRequired
+	}
+	if err := service.screenPendingPhotos(ctx, hostID, listingID); err != nil {
+		return err
 	}
 	return service.publishStore.Publish(ctx, hostID.String(), listingID)
 }
@@ -334,14 +341,15 @@ func roundCoordinate(value float64) float64 {
 }
 
 const (
-	maxPhotoBytes         = 10 << 20
-	maxPhotos             = 20
-	minPublishPhotos      = 5
-	maxAltTextLength      = 500
-	minNightlyCents       = 100
-	maxNightlyCents       = 10_000_000
-	photoUploadLifetime   = 10 * time.Minute
-	maxScreenedPhotoBytes = 7 * 1024 * 1024
+	maxPhotoBytes               = 10 << 20
+	maxPhotos                   = 20
+	minPublishPhotos            = 5
+	maxAltTextLength            = 500
+	minNightlyCents             = 100
+	maxNightlyCents             = 10_000_000
+	photoUploadLifetime         = 10 * time.Minute
+	maxScreenedPhotoBytes       = 7 * 1024 * 1024
+	backgroundScreeningDeadline = 2 * time.Minute
 )
 
 var allowedPhotoTypes = map[string]string{
@@ -448,30 +456,91 @@ func (service *ListingService) AddPhoto(ctx context.Context, hostID, listingID u
 		service.discard(ctx, key)
 		return Setup{}, ErrPhotoRejected
 	}
-	storedKey := key
-	if service.screener != nil {
-		if storedKey, err = service.screenedCopy(ctx, listingID, key, info); err != nil {
-			return Setup{}, err
-		}
+	if service.screener != nil && info.Size > maxScreenedPhotoBytes {
+		service.discard(ctx, key)
+		return Setup{}, ErrPhotoTooLargeToCheck
 	}
-	photo := ListingPhoto{ID: service.newID(), ObjectKey: storedKey, AltText: altText}
+	photo := ListingPhoto{ID: service.newID(), ObjectKey: key, AltText: altText, Screening: ScreeningPassed}
+	if service.screener != nil {
+		photo.Screening = ScreeningPending
+	}
 	if err := service.media.AddPhoto(ctx, hostID.String(), listingID, photo); err != nil {
-		if storedKey != key && !errors.Is(err, ErrPhotoAlreadyAdded) {
-			service.discard(ctx, storedKey)
-		}
 		return Setup{}, err
 	}
-	if storedKey != key {
-		service.discard(ctx, key)
+	if photo.Screening == ScreeningPending {
+		service.inBackground(func() {
+			ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), backgroundScreeningDeadline)
+			defer cancel()
+			if err := service.screenPhoto(ctx, hostID, listingID, photo); err != nil {
+				slog.Warn("background listing photo screening", "error", err)
+			}
+		})
 	}
 	return service.Setup(ctx, hostID, listingID)
 }
 
-func (service *ListingService) screenedCopy(ctx context.Context, listingID uuid.UUID, key string, info ObjectInfo) (string, error) {
-	if info.Size > maxScreenedPhotoBytes {
-		service.discard(ctx, key)
-		return "", ErrPhotoTooLargeToCheck
+func (service *ListingService) screenPhoto(ctx context.Context, hostID, listingID uuid.UUID, photo ListingPhoto) error {
+	verdict := ScreeningVerdict{PhotoID: photo.ID, UploadKey: photo.ObjectKey}
+	screenedKey, err := service.screenedCopy(ctx, listingID, photo.ObjectKey)
+	switch {
+	case errors.Is(err, ErrPhotoRejected):
+		verdict.Refusal = RefusedNotAPhoto
+	case errors.Is(err, ErrPhotoNotAllowed):
+		verdict.Refusal = refusalOf(err)
+	case err != nil:
+		return err
+	default:
+		verdict.ScreenedKey = screenedKey
 	}
+	recorded, err := service.media.RecordScreening(ctx, hostID.String(), listingID, verdict)
+	if err != nil {
+		return fmt.Errorf("record photo screening: %w", err)
+	}
+	if !recorded {
+		service.discardUnlessListed(ctx, hostID, listingID, screenedKey)
+		return nil
+	}
+	if verdict.ScreenedKey != "" {
+		service.discard(ctx, photo.ObjectKey)
+	}
+	return nil
+}
+
+func (service *ListingService) discardUnlessListed(ctx context.Context, hostID, listingID uuid.UUID, key string) {
+	if key == "" {
+		return
+	}
+	setup, err := service.media.Setup(ctx, hostID.String(), listingID)
+	if err != nil {
+		return
+	}
+	if !slices.ContainsFunc(setup.Photos, func(photo ListingPhoto) bool { return photo.ObjectKey == key }) {
+		service.discard(ctx, key)
+	}
+}
+
+func (service *ListingService) screenPendingPhotos(ctx context.Context, hostID, listingID uuid.UUID) error {
+	if service.media == nil || service.screener == nil {
+		return nil
+	}
+	setup, err := service.media.Setup(ctx, hostID.String(), listingID)
+	if err != nil {
+		return err
+	}
+	group, groupCtx := errgroup.WithContext(ctx)
+	for _, photo := range setup.Photos {
+		if photo.Screening != ScreeningPending {
+			continue
+		}
+		group.Go(func() error { return service.screenPhoto(groupCtx, hostID, listingID, photo) })
+	}
+	if err := group.Wait(); err != nil {
+		return fmt.Errorf("%w: %w", ErrPhotoCheckFailed, err)
+	}
+	return nil
+}
+
+func (service *ListingService) screenedCopy(ctx context.Context, listingID uuid.UUID, key string) (string, error) {
 	data, err := service.objects.Read(ctx, key, maxScreenedPhotoBytes)
 	if err != nil {
 		return "", fmt.Errorf("%w: read upload: %w", ErrPhotoCheckFailed, err)
@@ -479,7 +548,6 @@ func (service *ListingService) screenedCopy(ctx context.Context, listingID uuid.
 	contentType := http.DetectContentType(data)
 	extension, allowed := allowedPhotoTypes[contentType]
 	if !allowed {
-		service.discard(ctx, key)
 		return "", ErrPhotoRejected
 	}
 	refusal, err := service.screener.Screen(ctx, data, contentType)
@@ -487,14 +555,29 @@ func (service *ListingService) screenedCopy(ctx context.Context, listingID uuid.
 		return "", fmt.Errorf("%w: %w", ErrPhotoCheckFailed, err)
 	}
 	if refusal != "" {
-		service.discard(ctx, key)
-		return "", fmt.Errorf("%w: %s", ErrPhotoNotAllowed, refusal)
+		return "", photoNotAllowed{refusal}
 	}
 	screenedKey := photoKeyPrefix(listingID) + uuid.NewSHA1(listingID, []byte(key)).String() + extension
 	if err := service.objects.Write(ctx, screenedKey, contentType, data); err != nil {
 		return "", fmt.Errorf("%w: store checked photo: %w", ErrPhotoCheckFailed, err)
 	}
 	return screenedKey, nil
+}
+
+type photoNotAllowed struct{ refusal PhotoRefusal }
+
+func (refused photoNotAllowed) Error() string {
+	return ErrPhotoNotAllowed.Error() + ": " + string(refused.refusal)
+}
+
+func (refused photoNotAllowed) Unwrap() error { return ErrPhotoNotAllowed }
+
+func refusalOf(err error) PhotoRefusal {
+	var refused photoNotAllowed
+	if errors.As(err, &refused) {
+		return refused.refusal
+	}
+	return RefusedUnsafe
 }
 
 func (service *ListingService) RemovePhoto(ctx context.Context, hostID, listingID, photoID uuid.UUID) (Setup, error) {

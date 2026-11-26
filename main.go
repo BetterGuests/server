@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"time"
 
 	"github.com/BetterGuests/BetterGuests-Server/db"
 	"github.com/BetterGuests/BetterGuests-Server/internal/logging"
@@ -29,10 +28,10 @@ func run() error {
 		return fmt.Errorf("database config: %w", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), databaseStartupWait)
 	defer cancel()
 
-	pool, err := db.Open(ctx, config)
+	pool, err := db.OpenWithRetry(ctx, config)
 	if err != nil {
 		return fmt.Errorf("database connection: %w", err)
 	}
@@ -57,12 +56,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	pauses := buildVerificationPauses(pool)
 	jobs, stopJobs := context.WithCancel(context.Background())
 	defer stopJobs()
-	go redaction.Run(jobs)
-	go documents.Run(jobs)
-	go settlement.Run(jobs)
-	go deps.tripUpdates.Run(jobs)
+	go superviseJob(jobs, "id redaction", redaction.Run)
+	go superviseJob(jobs, "document retention", documents.Run)
+	go superviseJob(jobs, "verification pauses", pauses.Run)
+	go superviseJob(jobs, "settlement", settlement.Run)
+	go superviseJob(jobs, "trip updates", deps.tripUpdates.Run)
 
 	server, err := createServer(routes(deps))
 	if err != nil {

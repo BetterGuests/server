@@ -49,7 +49,6 @@ var eventStatuses = map[string]Status{
 type VerificationService struct {
 	store         Store
 	consents      ConsentChecker
-	claimer       InquiryClaimer
 	inquiries     InquiryCreator
 	templateID    string
 	webhookSecret []byte
@@ -64,13 +63,11 @@ func ConfigFromEnv() (Config, error) {
 
 func configFromLookup(lookup func(string) string) (Config, error) {
 	config := Config{
-		APIKey:        lookup("PERSONA_API_KEY"),
-		TemplateID:    lookup("PERSONA_TEMPLATE_ID"),
-		WebhookSecret: lookup("PERSONA_WEBHOOK_SECRET"),
-		BaseURL:       lookup("PERSONA_BASE_URL"),
-
-		PropertyTemplateID: lookup("PERSONA_PROPERTY_TEMPLATE_ID"),
-		FingerprintKey:     lookup("ID_FINGERPRINT_KEY"),
+		APIKey:         lookup("PERSONA_API_KEY"),
+		TemplateID:     lookup("PERSONA_TEMPLATE_ID"),
+		WebhookSecret:  lookup("PERSONA_WEBHOOK_SECRET"),
+		BaseURL:        lookup("PERSONA_BASE_URL"),
+		FingerprintKey: lookup("ID_FINGERPRINT_KEY"),
 	}
 	for name, value := range map[string]string{
 		"PERSONA_API_KEY":        config.APIKey,
@@ -104,11 +101,6 @@ func NewVerificationService(store Store, inquiries InquiryCreator, config Config
 
 func (service *VerificationService) WithConsents(consents ConsentChecker) *VerificationService {
 	service.consents = consents
-	return service
-}
-
-func (service *VerificationService) WithOtherInquiries(claimer InquiryClaimer) *VerificationService {
-	service.claimer = claimer
 	return service
 }
 
@@ -169,17 +161,6 @@ func (service *VerificationService) HandleWebhook(ctx context.Context, signature
 	if !mapped {
 		slog.Info("Ignoring unmapped persona event", "event", event.Name)
 		return nil
-	}
-	if service.claimer != nil {
-		claimed, err := service.claimer.Claim(ctx, OtherInquiry{
-			AccountID: event.AccountID, InquiryID: event.InquiryID, EventName: event.Name, Body: body,
-		})
-		if err != nil {
-			return fmt.Errorf("handle %s for another inquiry: %w", event.Name, err)
-		}
-		if claimed {
-			return nil
-		}
 	}
 	if status == StatusCompleted {
 		return service.complete(ctx, event)

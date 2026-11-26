@@ -178,3 +178,129 @@ func TestOriginHostsKeepsOnlyParsableOrigins(t *testing.T) {
 		t.Fatalf("originHosts = %v, want %v", got, want)
 	}
 }
+
+type recordingReceiver struct {
+	frames chan receivedFrame
+}
+
+type receivedFrame struct {
+	userID uuid.UUID
+	data   string
+}
+
+func (receiver recordingReceiver) Receive(_ context.Context, userID uuid.UUID, data json.RawMessage) error {
+	receiver.frames <- receivedFrame{userID: userID, data: string(data)}
+	return nil
+}
+
+func newReceivingFixture(t *testing.T) (socketFixture, recordingReceiver) {
+	t.Helper()
+	userID := uuid.New()
+	service := NewRealtimeService()
+	receiver := recordingReceiver{frames: make(chan receivedFrame, 200)}
+	handler := NewHTTPHandler(service, tokenAuthenticator{"good": userID}, []string{"https://app.example.test"}).
+		WithReceiver("typing", receiver)
+	server := httptest.NewServer(http.HandlerFunc(handler.Connect))
+	t.Cleanup(server.Close)
+	return socketFixture{server: server, service: service, userID: userID}, receiver
+}
+
+func signedInSocket(t *testing.T, fixture socketFixture) *websocket.Conn {
+	t.Helper()
+	conn, err := fixture.dial(t, "https://app.example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sendText(t, conn, `{"type":"auth","token":"good"}`)
+	if frame := readFrame(t, conn); frame.Type != FrameReady {
+		t.Fatalf("expected ready, got %+v", frame)
+	}
+	return conn
+}
+
+func TestTypingFramesFromTheBrowserReachTheirReceiverAsTheSignedInUser(t *testing.T) {
+	fixture, receiver := newReceivingFixture(t)
+	conn := signedInSocket(t, fixture)
+
+	sendText(t, conn, `{"type":"typing","data":{"conversation_id":"c1","draft":"hi"}}`)
+
+	select {
+	case got := <-receiver.frames:
+		if got.userID != fixture.userID || !strings.Contains(got.data, `"draft":"hi"`) {
+			t.Fatalf("received %+v", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("typing frame never reached the receiver")
+	}
+}
+
+func TestFramesWithNoReceiverAreIgnoredAndTheSocketStaysOpen(t *testing.T) {
+	fixture, receiver := newReceivingFixture(t)
+	conn := signedInSocket(t, fixture)
+
+	sendText(t, conn, `{"type":"message.send","data":{"body":"nope"}}`)
+	sendText(t, conn, `not json`)
+	sendText(t, conn, `{"type":"typing","data":{}}`)
+
+	select {
+	case <-receiver.frames:
+	case <-time.After(3 * time.Second):
+		t.Fatal("socket stopped reading after an unknown frame")
+	}
+	fixture.service.Publish(fixture.userID, "message", nil)
+	if frame := readFrame(t, conn); frame.Type != "message" {
+		t.Fatalf("socket no longer delivers frames, got %+v", frame)
+	}
+}
+
+func TestAFloodOfFramesIsCappedPerConnection(t *testing.T) {
+	fixture, receiver := newReceivingFixture(t)
+	conn := signedInSocket(t, fixture)
+
+	for range maxInboundPerWindow + 40 {
+		sendText(t, conn, `{"type":"typing","data":{}}`)
+	}
+	fixture.service.Publish(fixture.userID, "message", nil)
+	readFrame(t, conn)
+	time.Sleep(100 * time.Millisecond)
+
+	if got := len(receiver.frames); got > maxInboundPerWindow {
+		t.Fatalf("receiver handled %d frames, cap is %d", got, maxInboundPerWindow)
+	}
+}
+
+func TestInboundBudgetRefillsEachWindow(t *testing.T) {
+	budget := inboundBudget{}
+	start := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	for range maxInboundPerWindow {
+		if !budget.spend(start) {
+			t.Fatal("budget ran out early")
+		}
+	}
+	if budget.spend(start) {
+		t.Fatal("budget must refuse past the cap")
+	}
+	if !budget.spend(start.Add(inboundWindow)) {
+		t.Fatal("budget must refill in the next window")
+	}
+}
+
+func TestFocusFrameSetsTheConnectionsOpenChat(t *testing.T) {
+	fixture, _ := newReceivingFixture(t)
+	conn := signedInSocket(t, fixture)
+
+	sendText(t, conn, `{"type":"focus","data":{"topic":"conversation:a"}}`)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !fixture.service.Focused(fixture.userID, "conversation:a") {
+		if time.Now().After(deadline) {
+			t.Fatal("focus frame was not applied")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	sendText(t, conn, `{"type":"focus","data":{"topic":"`+strings.Repeat("x", maxTopicBytes+1)+`"}}`)
+	time.Sleep(100 * time.Millisecond)
+	if !fixture.service.Focused(fixture.userID, "conversation:a") {
+		t.Fatal("an oversized topic must be ignored")
+	}
+}

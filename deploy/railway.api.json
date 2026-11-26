@@ -1,0 +1,13 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "buildCommand": "go build -o server ."
+  },
+  "deploy": {
+    "startCommand": "./server",
+    "healthcheckPath": "/ready",
+    "healthcheckTimeout": 120,
+    "restartPolicyType": "ALWAYS",
+    "drainingSeconds": 15
+  }
+}

@@ -64,7 +64,8 @@ will never run it for you.
 
 ## 3. The migrate service
 
-Create a Railway service from the same repo. In its settings:
+Create a Railway service from the same repo. In its settings, set
+**Config file path** to `/deploy/railway.migrate.json`, which sets:
 
 - **Build command:** `go build -o migrate ./cmd/migrate`
 - **Start command:** `./migrate up`
@@ -90,10 +91,19 @@ changes before the code that depends on them goes live.
 
 ## 4. The api service
 
-Create a second Railway service from the same repo.
+Create a second Railway service from the same repo and set its **Config
+file path** to `/deploy/railway.api.json`. That file sets:
 
 - **Build command:** `go build -o server .`
 - **Start command:** `./server`
+- **Healthcheck:** `GET /ready`, with 120 seconds to pass
+- **Restart policy:** Always
+- **Draining:** 15 seconds between SIGTERM and SIGKILL
+
+Neither service may use the default `/railway.json` path: both build from this
+repo, and one root file would give the migrate service the api's restart policy.
+The dashboard cannot override a value the config file sets.
+
 - **Variables** (service-scoped; notice `MIGRATION_DATABASE_URL` is absent
   — this service has no way to reach the database as the migrator role,
   by construction, not just by convention):
@@ -115,24 +125,6 @@ Create a second Railway service from the same repo.
   - Optional `ID_FINGERPRINT_KEY` (at least 32 random characters) turns on
     detection of one person on several accounts. Keep it stable: changing it
     stops new checks matching earlier ones.
-  - Optional `PERSONA_PROPERTY_TEMPLATE_ID` turns on automatic ownership
-    document checks. Without it hosts upload and an admin reviews. Checked files
-    stay in Persona and are never copied to our storage. In the Persona dashboard:
-    1. Create an inquiry template that only collects a document (Document
-       Verification), limited to utility bills, deeds and property tax
-       bills, with the fraud and recency checks you want turned on.
-    2. Add text extractions named exactly `owner_name`, `property_address` and
-       `issue_date` (formatted `YYYY-MM-DD`). The server compares the first two
-       with the host's ID name and the listing address. A missing or differently
-       named extraction sends the document to manual review. Only deeds, and
-       property tax bills issued in the last 90 days, can be approved without an
-       admin.
-    3. Keep the same webhook, subscribed to `inquiry.completed`,
-       `inquiry.approved`, `inquiry.failed`, `inquiry.declined` and
-       `inquiry.marked-for-review`, with related objects included (documents and
-       verifications).
-    4. In sandbox, run one passing and one mismatched deed and confirm the
-       first is approved and the second appears at `/admin/property-proofs`.
   - `ID_RETENTION_DAYS` (default 30), `ID_HOLD_CAP_DAYS` (default 1095),
     `ID_PURGE_INTERVAL` (default 6h), `ID_PURGE_BATCH` (default 50),
     `ID_PURGE_ENABLED` (default true) — the ID deletion job. Do not also turn on
@@ -169,9 +161,29 @@ Create a second Railway service from the same repo.
     category.
   - `PORT`, optional `LOG_LEVEL`
   - Firebase variables and `BASE_URL` are no longer read and must not be set.
-- **Health checks:** point Railway's healthcheck at `GET /ready` (checks the
-  database) and leave `GET /health` for an external uptime monitor that
-  should stay green even during a database outage.
+- **Health checks:** Railway's healthcheck uses `GET /ready` (checks the
+  database). Leave `GET /health` for an external uptime monitor that should
+  stay green even during a database outage.
+
+### How the api stays up
+
+- **Database not ready at boot.** The server retries the first connection with
+  backoff (0.5s doubling to 8s) for up to 60 seconds before exiting. A wrong
+  role or a bad `DATABASE_URL` fails at once instead.
+- **Dropped connections.** The pool checks idle connections every 30 seconds,
+  drops dead ones and opens new ones. Connections are recycled every 30 to 33
+  minutes, spread out so they don't all reconnect together.
+- **A blip mid-request.** Starting a transaction is retried up to 3 times when
+  a connection can't be opened or failed before anything was sent. Statements
+  inside a transaction are never retried, so a write never runs twice.
+- **A background job panics.** ID redaction, document retention, verification
+  pauses, settlement and trip updates each restart on their own (1s backoff
+  doubling to 1 minute). The panic is logged at error level, which sends it to
+  Sentry. Requests keep being served meanwhile.
+- **The process exits.** Railway restarts it (restart policy Always). On a
+  redeploy, Railway sends SIGTERM; the server stops taking connections,
+  finishes requests for up to 10 seconds, stops the jobs and closes the pool,
+  inside the 15-second draining window.
 
 ## US-only access and the waitlist
 

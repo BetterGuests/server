@@ -33,11 +33,17 @@ type CancellationService struct {
 	gateway   Gateway
 	holds     HoldReleaser
 	publisher Publisher
+	photos    PhotoSigner
 	now       func() time.Time
 }
 
 func NewCancellationService(store Store, gateway Gateway, holds HoldReleaser, publisher Publisher) *CancellationService {
 	return &CancellationService{store: store, gateway: gateway, holds: holds, publisher: publisher, now: time.Now}
+}
+
+func (service *CancellationService) WithListingPhotos(photos PhotoSigner) *CancellationService {
+	service.photos = photos
+	return service
 }
 
 func (service *CancellationService) Options(ctx context.Context, actorID, bookingID uuid.UUID) (Options, error) {
@@ -161,7 +167,26 @@ func (service *CancellationService) AdminListings(ctx context.Context, adminID u
 		return nil, err
 	}
 	since := service.now().UTC().Add(-HostCancellationPeriod)
-	return service.store.AdminListings(ctx, adminID, since, maxListedListings)
+	listings, err := service.store.AdminListings(ctx, adminID, since, maxListedListings)
+	if err != nil {
+		return nil, err
+	}
+	for index := range listings {
+		listings[index].CoverPhotoURL = service.signedCoverPhoto(ctx, listings[index])
+	}
+	return listings, nil
+}
+
+func (service *CancellationService) signedCoverPhoto(ctx context.Context, listing AdminListing) string {
+	if service.photos == nil || listing.CoverPhotoKey == "" {
+		return ""
+	}
+	url, err := service.photos.PresignDownload(ctx, listing.CoverPhotoKey, coverPhotoURLLifetime)
+	if err != nil {
+		slog.Error("presign listing cover photo", "listing_id", listing.ListingID, "error", err)
+		return ""
+	}
+	return url
 }
 
 func (service *CancellationService) PauseListing(ctx context.Context, adminID, listingID uuid.UUID, reason string) error {

@@ -55,6 +55,7 @@ const (
 	maxNoteRunes            = 1000
 	maxListedReports        = 100
 	maxListedListings       = 200
+	coverPhotoURLLifetime   = time.Hour
 	maxPauseReasonRunes     = 200
 	listingEventKind        = "listing"
 	jobBatchSize            = 100
@@ -145,6 +146,8 @@ type AdminListing struct {
 	Reason            string     `json:"reason,omitempty"`
 	PausedAt          *time.Time `json:"paused_at,omitempty"`
 	HostCancellations int        `json:"host_cancellations"`
+	CoverPhotoKey     string     `json:"-"`
+	CoverPhotoURL     string     `json:"cover_photo_url,omitempty"`
 }
 
 type ListingEvent struct {
@@ -198,6 +201,10 @@ type Gateway interface {
 
 type HoldReleaser interface {
 	Release(ctx context.Context, actorID, bookingID uuid.UUID) error
+}
+
+type PhotoSigner interface {
+	PresignDownload(ctx context.Context, key string, expires time.Duration) (string, error)
 }
 
 type Publisher interface {

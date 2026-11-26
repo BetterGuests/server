@@ -54,14 +54,39 @@ func (stub *openerStub) Open(_ context.Context, _ uuid.UUID, target OpenTarget) 
 }
 
 type senderStub struct {
-	message Message
-	err     error
-	body    string
+	message            Message
+	err                error
+	body               string
+	draft              Draft
+	deleted            uuid.UUID
+	emoji              string
+	reactions          []Reaction
+	typed              bool
+	typingConversation uuid.UUID
+	typingUpdate       TypingUpdate
 }
 
-func (stub *senderStub) Send(_ context.Context, _, _ uuid.UUID, body string) (Message, error) {
-	stub.body = body
+func (stub *senderStub) Send(_ context.Context, _, _ uuid.UUID, draft Draft) (Message, error) {
+	stub.body = draft.Body
+	stub.draft = draft
 	return stub.message, stub.err
+}
+
+func (stub *senderStub) Delete(_ context.Context, _, _, messageID uuid.UUID) error {
+	stub.deleted = messageID
+	return stub.err
+}
+
+func (stub *senderStub) React(_ context.Context, _, _, _ uuid.UUID, emoji string) ([]Reaction, error) {
+	stub.emoji = emoji
+	return stub.reactions, stub.err
+}
+
+func (stub *senderStub) Typing(_ context.Context, _, conversationID uuid.UUID, update TypingUpdate) error {
+	stub.typed = stub.err == nil
+	stub.typingConversation = conversationID
+	stub.typingUpdate = update
+	return stub.err
 }
 
 func newHandler(inbox *inboxStub, opener *openerStub, sender *senderStub) *HTTPHandler {
@@ -86,6 +111,9 @@ func TestEveryRouteRequiresAnAuthenticatedUser(t *testing.T) {
 		"messages": handler.ListMessages,
 		"send":     handler.SendMessage,
 		"read":     handler.MarkRead,
+		"delete":   handler.DeleteMessage,
+		"react":    handler.ReactToMessage,
+		"typing":   handler.Typing,
 	}
 	for name, serve := range routes {
 		response := httptest.NewRecorder()
@@ -252,5 +280,136 @@ func TestMarkReadReturnsNoContent(t *testing.T) {
 
 	if response.Code != http.StatusNoContent || !inbox.markedRead {
 		t.Fatalf("status = %d, marked = %v", response.Code, inbox.markedRead)
+	}
+}
+
+func messageRequest(method, body, messageID string) *http.Request {
+	r := request(method, "/", body, true)
+	r.SetPathValue("message_id", messageID)
+	return r
+}
+
+func TestSendMessagePassesTheClientIDAndReplyTarget(t *testing.T) {
+	sender := &senderStub{}
+	handler := newHandler(&inboxStub{}, &openerStub{}, sender)
+	id, replyTo := uuid.New(), uuid.New()
+	response := httptest.NewRecorder()
+
+	handler.SendMessage(response, request(http.MethodPost, "/", `{"id":"`+id.String()+`","body":"hi","reply_to_id":"`+replyTo.String()+`"}`, true))
+
+	if response.Code != http.StatusCreated {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	if sender.draft.ID != id || sender.draft.ReplyToID != replyTo {
+		t.Fatalf("draft = %+v", sender.draft)
+	}
+}
+
+func TestDeleteMessageReturnsNoContent(t *testing.T) {
+	sender := &senderStub{}
+	handler := newHandler(&inboxStub{}, &openerStub{}, sender)
+	messageID := uuid.New()
+	response := httptest.NewRecorder()
+
+	handler.DeleteMessage(response, messageRequest(http.MethodDelete, "", messageID.String()))
+
+	if response.Code != http.StatusNoContent || sender.deleted != messageID {
+		t.Fatalf("status = %d, deleted = %s", response.Code, sender.deleted)
+	}
+}
+
+func TestDeleteMessageThatIsNotYoursIsNotFound(t *testing.T) {
+	handler := newHandler(&inboxStub{}, &openerStub{}, &senderStub{err: ErrMessageNotFound})
+	response := httptest.NewRecorder()
+
+	handler.DeleteMessage(response, messageRequest(http.MethodDelete, "", uuid.NewString()))
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", response.Code)
+	}
+}
+
+func TestMessageIDMustBeAUUID(t *testing.T) {
+	handler := newHandler(&inboxStub{}, &openerStub{}, &senderStub{})
+	response := httptest.NewRecorder()
+
+	handler.ReactToMessage(response, messageRequest(http.MethodPost, `{"emoji":"👍"}`, "nope"))
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", response.Code)
+	}
+}
+
+func TestReactToMessageReturnsTheReactions(t *testing.T) {
+	sender := &senderStub{reactions: []Reaction{{Emoji: "👍", Role: RoleHost}}}
+	handler := newHandler(&inboxStub{}, &openerStub{}, sender)
+	response := httptest.NewRecorder()
+
+	handler.ReactToMessage(response, messageRequest(http.MethodPost, `{"emoji":"👍"}`, uuid.NewString()))
+
+	if response.Code != http.StatusOK || sender.emoji != "👍" {
+		t.Fatalf("status = %d, emoji = %q", response.Code, sender.emoji)
+	}
+	if !strings.Contains(response.Body.String(), `"role":"host"`) {
+		t.Fatalf("body = %s", response.Body.String())
+	}
+}
+
+func TestUnknownReactionIsABadRequest(t *testing.T) {
+	handler := newHandler(&inboxStub{}, &openerStub{}, &senderStub{err: ErrInvalidReaction})
+	response := httptest.NewRecorder()
+
+	handler.ReactToMessage(response, messageRequest(http.MethodPost, `{"emoji":"🦄"}`, uuid.NewString()))
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", response.Code)
+	}
+}
+
+func TestTypingReturnsNoContent(t *testing.T) {
+	sender := &senderStub{}
+	handler := newHandler(&inboxStub{}, &openerStub{}, sender)
+	response := httptest.NewRecorder()
+
+	handler.Typing(response, request(http.MethodPost, "/", "", true))
+
+	if response.Code != http.StatusNoContent || !sender.typed {
+		t.Fatalf("status = %d, typed = %v", response.Code, sender.typed)
+	}
+}
+
+func TestTypingFrameFromTheSocketCarriesTheDraft(t *testing.T) {
+	typist := &senderStub{}
+	conversationID := uuid.New()
+
+	err := NewTypingReceiver(typist).Receive(context.Background(), uuid.New(),
+		[]byte(`{"conversation_id":"`+conversationID.String()+`","draft":"See you at 4"}`))
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if typist.typingConversation != conversationID || typist.typingUpdate.Draft != "See you at 4" || typist.typingUpdate.Idle {
+		t.Fatalf("typing = %s %+v", typist.typingConversation, typist.typingUpdate)
+	}
+}
+
+func TestTypingFrameWithoutAConversationIsRefused(t *testing.T) {
+	typist := &senderStub{}
+
+	err := NewTypingReceiver(typist).Receive(context.Background(), uuid.New(), []byte(`{"draft":"hi"}`))
+
+	if !errors.Is(err, ErrInvalidConversation) || typist.typed {
+		t.Fatalf("err = %v, typed = %v", err, typist.typed)
+	}
+}
+
+func TestHTTPTypingPingCarriesNoDraft(t *testing.T) {
+	typist := &senderStub{}
+	handler := newHandler(&inboxStub{}, &openerStub{}, typist)
+
+	handler.Typing(httptest.NewRecorder(), request(http.MethodPost, "/", "", true))
+
+	if typist.typingUpdate != (TypingUpdate{}) {
+		t.Fatalf("update = %+v", typist.typingUpdate)
 	}
 }

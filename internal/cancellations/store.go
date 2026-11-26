@@ -299,7 +299,9 @@ func (store *PostgresCancellationStore) AdminListings(ctx context.Context, admin
 			`SELECT l.id, l.title, COALESCE(l.host_name, ''), COALESCE(l.city, ''), l.status,
 			        s.listing_id IS NOT NULL, COALESCE(s.reason, ''), s.created_at,
 			        (SELECT count(*)::integer FROM app.booking_cancellations c
-			         WHERE c.listing_id = l.id AND c.cancelled_by = 'host' AND c.created_at > $1)
+			         WHERE c.listing_id = l.id AND c.cancelled_by = 'host' AND c.created_at > $1),
+			        COALESCE((SELECT p.object_key FROM app.listing_photos p
+			                  WHERE p.listing_id = l.id AND p.screening = 'passed' ORDER BY p.position LIMIT 1), '')
 			 FROM app.listings l
 			 LEFT JOIN app.listing_suspensions s ON s.listing_id = l.id AND s.lifted_at IS NULL
 			 WHERE l.status = 'published' OR s.listing_id IS NOT NULL
@@ -314,6 +316,7 @@ func (store *PostgresCancellationStore) AdminListings(ctx context.Context, admin
 			if err := rows.Scan(
 				&listing.ListingID, &listing.Title, &listing.HostName, &listing.City, &listing.Status,
 				&listing.Paused, &listing.Reason, &listing.PausedAt, &listing.HostCancellations,
+				&listing.CoverPhotoKey,
 			); err != nil {
 				return err
 			}

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -15,22 +17,75 @@ var (
 	ErrConversationNotFound = errors.New("conversation not found")
 	ErrInvalidConversation  = errors.New("invalid conversation")
 	ErrInvalidMessage       = errors.New("invalid message")
+	ErrMessageNotFound      = errors.New("message not found")
+	ErrInvalidReaction      = errors.New("invalid reaction")
 )
+
+var reactionEmoji = []string{"👍", "❤️", "😂", "😮", "😢", "🙏"}
 
 type MessageService struct {
 	store     Store
 	publisher Publisher
+	focus     FocusTracker
 	now       func() time.Time
 	newID     func() uuid.UUID
+
+	typingMu sync.Mutex
+	typing   map[typist]typingSeen
 }
 
 func NewMessageService(store Store) *MessageService {
-	return &MessageService{store: store, now: time.Now, newID: uuid.New}
+	return &MessageService{store: store, now: time.Now, newID: uuid.New, typing: make(map[typist]typingSeen)}
 }
 
 func (service *MessageService) WithPublisher(publisher Publisher) *MessageService {
 	service.publisher = publisher
 	return service
+}
+
+func (service *MessageService) WithFocus(focus FocusTracker) *MessageService {
+	service.focus = focus
+	return service
+}
+
+func ConversationTopic(conversationID uuid.UUID) string {
+	return conversationTopicPrefix + conversationID.String()
+}
+
+func (service *MessageService) FocusChanged(ctx context.Context, userID uuid.UUID, topic string, present bool) {
+	conversationID, ok := conversationFromTopic(topic)
+	if !ok || service.focus == nil {
+		return
+	}
+	participants, err := service.membership(ctx, userID, conversationID)
+	if err != nil {
+		return
+	}
+	role, counterparty, counterpartyRole := sides(participants, userID)
+	service.focus.PublishFocused(counterparty, topic, PresenceEventKind, PresenceEvent{
+		ConversationID: conversationID, Role: role, Here: present,
+	})
+	if present && service.focus.Focused(counterparty, topic) {
+		service.focus.PublishFocused(userID, topic, PresenceEventKind, PresenceEvent{
+			ConversationID: conversationID, Role: counterpartyRole, Here: true,
+		})
+	}
+}
+
+func conversationFromTopic(topic string) (uuid.UUID, bool) {
+	raw, found := strings.CutPrefix(topic, conversationTopicPrefix)
+	if !found {
+		return uuid.Nil, false
+	}
+	conversationID, err := uuid.Parse(raw)
+	return conversationID, err == nil
+}
+
+func sides(participants Participants, actorID uuid.UUID) (Role, uuid.UUID, Role) {
+	if participants.HostID == actorID {
+		return RoleHost, participants.GuestID, RoleGuest
+	}
+	return RoleGuest, participants.HostID, RoleHost
 }
 
 func (service *MessageService) Open(ctx context.Context, actorID uuid.UUID, target OpenTarget) (Summary, error) {
@@ -70,30 +125,144 @@ func (service *MessageService) Messages(
 	return MessagePage{Messages: oldestFirst(fetched), HasMore: hasMore}, nil
 }
 
-func (service *MessageService) Send(ctx context.Context, actorID, conversationID uuid.UUID, body string) (Message, error) {
-	body, err := cleanBody(body)
+func (service *MessageService) Send(ctx context.Context, actorID, conversationID uuid.UUID, draft Draft) (Message, error) {
+	body, err := cleanBody(draft.Body)
 	if err != nil {
 		return Message{}, err
 	}
-	message, participants, err := service.store.Insert(ctx, actorID, conversationID, service.newID(), body, service.now().UTC())
+	draft.Body = body
+	if draft.ID == uuid.Nil {
+		draft.ID = service.newID()
+	}
+	message, participants, created, err := service.store.Insert(ctx, actorID, conversationID, draft, service.now().UTC())
 	if err != nil {
 		return Message{}, err
 	}
-	service.broadcast(participants, message)
+	if created {
+		service.forgetTyping(actorID, conversationID)
+		service.publishToBoth(participants, MessageEventKind, MessageEvent{ConversationID: message.ConversationID, Message: message})
+	}
 	return message, nil
+}
+
+func (service *MessageService) Delete(ctx context.Context, actorID, conversationID, messageID uuid.UUID) error {
+	participants, err := service.store.Delete(ctx, actorID, conversationID, messageID)
+	if err != nil {
+		return err
+	}
+	service.publishToBoth(participants, MessageDeletedEventKind, MessageDeletedEvent{ConversationID: conversationID, MessageID: messageID})
+	return nil
+}
+
+func (service *MessageService) React(ctx context.Context, actorID, conversationID, messageID uuid.UUID, emoji string) ([]Reaction, error) {
+	if !slices.Contains(reactionEmoji, emoji) {
+		return nil, fmt.Errorf("%w: pick one of %s", ErrInvalidReaction, strings.Join(reactionEmoji, " "))
+	}
+	reactions, participants, err := service.store.ToggleReaction(ctx, actorID, conversationID, messageID, service.newID(), emoji, service.now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	service.publishToBoth(participants, ReactionsEventKind, ReactionsEvent{ConversationID: conversationID, MessageID: messageID, Reactions: reactions})
+	return reactions, nil
+}
+
+func (service *MessageService) Typing(ctx context.Context, actorID, conversationID uuid.UUID, update TypingUpdate) error {
+	draft, err := cleanDraft(update.Draft)
+	if err != nil {
+		return err
+	}
+	key := typist{actorID: actorID, conversationID: conversationID}
+	now := service.now()
+	seen, send := service.claimTypingSlot(key, now, update.Idle)
+	if !send {
+		return nil
+	}
+	participants := seen.participants
+	if now.Sub(seen.checkedAt) >= typingMembershipTTL {
+		participants, err = service.store.Participants(ctx, actorID, conversationID)
+		if err != nil {
+			service.forgetTyping(actorID, conversationID)
+			return err
+		}
+		service.rememberMembership(key, participants, now)
+	}
+	if service.focus == nil {
+		return nil
+	}
+	role, counterparty, _ := sides(participants, actorID)
+	service.focus.PublishFocused(counterparty, ConversationTopic(conversationID), TypingEventKind, TypingEvent{
+		ConversationID: conversationID, Role: role, Draft: draft, Idle: update.Idle,
+	})
+	return nil
+}
+
+func (service *MessageService) membership(ctx context.Context, actorID, conversationID uuid.UUID) (Participants, error) {
+	key := typist{actorID: actorID, conversationID: conversationID}
+	now := service.now()
+	service.typingMu.Lock()
+	seen, known := service.typing[key]
+	service.typingMu.Unlock()
+	if known && now.Sub(seen.checkedAt) < typingMembershipTTL {
+		return seen.participants, nil
+	}
+	participants, err := service.store.Participants(ctx, actorID, conversationID)
+	if err != nil {
+		return Participants{}, err
+	}
+	service.rememberMembership(key, participants, now)
+	return participants, nil
+}
+
+func (service *MessageService) claimTypingSlot(key typist, now time.Time, idle bool) (typingSeen, bool) {
+	service.typingMu.Lock()
+	defer service.typingMu.Unlock()
+	seen, known := service.typing[key]
+	if known && !idle && now.Sub(seen.lastSent) < typingThrottle {
+		return seen, false
+	}
+	if !known && len(service.typing) >= maxTrackedTypists {
+		clear(service.typing)
+	}
+	seen.lastSent = now
+	service.typing[key] = seen
+	return seen, true
+}
+
+func (service *MessageService) rememberMembership(key typist, participants Participants, now time.Time) {
+	service.typingMu.Lock()
+	defer service.typingMu.Unlock()
+	seen := service.typing[key]
+	seen.participants = participants
+	seen.checkedAt = now
+	service.typing[key] = seen
+}
+
+func (service *MessageService) forgetTyping(actorID, conversationID uuid.UUID) {
+	service.typingMu.Lock()
+	defer service.typingMu.Unlock()
+	delete(service.typing, typist{actorID: actorID, conversationID: conversationID})
 }
 
 func (service *MessageService) MarkRead(ctx context.Context, actorID, conversationID uuid.UUID) error {
 	return service.store.MarkRead(ctx, actorID, conversationID, service.now().UTC())
 }
 
-func (service *MessageService) broadcast(participants Participants, message Message) {
+func cleanDraft(draft string) (string, error) {
+	if !utf8.ValidString(draft) {
+		return "", fmt.Errorf("%w: a draft must be valid text", ErrInvalidMessage)
+	}
+	if utf8.RuneCountInString(draft) > maxBodyRunes {
+		return string([]rune(draft)[:maxBodyRunes]), nil
+	}
+	return draft, nil
+}
+
+func (service *MessageService) publishToBoth(participants Participants, kind string, event any) {
 	if service.publisher == nil {
 		return
 	}
-	event := MessageEvent{ConversationID: message.ConversationID, Message: message}
-	service.publisher.Publish(participants.GuestID, MessageEventKind, event)
-	service.publisher.Publish(participants.HostID, MessageEventKind, event)
+	service.publisher.Publish(participants.GuestID, kind, event)
+	service.publisher.Publish(participants.HostID, kind, event)
 }
 
 func cleanBody(body string) (string, error) {

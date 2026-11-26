@@ -7,11 +7,19 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 	"time"
 
 	"github.com/BetterGuests/BetterGuests-Server/db"
 	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+const (
+	databaseStartupWait = 60 * time.Second
+	shutdownGracePeriod = 10 * time.Second
+	jobRestartFirst     = time.Second
+	jobRestartLimit     = time.Minute
 )
 
 type databasePinger interface {
@@ -62,7 +70,7 @@ func runServer(server *http.Server) error {
 
 	stop()
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGracePeriod)
 	defer cancel()
 
 	if err := server.Shutdown(shutdownCtx); err != nil {
@@ -75,6 +83,33 @@ func runServer(server *http.Server) error {
 
 	slog.Info("Server stopped gracefully")
 	return nil
+}
+
+func superviseJob(ctx context.Context, name string, job func(context.Context)) {
+	wait := jobRestartFirst
+	for {
+		if completed := runJobOnce(ctx, name, job); completed || ctx.Err() != nil {
+			return
+		}
+		slog.Error("Background job crashed, restarting", "job", name, "restart_in", wait)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+		wait = min(wait*2, jobRestartLimit)
+	}
+}
+
+func runJobOnce(ctx context.Context, name string, job func(context.Context)) (completed bool) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			slog.Error("Background job panicked", "job", name, "panic", recovered, "stack", string(debug.Stack()))
+			completed = false
+		}
+	}()
+	job(ctx)
+	return true
 }
 
 func logPoolStatsPeriodically(pool *pgxpool.Pool) {

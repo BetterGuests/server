@@ -270,7 +270,7 @@ func TestAWholeTripFromConfirmationToPublishedReviews(t *testing.T) {
 			t.Fatalf("not a trip note: %+v", message)
 		}
 	}
-	if _, err := trip.messages.Send(ctx, trip.guest, threads[0].ID, "Thanks again"); err != nil {
+	if _, err := trip.messages.Send(ctx, trip.guest, threads[0].ID, messages.Draft{Body: "Thanks again"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := trip.as(trip.guest,

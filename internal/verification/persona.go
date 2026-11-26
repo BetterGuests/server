@@ -39,9 +39,8 @@ func NewPersonaClient(config Config, client *http.Client) *PersonaClient {
 type createInquiryRequest struct {
 	Data struct {
 		Attributes struct {
-			TemplateID  string            `json:"inquiry-template-id"`
-			ReferenceID string            `json:"reference-id"`
-			Fields      map[string]string `json:"fields,omitempty"`
+			TemplateID  string `json:"inquiry-template-id"`
+			ReferenceID string `json:"reference-id"`
 		} `json:"attributes"`
 	} `json:"data"`
 	Meta struct {
@@ -61,22 +60,17 @@ type createInquiryResponse struct {
 }
 
 func (client *PersonaClient) CreateInquiry(ctx context.Context, templateID, referenceID string) (Inquiry, error) {
-	return client.createInquiry(ctx, templateID, referenceID, nil, false)
-}
-
-func (client *PersonaClient) CreatePrefilledInquiry(ctx context.Context, templateID, referenceID string, fields map[string]string) (Inquiry, error) {
-	return client.createInquiry(ctx, templateID, referenceID, fields, false)
+	return client.createInquiry(ctx, templateID, referenceID, false)
 }
 
 func (client *PersonaClient) CreateHandoffInquiry(ctx context.Context, templateID, referenceID string) (Inquiry, error) {
-	return client.createInquiry(ctx, templateID, referenceID, nil, true)
+	return client.createInquiry(ctx, templateID, referenceID, true)
 }
 
-func (client *PersonaClient) createInquiry(ctx context.Context, templateID, referenceID string, fields map[string]string, handoff bool) (Inquiry, error) {
+func (client *PersonaClient) createInquiry(ctx context.Context, templateID, referenceID string, handoff bool) (Inquiry, error) {
 	var payload createInquiryRequest
 	payload.Data.Attributes.TemplateID = templateID
 	payload.Data.Attributes.ReferenceID = referenceID
-	payload.Data.Attributes.Fields = fields
 	payload.Meta.AutoCreateInquirySession = !handoff
 	payload.Meta.AutoCreateOneTimeLink = handoff
 	body, err := json.Marshal(payload)

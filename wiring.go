@@ -30,6 +30,7 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/screening"
 	"github.com/BetterGuests/BetterGuests-Server/internal/settlements"
 	"github.com/BetterGuests/BetterGuests-Server/internal/stays"
+	"github.com/BetterGuests/BetterGuests-Server/internal/usermap"
 	"github.com/BetterGuests/BetterGuests-Server/internal/verification"
 	"github.com/BetterGuests/BetterGuests-Server/internal/waitlist"
 	"github.com/google/uuid"
@@ -88,7 +89,10 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		slog.Warn("one person on several accounts is not detected: ID_FINGERPRINT_KEY is not set")
 	}
 
-	messageService := messages.NewMessageService(messages.NewPostgresMessageStore(pool)).WithPublisher(realtimeService)
+	messageService := messages.NewMessageService(messages.NewPostgresMessageStore(pool)).
+		WithPublisher(realtimeService).
+		WithFocus(realtimeService)
+	realtimeService.WithFocusListener(messageService)
 
 	paymentConfig, err := payments.ConfigFromEnv()
 	if err != nil {
@@ -141,6 +145,9 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 	if err != nil {
 		return routeDeps{}, fmt.Errorf("photo storage configuration: %w", err)
 	}
+	if photos := listingObjectsFrom(objectStore); photos != nil {
+		cancellationService.WithListingPhotos(photos)
+	}
 	cashbackService := cashback.NewCashbackService(
 		cashback.NewPostgresCashbackStore(pool),
 		verificationStore,
@@ -170,19 +177,11 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 
 	proofStore := proofs.NewPostgresProofStore(pool)
 	proofService := proofs.NewProofService(proofStore, proofObjectsFrom(objectStore))
+	userDirectory, err := usermap.NewClerkDirectory(clerkConfig.SecretKey)
+	if err != nil {
+		return routeDeps{}, fmt.Errorf("clerk configuration: %w", err)
+	}
 	proofHandler := proofs.NewHTTPHandler(proofService, proofService, proofService, proofService, proofService)
-	checksEnabled := personaConfig.PropertyTemplateID != ""
-	var checkInquiries proofs.InquiryStarter
-	if checksEnabled {
-		checkInquiries = propertyInquiries{client: personaClient, templateID: personaConfig.PropertyTemplateID}
-	}
-	checkService := proofs.NewCheckService(proofStore, checkInquiries, currentIDs{checker: currentVerifier})
-	if checksEnabled {
-		proofHandler.WithChecks(checkService)
-	} else {
-		slog.Warn("listing documents are reviewed by hand: PERSONA_PROPERTY_TEMPLATE_ID is not set")
-	}
-	verificationService.WithOtherInquiries(propertyEvents{checks: checkService})
 
 	profileService := profiles.NewProfileService(profiles.NewPostgresProfileStore(pool), bannerObjectsFrom(objectStore))
 
@@ -200,7 +199,8 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		reviews:  reviews.NewHTTPHandler(reviewService, reviewService),
 		bookings: bookings.NewHTTPHandler(bookingService).WithReader(bookingService).WithResponder(bookingService),
 		messages: messages.NewHTTPHandler(messageService, messageService, messageService),
-		realtime: realtime.NewHTTPHandler(realtimeService, authService, origins),
+		realtime: realtime.NewHTTPHandler(realtimeService, authService, origins).
+			WithReceiver(messages.TypingEventKind, messages.NewTypingReceiver(messageService)),
 		cashback: cashback.NewHTTPHandler(cashbackService, cashbackService, cashbackService, cashbackService, cashbackService),
 		verification: verification.NewHTTPHandler(verificationService, verificationService).WithStatusReader(verificationStore).WithDeletion(deletionService).
 			WithReviews(verification.NewReviewService(verificationStore)),
@@ -214,6 +214,7 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		inbox:         notifications.NewHTTPHandler(notifications.NewNotificationService(notificationStore)),
 		tripUpdates:   journeyService,
 		cancellations: cancellations.NewHTTPHandler(cancellationService, cancellationService).WithListingDesk(cancellationService),
+		userMap:       usermap.NewHTTPHandler(usermap.NewUserMapService(userDirectory, proofService)),
 	}, nil
 }
 
@@ -416,34 +417,6 @@ func (objects listingObjects) Remove(ctx context.Context, key string) error {
 	return remover.Remove(ctx, key)
 }
 
-type propertyInquiries struct {
-	client     *verification.PersonaClient
-	templateID string
-}
-
-func (inquiries propertyInquiries) StartInquiry(ctx context.Context, referenceID string, fields map[string]string) (proofs.CheckTicket, error) {
-	inquiry, err := inquiries.client.CreatePrefilledInquiry(ctx, inquiries.templateID, referenceID, fields)
-	if err != nil {
-		return proofs.CheckTicket{}, err
-	}
-	return proofs.CheckTicket{InquiryID: inquiry.ID, SessionToken: inquiry.SessionToken}, nil
-}
-
-type currentIDs struct{ checker verification.CurrentChecker }
-
-func (ids currentIDs) HasCurrentID(ctx context.Context, accountID uuid.UUID) (bool, error) {
-	_, current, err := ids.checker.CurrentVerificationID(ctx, accountID)
-	return current, err
-}
-
-type propertyEvents struct{ checks *proofs.CheckService }
-
-func (events propertyEvents) Claim(ctx context.Context, inquiry verification.OtherInquiry) (bool, error) {
-	return events.checks.Process(ctx, proofs.CheckEvent{
-		AccountID: inquiry.AccountID, InquiryID: inquiry.InquiryID, Name: inquiry.EventName, Body: inquiry.Body,
-	})
-}
-
 func buildSettlementService(pool *pgxpool.Pool) (*settlements.SettlementService, error) {
 	paymentConfig, err := payments.ConfigFromEnv()
 	if err != nil {
@@ -470,6 +443,10 @@ func buildDocumentRetention(pool *pgxpool.Pool) (*proofs.FileRetentionService, e
 		files = remover
 	}
 	return proofs.NewFileRetentionService(proofs.NewPostgresProofStore(pool), files), nil
+}
+
+func buildVerificationPauses(pool *pgxpool.Pool) *verification.VerificationPauseService {
+	return verification.NewVerificationPauseService(verification.NewPostgresVerificationStore(pool))
 }
 
 func buildRedactionService(pool *pgxpool.Pool) (*verification.RedactionService, error) {

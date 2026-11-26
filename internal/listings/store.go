@@ -1,6 +1,7 @@
 package listings
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -258,17 +259,19 @@ func insertListingPhotos(ctx context.Context, tx pgx.Tx, listingID uuid.UUID, ph
 	objectKeys := make([]string, len(photos))
 	altTexts := make([]string, len(photos))
 	positions := make([]int32, len(photos))
+	screenings := make([]string, len(photos))
 	for index, photo := range photos {
 		ids[index] = photo.ID.String()
 		objectKeys[index] = photo.ObjectKey
 		altTexts[index] = photo.AltText
 		positions[index] = int32(photo.Position)
+		screenings[index] = string(cmp.Or(photo.Screening, ScreeningPassed))
 	}
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO app.listing_photos (id, listing_id, object_key, alt_text, position)
-		SELECT input.id::uuid, $2, input.object_key, NULLIF(input.alt_text, ''), input.position
-		FROM unnest($1::text[], $3::text[], $4::text[], $5::int[]) AS input(id, object_key, alt_text, position)
-	`, ids, listingID, objectKeys, altTexts, positions); err != nil {
+		INSERT INTO app.listing_photos (id, listing_id, object_key, alt_text, position, screening)
+		SELECT input.id::uuid, $2, input.object_key, NULLIF(input.alt_text, ''), input.position, input.screening
+		FROM unnest($1::text[], $3::text[], $4::text[], $5::int[], $6::text[]) AS input(id, object_key, alt_text, position, screening)
+	`, ids, listingID, objectKeys, altTexts, positions, screenings); err != nil {
 		return fmt.Errorf("insert listing photos: %w", err)
 	}
 	return nil
@@ -424,7 +427,7 @@ func attachChildren(ctx context.Context, tx pgx.Tx, listings []PublicListing) er
 func attachPhotos(ctx context.Context, tx pgx.Tx, listings []PublicListing, ids []uuid.UUID, position map[uuid.UUID]int) error {
 	rows, err := tx.Query(ctx, `
 		SELECT listing_id, id, object_key, coalesce(alt_text, ''), position
-		FROM app.listing_photos WHERE listing_id = ANY($1) ORDER BY listing_id, position`, ids)
+		FROM app.listing_photos WHERE listing_id = ANY($1) AND screening = 'passed' ORDER BY listing_id, position`, ids)
 	if err != nil {
 		return fmt.Errorf("query listing photos: %w", err)
 	}
@@ -482,13 +485,17 @@ func attachRules(ctx context.Context, tx pgx.Tx, listings []PublicListing, ids [
 }
 
 func requirePriceAndPhoto(ctx context.Context, tx pgx.Tx, listingID uuid.UUID) error {
-	var priced, pictured bool
+	var priced, pictured, unchecked bool
 	err := tx.QueryRow(ctx, `
 		SELECT l.nightly_price_cents IS NOT NULL,
-		       (SELECT count(*) FROM app.listing_photos p WHERE p.listing_id = l.id) >= $2
-		FROM app.listings l WHERE l.id = $1 FOR UPDATE`, listingID, minPublishPhotos).Scan(&priced, &pictured)
+		       (SELECT count(*) FROM app.listing_photos p WHERE p.listing_id = l.id) >= $2,
+		       EXISTS (SELECT 1 FROM app.listing_photos p WHERE p.listing_id = l.id AND p.screening <> 'passed')
+		FROM app.listings l WHERE l.id = $1 FOR UPDATE`, listingID, minPublishPhotos).Scan(&priced, &pictured, &unchecked)
 	if err != nil {
 		return fmt.Errorf("check price and photos: %w", err)
+	}
+	if unchecked {
+		return ErrPhotosRefused
 	}
 	if !priced {
 		return ErrPriceRequired
@@ -536,7 +543,7 @@ func (s *PostgresListingStore) Setup(ctx context.Context, userID string, listing
 			return err
 		}
 		rows, err := tx.Query(ctx, `
-			SELECT id, object_key, coalesce(alt_text, ''), position
+			SELECT id, object_key, coalesce(alt_text, ''), position, screening, coalesce(refusal, '')
 			FROM app.listing_photos WHERE listing_id = $1 ORDER BY position`, listingID)
 		if err != nil {
 			return fmt.Errorf("query listing photos: %w", err)
@@ -544,7 +551,7 @@ func (s *PostgresListingStore) Setup(ctx context.Context, userID string, listing
 		defer rows.Close()
 		for rows.Next() {
 			var photo ListingPhoto
-			if err := rows.Scan(&photo.ID, &photo.ObjectKey, &photo.AltText, &photo.Position); err != nil {
+			if err := rows.Scan(&photo.ID, &photo.ObjectKey, &photo.AltText, &photo.Position, &photo.Screening, &photo.Refusal); err != nil {
 				return fmt.Errorf("scan listing photo: %w", err)
 			}
 			found.Photos = append(found.Photos, photo)
@@ -602,7 +609,7 @@ func (s *PostgresListingStore) RemovePhoto(ctx context.Context, userID string, l
 			return nil
 		}
 		var remaining int
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM app.listing_photos WHERE listing_id = $1`, listingID).Scan(&remaining); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM app.listing_photos WHERE listing_id = $1 AND screening = 'passed'`, listingID).Scan(&remaining); err != nil {
 			return fmt.Errorf("count listing photos: %w", err)
 		}
 		if remaining < minPublishPhotos {
@@ -614,6 +621,26 @@ func (s *PostgresListingStore) RemovePhoto(ctx context.Context, userID string, l
 		return "", err
 	}
 	return key, nil
+}
+
+func (s *PostgresListingStore) RecordScreening(ctx context.Context, userID string, listingID uuid.UUID, verdict ScreeningVerdict) (bool, error) {
+	screening, objectKey, refusal := ScreeningPassed, verdict.ScreenedKey, ""
+	if verdict.Refusal != "" {
+		screening, objectKey, refusal = ScreeningRefused, verdict.UploadKey, string(verdict.Refusal)
+	}
+	var recorded bool
+	err := db.WithUserTx(ctx, s.DB, userID, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE app.listing_photos SET screening = $4, object_key = $5, refusal = NULLIF($6, '')
+			WHERE id = $1 AND listing_id = $2 AND object_key = $3 AND screening = 'pending'`,
+			verdict.PhotoID, listingID, verdict.UploadKey, screening, objectKey, refusal)
+		if err != nil {
+			return fmt.Errorf("record photo screening: %w", err)
+		}
+		recorded = tag.RowsAffected() == 1
+		return nil
+	})
+	return recorded, err
 }
 
 func (s *PostgresListingStore) SetPrice(ctx context.Context, userID string, listingID uuid.UUID, nightlyCents int) error {

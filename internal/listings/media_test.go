@@ -38,6 +38,21 @@ func (stub *mediaStoreStub) RemovePhoto(context.Context, string, uuid.UUID, uuid
 	return stub.removed, nil
 }
 
+func (stub *mediaStoreStub) RecordScreening(_ context.Context, _ string, _ uuid.UUID, verdict ScreeningVerdict) (bool, error) {
+	for index, photo := range stub.setup.Photos {
+		if photo.ID != verdict.PhotoID || photo.ObjectKey != verdict.UploadKey || photo.Screening != ScreeningPending {
+			continue
+		}
+		if verdict.Refusal != "" {
+			stub.setup.Photos[index].Screening, stub.setup.Photos[index].Refusal = ScreeningRefused, verdict.Refusal
+		} else {
+			stub.setup.Photos[index].Screening, stub.setup.Photos[index].ObjectKey = ScreeningPassed, verdict.ScreenedKey
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
 func (stub *mediaStoreStub) SetPrice(_ context.Context, _ string, _ uuid.UUID, nightlyCents int) error {
 	stub.price = nightlyCents
 	return nil
@@ -86,7 +101,9 @@ func (stub *photoObjectsStub) Remove(_ context.Context, key string) error {
 func mediaHarness() (*ListingService, *mediaStoreStub, *photoObjectsStub, uuid.UUID) {
 	store := &mediaStoreStub{owner: uuid.New(), setup: Setup{Status: Draft}}
 	objects := &photoObjectsStub{info: ObjectInfo{Size: 2048, ContentType: "image/jpeg"}}
-	return NewListingService(nil).WithMedia(store, objects), store, objects, uuid.New()
+	service := NewListingService(nil).WithMedia(store, objects)
+	service.inBackground = func(work func()) { work() }
+	return service, store, objects, uuid.New()
 }
 
 func ownKey(listingID uuid.UUID) string {

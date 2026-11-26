@@ -69,6 +69,11 @@ func (handler *HTTPHandler) PublishListing(w http.ResponseWriter, r *http.Reques
 		writeListingError(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, ErrDuplicateListing):
 		writeListingError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, ErrPhotosRefused):
+		writeListingError(w, http.StatusUnprocessableEntity, err.Error())
+	case errors.Is(err, ErrPhotoCheckFailed):
+		slog.Error("publish listing photo screening", "error", err)
+		writeListingError(w, http.StatusServiceUnavailable, "we could not check your photos right now, try again")
 	case err != nil:
 		slog.Error("publish listing", "error", err)
 		writeListingError(w, http.StatusInternalServerError, "could not publish listing")

@@ -12,10 +12,12 @@ const (
 	screeningDeadline = 22 * time.Second
 	screeningRetries  = 1
 	categoryProperty  = "property"
+	workspaceHeader   = "anthropic-workspace-id"
 )
 
 type Config struct {
-	APIKey string
+	APIKey      string
+	WorkspaceID string
 }
 
 type verdictPayload struct {

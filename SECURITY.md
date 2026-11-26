@@ -196,7 +196,7 @@ equally deep. A few are worth reading before you trust them blindly:
 
 - A check counts only while it passed, is not revoked, is not waiting for or
   refused at review, and is under 365 days old. Booking, publishing, approving a
-  booking and starting a document check need such a check. Earning cashback needs
+  booking need such a check. Earning cashback needs
   one that passed and was not revoked, at any age.
 - A check is held for an admin when the name differs from the last accepted ID or
   cannot be compared, the ID shows someone under 18, the identity is on another
@@ -209,45 +209,11 @@ equally deep. A few are worth reading before you trust them blindly:
 - The duplicate check stores an HMAC of name and birth date under
   `ID_FINGERPRINT_KEY`, never the birth date. It is deleted with the ID name.
 
-## Automatic property document checks
-
-- Only deeds, and property tax bills issued in the last 90 days, can skip an
-  admin. Utility bills and leases are always read by a person.
-- A proof is approved without an admin only when the signed Persona webhook says
-  the inquiry completed, the document verification passed with no failed check,
-  and the extracted name and address match the host's ID name and the listing.
-  The name must belong to one person on the document, and the state and unit must
-  agree. Everything else stays in the admin queue.
-- A Persona decline revokes the proof and stops that inquiry ever approving.
-  Admins can withdraw any approved proof.
-- Only inquiries this server created are accepted, tied to one host, listing and
-  address. `app.approve_persona_property_proof` is `SECURITY DEFINER` and limited
-  to that host's submitted proof while the listing address is unchanged. It
-  trusts the API to have verified the webhook first.
-- Checked document files stay in Persona. We store the result and the inquiry ID.
-  Admins open the inquiry in the Persona dashboard. Manual uploads are still kept
-  in our storage.
-- The ID deletion job redacts rejected document inquiries, inquiries that never
-  produced a result after `ID_RETENTION_DAYS`, and unapproved ones when a host
-  asks to delete ID data.
-- Manually uploaded files are deleted from storage by a six hourly job: rejected
-  ones on its next run, approved ones 90 days after approval, withdrawn approvals
-  90 days after withdrawal. The proof row stays.
-- Approved document inquiries are kept 90 days after approval for disputes, then
-  redacted. A host's deletion request does not shorten this, and identity holds do
-  not extend it. The listing stays approved.
-
-- A host may delete a draft listing that has ownership documents, unless an
-  approval on it was withdrawn in the last 90 days.
-  `app.release_draft_listing_documents` queues each stored file and Persona
-  inquiry for the deletion jobs, then removes the proof rows. The application
-  role still cannot delete a proof directly.
-
 ## Authority to list
 
 - A host states whether they own the home, own it through a company, manage it or
-  rent it. Only an owner's document can be approved automatically; the rest need
-  an admin, with the supporting files for that connection.
+  rent it. Every submission needs an admin, with the supporting files for that
+  connection. Persona checks identity only.
 - Managers and renters give the owner's name, a contact and an end date. The six
   hourly job withdraws approvals past that date, which pauses the listing.
 - Supporting files follow the main document's deletion schedule. Owner details are

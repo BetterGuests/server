@@ -183,21 +183,16 @@ func warmPool(ctx context.Context, pool *pgxpool.Pool, count int32, timeout time
 	}
 }
 
-// Open creates a database connection pool from a Config and checks that it
-// actually works before handing it back to the caller.
-//
-// A "pool" is just a reusable set of open database connections. Opening a
-// new connection for every request would be slow, so instead we open a
-// handful up front and hand them out as needed.
 func Open(ctx context.Context, config Config) (*pgxpool.Pool, error) {
 	poolConfig, err := pgxpool.ParseConfig(config.URL)
 	if err != nil {
-		return nil, fmt.Errorf("parse database URL: %w", err)
+		return nil, fmt.Errorf("%w: %w", errInvalidDatabase, err)
 	}
 
 	poolConfig.MaxConns = config.MaxConns
 	poolConfig.MinIdleConns = config.MinIdleConns
 	poolConfig.MaxConnLifetime = config.MaxConnLifetime
+	poolConfig.MaxConnLifetimeJitter = config.MaxConnLifetime / 10
 	poolConfig.MaxConnIdleTime = config.MaxConnIdleTime
 	poolConfig.HealthCheckPeriod = config.HealthCheck
 
@@ -225,8 +220,6 @@ func Open(ctx context.Context, config Config) (*pgxpool.Pool, error) {
 	}
 
 	if err := verifyPool(ctx, pool, config); err != nil {
-		// We opened the pool but it's not safe to use, so close it again
-		// instead of leaking connections.
 		pool.Close()
 		return nil, err
 	}
@@ -236,10 +229,6 @@ func Open(ctx context.Context, config Config) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
-// verifyPool checks that we can actually talk to the database, and that
-// we're connected as the role we expect (DB_EXPECTED_ROLE, not some admin
-// role). Asking for current_user already proves the connection is alive, so
-// no separate ping is needed.
 func verifyPool(ctx context.Context, pool *pgxpool.Pool, config Config) error {
 	queryCtx, cancel := context.WithTimeout(ctx, config.PingTimeout)
 	defer cancel()
@@ -249,47 +238,29 @@ func verifyPool(ctx context.Context, pool *pgxpool.Pool, config Config) error {
 		return fmt.Errorf("connect to database: %w", err)
 	}
 	if role != config.ExpectedRole {
-		return fmt.Errorf("connected as role %q, expected %q", role, config.ExpectedRole)
+		return fmt.Errorf("%w: got %q, expected %q", ErrUnexpectedRole, role, config.ExpectedRole)
 	}
 
 	return nil
 }
 
-// WithUserTx runs fn inside a single database transaction tagged with the
-// given user's ID. Use this for every query that touches user-owned data.
-//
-// Our tables use PostgreSQL Row-Level Security (RLS): the database refuses to
-// return rows that don't belong to the current user. To make that work, every
-// query tells Postgres "I am acting on behalf of this user" via the
-// transaction-local set_config call below. PostgreSQL wipes it clean on
-// commit or rollback, so one user's identity can't leak through a pooled
-// connection into the next request.
-//
-// If fn returns an error, we roll back and return that same error. Otherwise
-// we commit.
 func WithUserTx(
 	ctx context.Context,
 	db transactionBeginner,
 	userID string,
 	fn func(pgx.Tx) error,
 ) error {
-	// Fail fast on a malformed ID so it never reaches a query unchecked.
 	var parsedID pgtype.UUID
 	if err := parsedID.Scan(userID); err != nil || !parsedID.Valid {
 		return errInvalidUserID
 	}
 
-	tx, err := db.BeginTx(ctx, pgx.TxOptions{})
+	tx, err := beginWithRetry(ctx, db, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("begin user transaction: %w", err)
 	}
-	// Rollback unconditionally so an early return never leaves the
-	// transaction open. Rolling back after a successful commit is harmless.
-	// A fresh context is used because ctx may already be canceled here.
 	defer func() { _ = tx.Rollback(context.Background()) }()
 
-	// true means "only for this transaction", so the setting disappears
-	// automatically on commit or rollback.
 	var configuredID string
 	if err := tx.QueryRow(
 		ctx,
@@ -313,7 +284,7 @@ func WithPublicTx(
 	db transactionBeginner,
 	fn func(pgx.Tx) error,
 ) error {
-	tx, err := db.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	tx, err := beginWithRetry(ctx, db, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return fmt.Errorf("begin public transaction: %w", err)
 	}

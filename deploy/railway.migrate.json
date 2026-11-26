@@ -1,0 +1,10 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "buildCommand": "go build -o migrate ./cmd/migrate"
+  },
+  "deploy": {
+    "startCommand": "./migrate up",
+    "restartPolicyType": "NEVER"
+  }
+}

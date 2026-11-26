@@ -2,6 +2,7 @@ package messages
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -14,19 +15,28 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func TestEachSideOfAConversationSeesTheOtherPersonsPhoto(t *testing.T) {
+type conversationFixture struct {
+	ctx          context.Context
+	store        *PostgresMessageStore
+	host         uuid.UUID
+	guest        uuid.UUID
+	conversation uuid.UUID
+}
+
+func newConversationFixture(t *testing.T) conversationFixture {
+	t.Helper()
 	databaseURL := os.Getenv("TEST_DATABASE_URL")
 	if databaseURL == "" {
 		t.Skip("set TEST_DATABASE_URL through go run ./cmd/dev test")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
+	t.Cleanup(cancel)
 
 	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	people := accounts.NewPostgresAccountStore(pool)
 	join := func(name, photo string) uuid.UUID {
@@ -67,6 +77,13 @@ func TestEachSideOfAConversationSeesTheOtherPersonsPhoto(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	return conversationFixture{ctx: ctx, store: store, host: host, guest: guest, conversation: conversation}
+}
+
+func TestEachSideOfAConversationSeesTheOtherPersonsPhoto(t *testing.T) {
+	fixture := newConversationFixture(t)
+	ctx, store, host, guest, conversation := fixture.ctx, fixture.store, fixture.host, fixture.guest, fixture.conversation
+
 	for viewer, want := range map[uuid.UUID]string{host: "https://img.clerk.com/maria", guest: "https://img.clerk.com/luis"} {
 		summary, err := store.Get(ctx, viewer, conversation)
 		if err != nil {
@@ -75,5 +92,128 @@ func TestEachSideOfAConversationSeesTheOtherPersonsPhoto(t *testing.T) {
 		if summary.CounterpartyAvatarURL != want {
 			t.Fatalf("photo = %q, want %q", summary.CounterpartyAvatarURL, want)
 		}
+	}
+}
+
+func TestARetriedSendWithTheSameIDStoresOneMessage(t *testing.T) {
+	fixture := newConversationFixture(t)
+	draft := Draft{ID: uuid.New(), Body: "Is early check-in possible?"}
+
+	first, _, created, err := fixture.store.Insert(fixture.ctx, fixture.guest, fixture.conversation, draft, time.Now())
+	if err != nil || !created {
+		t.Fatalf("first insert: created=%v err=%v", created, err)
+	}
+	again, _, created, err := fixture.store.Insert(fixture.ctx, fixture.guest, fixture.conversation, draft, time.Now())
+	if err != nil || created || again.ID != first.ID {
+		t.Fatalf("retry: created=%v id=%s err=%v", created, again.ID, err)
+	}
+	if _, _, _, err := fixture.store.Insert(fixture.ctx, fixture.host, fixture.conversation, draft, time.Now()); !errors.Is(err, ErrInvalidMessage) {
+		t.Fatalf("someone else reusing the id: err = %v, want ErrInvalidMessage", err)
+	}
+	page, err := fixture.store.Messages(fixture.ctx, fixture.host, fixture.conversation, nil, 10)
+	if err != nil || len(page) != 1 {
+		t.Fatalf("messages = %d, err = %v", len(page), err)
+	}
+}
+
+func TestRepliesCarryAPreviewOfTheOriginal(t *testing.T) {
+	fixture := newConversationFixture(t)
+	original, _, _, err := fixture.store.Insert(fixture.ctx, fixture.guest, fixture.conversation, Draft{ID: uuid.New(), Body: "Do you have parking?"}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reply, _, _, err := fixture.store.Insert(fixture.ctx, fixture.host, fixture.conversation, Draft{ID: uuid.New(), Body: "Yes, two spots.", ReplyToID: original.ID}, time.Now().Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.ReplyTo == nil || reply.ReplyTo.ID != original.ID || reply.ReplyTo.Body != original.Body || reply.ReplyTo.SenderRole != RoleGuest {
+		t.Fatalf("reply preview = %+v", reply.ReplyTo)
+	}
+	if _, _, _, err := fixture.store.Insert(fixture.ctx, fixture.host, fixture.conversation, Draft{ID: uuid.New(), Body: "x", ReplyToID: uuid.New()}, time.Now()); !errors.Is(err, ErrMessageNotFound) {
+		t.Fatalf("reply to an unknown message: err = %v", err)
+	}
+}
+
+func TestOnlyTheSenderCanDeleteAndThePreviewMovesBack(t *testing.T) {
+	fixture := newConversationFixture(t)
+	start := time.Now()
+	if _, _, _, err := fixture.store.Insert(fixture.ctx, fixture.guest, fixture.conversation, Draft{ID: uuid.New(), Body: "first"}, start); err != nil {
+		t.Fatal(err)
+	}
+	second, _, _, err := fixture.store.Insert(fixture.ctx, fixture.guest, fixture.conversation, Draft{ID: uuid.New(), Body: "oops"}, start.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := fixture.store.Delete(fixture.ctx, fixture.host, fixture.conversation, second.ID); !errors.Is(err, ErrMessageNotFound) {
+		t.Fatalf("host deleting the guest's message: err = %v", err)
+	}
+	if _, err := fixture.store.Delete(fixture.ctx, fixture.guest, fixture.conversation, second.ID); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := fixture.store.Get(fixture.ctx, fixture.host, fixture.conversation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.LastMessagePreview != "first" {
+		t.Fatalf("preview = %q, want the message before the deleted one", summary.LastMessagePreview)
+	}
+}
+
+func TestReactionsToggleAndAreSeenByBothSides(t *testing.T) {
+	fixture := newConversationFixture(t)
+	message, _, _, err := fixture.store.Insert(fixture.ctx, fixture.guest, fixture.conversation, Draft{ID: uuid.New(), Body: "See you Friday"}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reactions, _, err := fixture.store.ToggleReaction(fixture.ctx, fixture.host, fixture.conversation, message.ID, uuid.New(), "❤️", time.Now())
+	if err != nil || len(reactions) != 1 || reactions[0].Role != RoleHost {
+		t.Fatalf("after adding: %+v, err = %v", reactions, err)
+	}
+	page, err := fixture.store.Messages(fixture.ctx, fixture.guest, fixture.conversation, nil, 10)
+	if err != nil || len(page) != 1 || len(page[0].Reactions) != 1 || page[0].Reactions[0].Emoji != "❤️" {
+		t.Fatalf("guest sees %+v, err = %v", page, err)
+	}
+	reactions, _, err = fixture.store.ToggleReaction(fixture.ctx, fixture.host, fixture.conversation, message.ID, uuid.New(), "❤️", time.Now())
+	if err != nil || len(reactions) != 0 {
+		t.Fatalf("after removing: %+v, err = %v", reactions, err)
+	}
+}
+
+func TestReplyMinutesNeedsThreeRepliesAndIsAveraged(t *testing.T) {
+	fixture := newConversationFixture(t)
+	start := time.Now().Add(-time.Hour)
+	at := start
+	exchange := func(gap time.Duration) {
+		t.Helper()
+		if _, _, _, err := fixture.store.Insert(fixture.ctx, fixture.guest, fixture.conversation, Draft{ID: uuid.New(), Body: "question"}, at); err != nil {
+			t.Fatal(err)
+		}
+		at = at.Add(gap)
+		if _, _, _, err := fixture.store.Insert(fixture.ctx, fixture.host, fixture.conversation, Draft{ID: uuid.New(), Body: "answer"}, at); err != nil {
+			t.Fatal(err)
+		}
+		at = at.Add(time.Minute)
+	}
+
+	exchange(4 * time.Minute)
+	exchange(6 * time.Minute)
+	summary, err := fixture.store.Get(fixture.ctx, fixture.guest, fixture.conversation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.CounterpartyReplyMins != nil {
+		t.Fatalf("two replies is too few to show, got %d", *summary.CounterpartyReplyMins)
+	}
+
+	exchange(8 * time.Minute)
+	summary, err = fixture.store.Get(fixture.ctx, fixture.guest, fixture.conversation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.CounterpartyReplyMins == nil || *summary.CounterpartyReplyMins != 6 {
+		t.Fatalf("reply minutes = %v, want 6", summary.CounterpartyReplyMins)
 	}
 }

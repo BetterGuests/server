@@ -31,13 +31,11 @@ const (
 )
 
 type Config struct {
-	APIKey        string
-	TemplateID    string
-	WebhookSecret string
-	BaseURL       string
-
-	PropertyTemplateID string
-	FingerprintKey     string
+	APIKey         string
+	TemplateID     string
+	WebhookSecret  string
+	BaseURL        string
+	FingerprintKey string
 }
 
 type ReviewState string
@@ -163,15 +161,4 @@ type WebhookProcessor interface {
 
 type ConsentChecker interface {
 	HasConsent(ctx context.Context, accountID uuid.UUID, kind string) (bool, error)
-}
-
-type OtherInquiry struct {
-	AccountID uuid.UUID
-	InquiryID string
-	EventName string
-	Body      []byte
-}
-
-type InquiryClaimer interface {
-	Claim(ctx context.Context, inquiry OtherInquiry) (bool, error)
 }

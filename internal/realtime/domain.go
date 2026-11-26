@@ -2,6 +2,7 @@ package realtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -14,14 +15,20 @@ const (
 	pingTimeout           = 10 * time.Second
 	writeTimeout          = 10 * time.Second
 	maxConnectionAge      = time.Hour
-	maxInboundFrameBytes  = 8 << 10
+	maxInboundFrameBytes  = 24 << 10
+	receiveTimeout        = 5 * time.Second
+	inboundWindow         = 5 * time.Second
+	maxInboundPerWindow   = 60
 	outboundBuffer        = 32
 	maxConnectionsPerUser = 8
+	maxTopicBytes         = 120
+	focusNoticeTimeout    = 5 * time.Second
 )
 
 const (
 	FrameAuth  = "auth"
 	FrameReady = "ready"
+	FrameFocus = "focus"
 )
 
 var (
@@ -34,6 +41,16 @@ type Frame struct {
 	Data any    `json:"data,omitempty"`
 }
 
+type inboundFrame struct {
+	Type string          `json:"type"`
+	Data json.RawMessage `json:"data"`
+}
+
+type inboundBudget struct {
+	windowStart time.Time
+	used        int
+}
+
 type authFrame struct {
 	Type  string `json:"type"`
 	Token string `json:"token"`
@@ -42,6 +59,25 @@ type authFrame struct {
 type Connection struct {
 	userID   uuid.UUID
 	outbound chan []byte
+	focus    string
+}
+
+type focusFrame struct {
+	Topic string `json:"topic"`
+}
+
+type focusChange struct {
+	userID  uuid.UUID
+	topic   string
+	present bool
+}
+
+type FocusListener interface {
+	FocusChanged(ctx context.Context, userID uuid.UUID, topic string, present bool)
+}
+
+type Receiver interface {
+	Receive(ctx context.Context, userID uuid.UUID, data json.RawMessage) error
 }
 
 type Authenticator interface {

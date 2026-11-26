@@ -5,8 +5,9 @@ import (
 	"errors"
 	"net/http"
 	"slices"
-	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 type screenerStub struct {
@@ -22,6 +23,31 @@ func (stub *screenerStub) Screen(context.Context, []byte, string) (PhotoRefusal,
 
 var jpegBytes = []byte("\xff\xd8\xff\xe0 pretend photo")
 
+func onlyPhoto(t *testing.T, store *mediaStoreStub) ListingPhoto {
+	t.Helper()
+	if len(store.setup.Photos) != 1 {
+		t.Fatalf("photos = %+v", store.setup.Photos)
+	}
+	return store.setup.Photos[0]
+}
+
+func TestUploadReturnsBeforeThePhotoIsChecked(t *testing.T) {
+	service, store, objects, listingID := mediaHarness()
+	objects.content = jpegBytes
+	screener := &screenerStub{}
+	service.WithScreening(screener)
+	var later []func()
+	service.inBackground = func(work func()) { later = append(later, work) }
+	setup, err := service.AddPhoto(context.Background(), store.owner, listingID, ownKey(listingID), "")
+	if err != nil || screener.calls != 0 || len(setup.Photos) != 1 || setup.Photos[0].Screening != ScreeningPending {
+		t.Fatalf("setup = %+v, err = %v, calls = %d", setup, err, screener.calls)
+	}
+	later[0]()
+	if screener.calls != 1 || onlyPhoto(t, store).Screening != ScreeningPassed {
+		t.Fatalf("calls = %d, photo = %+v", screener.calls, onlyPhoto(t, store))
+	}
+}
+
 func TestScreenedPhotoIsStoredUnderAKeyTheHostCannotOverwrite(t *testing.T) {
 	service, store, objects, listingID := mediaHarness()
 	objects.content = jpegBytes
@@ -30,7 +56,7 @@ func TestScreenedPhotoIsStoredUnderAKeyTheHostCannotOverwrite(t *testing.T) {
 	if _, err := service.AddPhoto(context.Background(), store.owner, listingID, upload, ""); err != nil {
 		t.Fatal(err)
 	}
-	stored := store.added[0].ObjectKey
+	stored := onlyPhoto(t, store).ObjectKey
 	if stored == upload || !validPhotoKey(stored, listingID) {
 		t.Fatalf("stored key = %q", stored)
 	}
@@ -39,50 +65,110 @@ func TestScreenedPhotoIsStoredUnderAKeyTheHostCannotOverwrite(t *testing.T) {
 	}
 }
 
-func TestPhotoThatFailsScreeningNeverReachesTheListing(t *testing.T) {
+func TestARefusedPhotoStaysOnTheListingWithItsReason(t *testing.T) {
 	cases := []struct {
-		name       string
-		screener   screenerStub
-		content    []byte
-		size       int64
-		want       error
-		status     int
-		keepUpload bool
+		name     string
+		screener screenerStub
+		content  []byte
+		want     PhotoRefusal
 	}{
-		{"refused by the screener", screenerStub{refusal: RefusedUnrelated}, jpegBytes, 2048, ErrPhotoNotAllowed, http.StatusUnprocessableEntity, false},
-		{"screener unavailable", screenerStub{err: errors.New("down")}, jpegBytes, 2048, ErrPhotoCheckFailed, http.StatusServiceUnavailable, true},
-		{"bytes are not an image", screenerStub{}, []byte("<html></html>"), 2048, ErrPhotoRejected, http.StatusBadRequest, false},
-		{"too large to check", screenerStub{}, jpegBytes, maxScreenedPhotoBytes + 1, ErrPhotoTooLargeToCheck, http.StatusUnprocessableEntity, false},
+		{"refused by the screener", screenerStub{refusal: RefusedUnrelated}, jpegBytes, RefusedUnrelated},
+		{"bytes are not an image", screenerStub{}, []byte("<html></html>"), RefusedNotAPhoto},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			service, store, objects, listingID := mediaHarness()
 			objects.content = test.content
-			objects.info.Size = test.size
 			screener := test.screener
 			service.WithScreening(&screener)
 			upload := ownKey(listingID)
-			_, err := service.AddPhoto(context.Background(), store.owner, listingID, upload, "")
-			if !errors.Is(err, test.want) || mediaErrorStatus(err) != test.status {
-				t.Fatalf("error = %v", err)
+			if _, err := service.AddPhoto(context.Background(), store.owner, listingID, upload, ""); err != nil {
+				t.Fatal(err)
 			}
-			if len(store.added) != 0 || len(objects.written) != 0 {
-				t.Fatalf("added = %v, written = %v", store.added, objects.written)
+			photo := onlyPhoto(t, store)
+			if photo.Screening != ScreeningRefused || photo.Refusal != test.want || photo.ObjectKey != upload {
+				t.Fatalf("photo = %+v", photo)
 			}
-			if slices.Contains(objects.deleted, upload) == test.keepUpload {
-				t.Fatalf("deleted = %v", objects.deleted)
+			if len(objects.written) != 0 || len(objects.deleted) != 0 {
+				t.Fatalf("written = %v, deleted = %v", objects.written, objects.deleted)
 			}
 		})
 	}
 }
 
-func TestRefusalTellsTheHostWhy(t *testing.T) {
+func TestAnUnavailableScreenerLeavesThePhotoPending(t *testing.T) {
 	service, store, objects, listingID := mediaHarness()
 	objects.content = jpegBytes
-	service.WithScreening(&screenerStub{refusal: RefusedExplicit})
-	_, err := service.AddPhoto(context.Background(), store.owner, listingID, ownKey(listingID), "")
-	if err == nil || !strings.Contains(err.Error(), string(RefusedExplicit)) {
+	service.WithScreening(&screenerStub{err: errors.New("down")})
+	if _, err := service.AddPhoto(context.Background(), store.owner, listingID, ownKey(listingID), ""); err != nil {
+		t.Fatal(err)
+	}
+	if photo := onlyPhoto(t, store); photo.Screening != ScreeningPending {
+		t.Fatalf("photo = %+v", photo)
+	}
+}
+
+func TestAPhotoTooLargeToCheckIsRefusedAtUpload(t *testing.T) {
+	service, store, objects, listingID := mediaHarness()
+	objects.info.Size = maxScreenedPhotoBytes + 1
+	service.WithScreening(&screenerStub{})
+	upload := ownKey(listingID)
+	_, err := service.AddPhoto(context.Background(), store.owner, listingID, upload, "")
+	if !errors.Is(err, ErrPhotoTooLargeToCheck) || mediaErrorStatus(err) != http.StatusUnprocessableEntity {
 		t.Fatalf("error = %v", err)
+	}
+	if len(store.added) != 0 || !slices.Contains(objects.deleted, upload) {
+		t.Fatalf("added = %v, deleted = %v", store.added, objects.deleted)
+	}
+}
+
+func TestPhotosAreAddedCheckedWhenScreeningIsOff(t *testing.T) {
+	service, store, _, listingID := mediaHarness()
+	if _, err := service.AddPhoto(context.Background(), store.owner, listingID, ownKey(listingID), ""); err != nil {
+		t.Fatal(err)
+	}
+	if photo := onlyPhoto(t, store); photo.Screening != ScreeningPassed {
+		t.Fatalf("photo = %+v", photo)
+	}
+}
+
+func TestPublishChecksPhotosStillWaiting(t *testing.T) {
+	service, store, objects, listingID := mediaHarness()
+	objects.content = jpegBytes
+	screener := &screenerStub{}
+	service.WithScreening(screener)
+	pending := ListingPhoto{ID: uuid.New(), ObjectKey: ownKey(listingID), Screening: ScreeningPending}
+	store.setup.Photos = []ListingPhoto{pending, {ID: uuid.New(), ObjectKey: ownKey(listingID), Screening: ScreeningPassed}}
+	if err := service.screenPendingPhotos(context.Background(), store.owner, listingID); err != nil {
+		t.Fatal(err)
+	}
+	if screener.calls != 1 || store.setup.Photos[0].Screening != ScreeningPassed {
+		t.Fatalf("calls = %d, photos = %+v", screener.calls, store.setup.Photos)
+	}
+}
+
+func TestPublishFailsWhenAWaitingPhotoCannotBeChecked(t *testing.T) {
+	service, store, objects, listingID := mediaHarness()
+	objects.content = jpegBytes
+	service.WithScreening(&screenerStub{err: errors.New("down")})
+	store.setup.Photos = []ListingPhoto{{ID: uuid.New(), ObjectKey: ownKey(listingID), Screening: ScreeningPending}}
+	if err := service.screenPendingPhotos(context.Background(), store.owner, listingID); !errors.Is(err, ErrPhotoCheckFailed) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestAPhotoRemovedWhileBeingCheckedLeavesNoCopyBehind(t *testing.T) {
+	service, store, objects, listingID := mediaHarness()
+	objects.content = jpegBytes
+	service.WithScreening(&screenerStub{})
+	photo := ListingPhoto{ID: uuid.New(), ObjectKey: ownKey(listingID), Screening: ScreeningPending}
+	if err := service.screenPhoto(context.Background(), store.owner, listingID, photo); err != nil {
+		t.Fatal(err)
+	}
+	for key := range objects.written {
+		if !slices.Contains(objects.deleted, key) {
+			t.Fatalf("checked copy %q was left behind", key)
+		}
 	}
 }
 

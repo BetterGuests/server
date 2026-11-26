@@ -31,12 +31,18 @@ type ScreeningService struct {
 }
 
 func ConfigFromLookup(lookup func(string) string) (Config, bool) {
-	config := Config{APIKey: strings.TrimSpace(lookup("ANTHROPIC_API_KEY"))}
+	config := Config{
+		APIKey:      strings.TrimSpace(lookup("ANTHROPIC_API_KEY")),
+		WorkspaceID: strings.TrimSpace(lookup("ANTHROPIC_WORKSPACE_ID")),
+	}
 	return config, config.APIKey != ""
 }
 
 func NewScreeningService(config Config, options ...option.RequestOption) *ScreeningService {
 	defaults := []option.RequestOption{option.WithAPIKey(config.APIKey), option.WithMaxRetries(screeningRetries)}
+	if config.WorkspaceID != "" {
+		defaults = append(defaults, option.WithHeader(workspaceHeader, config.WorkspaceID))
+	}
 	return &ScreeningService{client: anthropic.NewClient(append(defaults, options...)...)}
 }
 

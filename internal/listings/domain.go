@@ -46,16 +46,22 @@ type Listing struct {
 }
 
 type ListingPhoto struct {
-	ID uuid.UUID `json:"id"`
-
-	// ObjectKey is the permanent identifier stored in the database. It is
-	// never returned to clients; URL is generated from it when serving a
-	// listing and expires according to the object-storage configuration.
-	ObjectKey string `json:"-"`
-	URL       string `json:"url,omitempty"`
-	AltText   string `json:"alt_text,omitempty"`
-	Position  int    `json:"position"`
+	ID        uuid.UUID      `json:"id"`
+	ObjectKey string         `json:"-"`
+	URL       string         `json:"url,omitempty"`
+	AltText   string         `json:"alt_text,omitempty"`
+	Position  int            `json:"position"`
+	Screening PhotoScreening `json:"screening"`
+	Refusal   PhotoRefusal   `json:"refusal,omitempty"`
 }
+
+type PhotoScreening string
+
+const (
+	ScreeningPending PhotoScreening = "pending"
+	ScreeningPassed  PhotoScreening = "passed"
+	ScreeningRefused PhotoScreening = "refused"
+)
 
 type HouseRule struct {
 	Title       string `json:"title"`
@@ -324,7 +330,15 @@ const (
 	RefusedContactDetails      PhotoRefusal = "it advertises contact or payment details"
 	RefusedUnrelated           PhotoRefusal = "it does not show your house or a room inside it"
 	RefusedUnsafe              PhotoRefusal = "it did not pass our safety check"
+	RefusedNotAPhoto           PhotoRefusal = "it is not a JPEG, PNG or WebP photo"
 )
+
+type ScreeningVerdict struct {
+	PhotoID     uuid.UUID
+	UploadKey   string
+	ScreenedKey string
+	Refusal     PhotoRefusal
+}
 
 type PhotoScreener interface {
 	Screen(ctx context.Context, photo []byte, contentType string) (PhotoRefusal, error)
@@ -334,6 +348,7 @@ type MediaStore interface {
 	Setup(ctx context.Context, userID string, listingID uuid.UUID) (Setup, error)
 	AddPhoto(ctx context.Context, userID string, listingID uuid.UUID, photo ListingPhoto) error
 	RemovePhoto(ctx context.Context, userID string, listingID, photoID uuid.UUID) (string, error)
+	RecordScreening(ctx context.Context, userID string, listingID uuid.UUID, verdict ScreeningVerdict) (bool, error)
 	SetPrice(ctx context.Context, userID string, listingID uuid.UUID, nightlyCents int) error
 }
 

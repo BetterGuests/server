@@ -17,6 +17,8 @@ type HTTPHandler struct {
 	service        *RealtimeService
 	authenticator  Authenticator
 	originPatterns []string
+	receivers      map[string]Receiver
+	now            func() time.Time
 }
 
 func NewHTTPHandler(service *RealtimeService, authenticator Authenticator, allowedOrigins []string) *HTTPHandler {
@@ -24,7 +26,14 @@ func NewHTTPHandler(service *RealtimeService, authenticator Authenticator, allow
 		service:        service,
 		authenticator:  authenticator,
 		originPatterns: originHosts(allowedOrigins),
+		receivers:      map[string]Receiver{},
+		now:            time.Now,
 	}
+}
+
+func (handler *HTTPHandler) WithReceiver(kind string, receiver Receiver) *HTTPHandler {
+	handler.receivers[kind] = receiver
+	return handler
 }
 
 func originHosts(origins []string) []string {
@@ -67,7 +76,66 @@ func (handler *HTTPHandler) Connect(w http.ResponseWriter, r *http.Request) {
 	if err := writeFrame(ctx, conn, Frame{Type: FrameReady}); err != nil {
 		return
 	}
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+	go handler.listen(ctx, stop, conn, connection)
 	handler.pump(ctx, conn, connection)
+}
+
+func (handler *HTTPHandler) listen(ctx context.Context, stop context.CancelFunc, conn *websocket.Conn, connection *Connection) {
+	defer stop()
+	budget := inboundBudget{}
+	for {
+		kind, data, err := conn.Read(ctx)
+		if err != nil {
+			return
+		}
+		if kind != websocket.MessageText || !budget.spend(handler.now()) {
+			continue
+		}
+		handler.receive(ctx, connection, data)
+	}
+}
+
+func (handler *HTTPHandler) receive(ctx context.Context, connection *Connection, data []byte) {
+	var frame inboundFrame
+	if err := json.Unmarshal(data, &frame); err != nil {
+		return
+	}
+	if frame.Type == FrameFocus {
+		handler.focus(connection, frame.Data)
+		return
+	}
+	userID := connection.userID
+	receiver, known := handler.receivers[frame.Type]
+	if !known {
+		return
+	}
+	receiveCtx, cancel := context.WithTimeout(ctx, receiveTimeout)
+	defer cancel()
+	if err := receiver.Receive(receiveCtx, userID, frame.Data); err != nil {
+		slog.Debug("Realtime frame refused", "type", frame.Type, "error", err)
+	}
+}
+
+func (handler *HTTPHandler) focus(connection *Connection, data json.RawMessage) {
+	var frame focusFrame
+	if err := json.Unmarshal(data, &frame); err != nil || len(frame.Topic) > maxTopicBytes {
+		return
+	}
+	handler.service.SetFocus(connection, frame.Topic)
+}
+
+func (budget *inboundBudget) spend(now time.Time) bool {
+	if now.Sub(budget.windowStart) >= inboundWindow {
+		budget.windowStart = now
+		budget.used = 0
+	}
+	if budget.used >= maxInboundPerWindow {
+		return false
+	}
+	budget.used++
+	return true
 }
 
 func (handler *HTTPHandler) authenticate(ctx context.Context, conn *websocket.Conn) (uuid.UUID, error) {
@@ -91,7 +159,6 @@ func (handler *HTTPHandler) authenticate(ctx context.Context, conn *websocket.Co
 }
 
 func (handler *HTTPHandler) pump(ctx context.Context, conn *websocket.Conn, connection *Connection) {
-	ctx = conn.CloseRead(ctx)
 	ticker := time.NewTicker(pingInterval)
 	defer ticker.Stop()
 

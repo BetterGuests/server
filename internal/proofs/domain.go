@@ -49,7 +49,6 @@ type Proof struct {
 	ReviewedAt      *time.Time   `json:"reviewed_at,omitempty"`
 	CreatedAt       time.Time    `json:"created_at"`
 	UpdatedAt       time.Time    `json:"updated_at"`
-	InquiryID       string       `json:"persona_inquiry_id,omitempty"`
 	ObjectKey       string       `json:"-"`
 	AddressKey      *string      `json:"-"`
 	UnitKey         *string      `json:"-"`
@@ -123,76 +122,6 @@ type ReviewQueue interface {
 	Decide(ctx context.Context, adminID, proofID uuid.UUID, decision Decision, reason string) error
 	ListApproved(ctx context.Context, adminID uuid.UUID) ([]ReviewItem, error)
 	Revoke(ctx context.Context, adminID, proofID uuid.UUID, reason string) error
-}
-
-type IDName struct {
-	First  string
-	Middle string
-	Last   string
-	Suffix string
-}
-
-type PropertyAddress struct {
-	Line1       string
-	Line2       string
-	City        string
-	Region      string
-	PostalCode  string
-	CountryCode string
-}
-
-type CheckSubject struct {
-	Address    PropertyAddress
-	AddressKey *string
-	UnitKey    *string
-}
-
-type CheckInquiry struct {
-	ID           uuid.UUID
-	InquiryID    string
-	ListingID    uuid.UUID
-	HostID       uuid.UUID
-	DocumentType DocumentType
-	AddressKey   *string
-	UnitKey      *string
-	CreatedAt    time.Time
-}
-
-type CheckTicket struct {
-	InquiryID    string `json:"inquiry_id"`
-	SessionToken string `json:"session_token"`
-}
-
-type CheckEvent struct {
-	AccountID uuid.UUID
-	InquiryID string
-	Name      string
-	Body      []byte
-}
-
-type CheckStore interface {
-	ListingHost(ctx context.Context, actingID, listingID uuid.UUID) (uuid.UUID, error)
-	Latest(ctx context.Context, actingID, listingID uuid.UUID) (Proof, bool, error)
-	CheckSubject(ctx context.Context, hostID, listingID uuid.UUID) (CheckSubject, error)
-	IDName(ctx context.Context, hostID uuid.UUID) (IDName, bool, error)
-	SaveInquiry(ctx context.Context, inquiry CheckInquiry) error
-	FindInquiry(ctx context.Context, hostID uuid.UUID, inquiryID string) (CheckInquiry, bool, error)
-	HasProofForInquiry(ctx context.Context, hostID uuid.UUID, inquiryID string) (bool, error)
-	SaveFromInquiry(ctx context.Context, proof Proof) error
-	ApproveFromInquiry(ctx context.Context, hostID uuid.UUID, inquiryID string, at time.Time) (bool, error)
-	DeclineFromInquiry(ctx context.Context, hostID uuid.UUID, inquiryID string, at time.Time) (bool, error)
-}
-
-type InquiryStarter interface {
-	StartInquiry(ctx context.Context, referenceID string, fields map[string]string) (CheckTicket, error)
-}
-
-type IDChecker interface {
-	HasCurrentID(ctx context.Context, accountID uuid.UUID) (bool, error)
-}
-
-type CheckStarter interface {
-	Start(ctx context.Context, hostID, listingID uuid.UUID, documentType DocumentType) (CheckTicket, error)
 }
 
 type DueFile struct {

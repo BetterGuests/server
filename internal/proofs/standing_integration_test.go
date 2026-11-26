@@ -73,11 +73,24 @@ func (f fixture) published(t *testing.T) (uuid.UUID, uuid.UUID, uuid.UUID, uuid.
 	return listing.HostID, listing.ID, proof.ID, adminID
 }
 
-func (f fixture) sweep(t *testing.T) {
+func (f fixture) applyPauses(t *testing.T) {
+	t.Helper()
+	if err := verification.NewVerificationPauseService(verification.NewPostgresVerificationStore(f.pool)).RunOnce(f.ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func (f fixture) queueAlerts(t *testing.T) {
 	t.Helper()
 	if _, err := notifications.NewPostgresNotificationStore(f.pool).QueueTeamAlerts(f.ctx); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func (f fixture) sweep(t *testing.T) {
+	t.Helper()
+	f.applyPauses(t)
+	f.queueAlerts(t)
 }
 
 func (f fixture) paused(t *testing.T, listingID uuid.UUID) bool {
@@ -185,10 +198,6 @@ func TestApprovedNameChangeSendsPropertyProofsBack(t *testing.T) {
 	if len(held) != 1 || !f.verified(t, hostID) {
 		t.Fatalf("a name change waits while the old ID stays valid: %v", held)
 	}
-	subjectName, found, err := NewPostgresProofStore(f.pool).IDName(f.ctx, hostID)
-	if err != nil || !found || subjectName.First != "John" {
-		t.Fatalf("documents must match the accepted name, got %+v %v", subjectName, err)
-	}
 	pending, err := store.PendingReviews(f.ctx, adminID, 200)
 	if err != nil {
 		t.Fatal(err)
@@ -259,28 +268,70 @@ func TestAdminRevokingAProofPausesTheListing(t *testing.T) {
 	}
 }
 
-func TestDeclinedDocumentCannotStayOrBecomeApproved(t *testing.T) {
+func TestTheAlertSweepLeavesPausingToTheHourlyJob(t *testing.T) {
 	f := newFixture(t)
-	listing := f.draft(t, uuid.New())
-	store := NewPostgresProofStore(f.pool)
-	subject, err := store.CheckSubject(f.ctx, listing.HostID, listing.ID)
-	if err != nil {
+	hostID, listingID, _, _ := f.published(t)
+	f.pass(t, hostID, verification.IDName{First: "John", Last: "Smith"}, nil, time.Now().UTC().Add(-400*day))
+
+	f.queueAlerts(t)
+	if f.paused(t, listingID) {
+		t.Fatal("the per-minute alert sweep must not pause listings")
+	}
+	f.applyPauses(t)
+	if !f.paused(t, listingID) {
+		t.Fatal("the pause job must pause a listing whose host ID expired past the grace period")
+	}
+	f.applyPauses(t)
+	if !f.paused(t, listingID) {
+		t.Fatal("running the pause job again must keep the listing paused")
+	}
+}
+
+func TestDeletingIDDataEndsTheVerificationSoOneIDCannotVerifyTwoAccounts(t *testing.T) {
+	f := newFixture(t)
+	mark := []byte(uuid.NewString()[:32])
+	name := verification.IDName{First: "Jane", Last: "Doe"}
+	now := time.Now().UTC().Truncate(time.Second)
+	first, second := uuid.New(), uuid.New()
+
+	f.pass(t, first, name, mark, now)
+	if !f.verified(t, first) {
+		t.Fatal("the first account must be verified")
+	}
+	if _, err := verification.NewPostgresVerificationStore(f.pool).RequestDeletion(f.ctx, first); err != nil {
 		t.Fatal(err)
 	}
-	inquiryID := "inq_" + uuid.NewString()
-	now := time.Now().UTC()
-	if err := store.SaveInquiry(f.ctx, CheckInquiry{ID: uuid.New(), InquiryID: inquiryID, ListingID: listing.ID, HostID: listing.HostID,
-		DocumentType: Deed, AddressKey: subject.AddressKey, UnitKey: subject.UnitKey, CreatedAt: now}); err != nil {
+	if f.verified(t, first) {
+		t.Fatal("deleting ID data must end the verification it backed")
+	}
+	f.pass(t, second, name, mark, now.Add(time.Second))
+	if f.verified(t, first) && f.verified(t, second) {
+		t.Fatal("one ID must never leave two accounts verified")
+	}
+}
+
+func TestACheckFinishingAfterADeletionRequestStaysRevoked(t *testing.T) {
+	f := newFixture(t)
+	accountID := uuid.New()
+	store := verification.NewPostgresVerificationStore(f.pool)
+	now := time.Now().UTC().Truncate(time.Second)
+	inquiryID := f.open(t, accountID, now)
+
+	if _, err := store.RequestDeletion(f.ctx, accountID); err != nil {
 		t.Fatal(err)
 	}
-	if revoked, err := store.DeclineFromInquiry(f.ctx, listing.HostID, inquiryID, now); err != nil || revoked {
-		t.Fatalf("nothing to revoke yet: %v %v", revoked, err)
-	}
-	if err := store.SaveFromInquiry(f.ctx, Proof{ID: uuid.New(), ListingID: listing.ID, HostID: listing.HostID, DocumentType: Deed,
-		InquiryID: inquiryID, AddressKey: subject.AddressKey, UnitKey: subject.UnitKey, CreatedAt: now}); err != nil {
+	if err := store.ApplyStatus(f.ctx, accountID, inquiryID, verification.StatusCompleted, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if approved, err := store.ApproveFromInquiry(f.ctx, listing.HostID, inquiryID, now); err != nil || approved {
-		t.Fatalf("a declined inquiry must never approve: %v %v", approved, err)
+	completion := verification.Completion{AccountID: accountID, InquiryID: inquiryID, OccurredAt: now.Add(2 * time.Second), Fingerprint: []byte(uuid.NewString()[:32])}
+	if _, err := store.Complete(f.ctx, completion, func(verification.History) []verification.ReviewReason { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if f.verified(t, accountID) {
+		t.Fatal("a check the person asked to delete must not count as verified when it finishes")
+	}
+	var kept int
+	if err := f.super.QueryRow(f.ctx, `SELECT count(*) FROM app.identity_fingerprints WHERE account_id = $1`, accountID).Scan(&kept); err != nil || kept != 0 {
+		t.Fatalf("no fingerprint may be stored after a deletion request: %d %v", kept, err)
 	}
 }

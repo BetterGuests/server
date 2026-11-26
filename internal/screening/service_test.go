@@ -96,3 +96,20 @@ func TestScreeningIsOffWithoutAKey(t *testing.T) {
 		t.Fatal("a blank key must not enable screening")
 	}
 }
+
+func TestAnUnscopedKeyNamesItsWorkspace(t *testing.T) {
+	received := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received <- r.Header.Get(workspaceHeader)
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	t.Cleanup(server.Close)
+	config, _ := ConfigFromLookup(func(name string) string {
+		return map[string]string{"ANTHROPIC_API_KEY": "key", "ANTHROPIC_WORKSPACE_ID": " wrkspc_1 "}[name]
+	})
+	service := NewScreeningService(config, option.WithBaseURL(server.URL), option.WithMaxRetries(0))
+	_, _ = service.Screen(context.Background(), []byte("photo"), "image/jpeg")
+	if got := <-received; got != "wrkspc_1" {
+		t.Fatalf("workspace header = %q", got)
+	}
+}

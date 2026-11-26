@@ -297,3 +297,65 @@ func TestPublishRequiresAPriceThenFivePhotos(t *testing.T) {
 		t.Fatalf("stranger remove error = %v", err)
 	}
 }
+
+func TestPublishWaitsUntilEveryPhotoHasPassedItsCheck(t *testing.T) {
+	ctx, service := publishFixture(t)
+	store := service.store.(*PostgresListingStore)
+	listing := draftAt(t, ctx, service, uuid.New(), "7"+uuid.NewString()[:6]+" Checked Rd", "", "85001")
+	host := listing.HostID.String()
+	pending := ListingPhoto{ID: uuid.New(), ObjectKey: ownKey(listing.ID), Screening: ScreeningPending}
+	if err := store.AddPhoto(ctx, host, listing.ID, pending); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.PublishListing(ctx, listing.HostID, listing.ID); !errors.Is(err, ErrPhotosRefused) {
+		t.Fatalf("pending photo error = %v", err)
+	}
+	refusal := ScreeningVerdict{PhotoID: pending.ID, UploadKey: pending.ObjectKey, Refusal: RefusedUnrelated}
+	if recorded, err := store.RecordScreening(ctx, host, listing.ID, refusal); err != nil || !recorded {
+		t.Fatalf("recorded = %v, err = %v", recorded, err)
+	}
+	if recorded, err := store.RecordScreening(ctx, host, listing.ID, refusal); err != nil || recorded {
+		t.Fatalf("a second verdict must not apply, recorded = %v, err = %v", recorded, err)
+	}
+	setup, err := store.Setup(ctx, host, listing.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := setup.Photos[len(setup.Photos)-1]
+	if last.Screening != ScreeningRefused || last.Refusal != RefusedUnrelated {
+		t.Fatalf("photo = %+v", last)
+	}
+	if err := service.PublishListing(ctx, listing.HostID, listing.ID); !errors.Is(err, ErrPhotosRefused) {
+		t.Fatalf("refused photo error = %v", err)
+	}
+	if _, err := store.RemovePhoto(ctx, host, listing.ID, pending.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.PublishListing(ctx, listing.HostID, listing.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestACheckedPhotoMovesToItsCheckedKey(t *testing.T) {
+	ctx, service := publishFixture(t)
+	store := service.store.(*PostgresListingStore)
+	listing := draftAt(t, ctx, service, uuid.New(), "8"+uuid.NewString()[:6]+" Passed Rd", "", "85001")
+	host := listing.HostID.String()
+	pending := ListingPhoto{ID: uuid.New(), ObjectKey: ownKey(listing.ID), Screening: ScreeningPending}
+	if err := store.AddPhoto(ctx, host, listing.ID, pending); err != nil {
+		t.Fatal(err)
+	}
+	checkedKey := ownKey(listing.ID)
+	verdict := ScreeningVerdict{PhotoID: pending.ID, UploadKey: pending.ObjectKey, ScreenedKey: checkedKey}
+	if recorded, err := store.RecordScreening(ctx, host, listing.ID, verdict); err != nil || !recorded {
+		t.Fatalf("recorded = %v, err = %v", recorded, err)
+	}
+	setup, err := store.Setup(ctx, host, listing.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := setup.Photos[len(setup.Photos)-1]
+	if last.Screening != ScreeningPassed || last.ObjectKey != checkedKey {
+		t.Fatalf("photo = %+v", last)
+	}
+}

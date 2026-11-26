@@ -26,6 +26,22 @@ const summaryFrom = `FROM app.conversations c
 	LEFT JOIN app.account_names gn ON gn.account_id = c.guest_id
 	LEFT JOIN app.account_names hn ON hn.account_id = c.host_id`
 
+const messageColumns = `m.id, m.conversation_id, COALESCE(m.sender_id, '00000000-0000-0000-0000-000000000000'::uuid),
+	CASE WHEN m.sender_id IS NULL THEN 'system' WHEN m.sender_id = c.host_id THEN 'host' ELSE 'guest' END,
+	m.body, m.created_at, m.booking_id,
+	r.id,
+	CASE WHEN r.id IS NULL THEN NULL WHEN r.sender_id IS NULL THEN 'system' WHEN r.sender_id = c.host_id THEN 'host' ELSE 'guest' END,
+	left(r.body, ` + replyPreviewRunesSQL + `),
+	ARRAY(SELECT x.emoji FROM app.message_reactions x WHERE x.message_id = m.id ORDER BY x.created_at, x.id),
+	ARRAY(SELECT CASE WHEN x.account_id = c.host_id THEN 'host' ELSE 'guest' END
+	      FROM app.message_reactions x WHERE x.message_id = m.id ORDER BY x.created_at, x.id)`
+
+const messageFrom = `FROM app.messages m
+	JOIN app.conversations c ON c.id = m.conversation_id
+	LEFT JOIN app.messages r ON r.id = m.reply_to_id`
+
+const replyPreviewRunesSQL = "200"
+
 type PostgresMessageStore struct{ DB *pgxpool.Pool }
 
 func NewPostgresMessageStore(pool *pgxpool.Pool) *PostgresMessageStore {
@@ -105,7 +121,17 @@ func (store *PostgresMessageStore) Get(ctx context.Context, actorID, conversatio
 		summary, err = scanSummary(tx.QueryRow(ctx,
 			`SELECT `+summaryColumns+` `+summaryFrom+` WHERE c.id = $2 AND (c.guest_id = $1 OR c.host_id = $1)`,
 			actorID, conversationID))
-		return err
+		if err != nil {
+			return err
+		}
+		counterparty := summary.HostID
+		if summary.Role == RoleHost {
+			counterparty = summary.GuestID
+		}
+		if err := tx.QueryRow(ctx, `SELECT app.reply_minutes($1)`, counterparty).Scan(&summary.CounterpartyReplyMins); err != nil {
+			return fmt.Errorf("reply minutes: %w", err)
+		}
+		return nil
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Summary{}, ErrConversationNotFound
@@ -158,10 +184,7 @@ func (store *PostgresMessageStore) Messages(
 			return err
 		}
 		rows, err := tx.Query(ctx,
-			`SELECT m.id, m.conversation_id, COALESCE(m.sender_id, '00000000-0000-0000-0000-000000000000'::uuid),
-			        CASE WHEN m.sender_id IS NULL THEN 'system' WHEN m.sender_id = c.host_id THEN 'host' ELSE 'guest' END,
-			        m.body, m.created_at, m.booking_id
-			 FROM app.messages m JOIN app.conversations c ON c.id = m.conversation_id
+			`SELECT `+messageColumns+` `+messageFrom+`
 			 WHERE m.conversation_id = $1 AND ($2::timestamptz IS NULL OR m.created_at < $2)
 			 ORDER BY m.created_at DESC, m.id DESC
 			 LIMIT $3`, conversationID, before, limit)
@@ -170,8 +193,8 @@ func (store *PostgresMessageStore) Messages(
 		}
 		defer rows.Close()
 		for rows.Next() {
-			var message Message
-			if err := rows.Scan(&message.ID, &message.ConversationID, &message.SenderID, &message.SenderRole, &message.Body, &message.CreatedAt, &message.BookingID); err != nil {
+			message, err := scanMessage(rows)
+			if err != nil {
 				return err
 			}
 			messages = append(messages, message)
@@ -189,14 +212,149 @@ func (store *PostgresMessageStore) Messages(
 
 func (store *PostgresMessageStore) Insert(
 	ctx context.Context,
-	actorID, conversationID, messageID uuid.UUID,
-	body string,
+	actorID, conversationID uuid.UUID,
+	draft Draft,
 	now time.Time,
-) (Message, Participants, error) {
+) (Message, Participants, bool, error) {
 	var (
 		message      Message
 		participants Participants
+		created      bool
 	)
+	err := db.WithUserTx(ctx, store.DB, actorID.String(), func(tx pgx.Tx) error {
+		var err error
+		participants, err = lockParticipants(ctx, tx, actorID, conversationID)
+		if err != nil {
+			return err
+		}
+		readColumn := "guest_read_at"
+		if participants.HostID == actorID {
+			readColumn = "host_read_at"
+		}
+		var replyTo *uuid.UUID
+		if draft.ReplyToID != uuid.Nil {
+			if err := requireMessageIn(ctx, tx, conversationID, draft.ReplyToID); err != nil {
+				return err
+			}
+			replyTo = &draft.ReplyToID
+		}
+		tag, err := tx.Exec(ctx,
+			`INSERT INTO app.messages (id, conversation_id, sender_id, body, created_at, reply_to_id)
+			 VALUES ($1, $2, $3, $4, $5, $6)
+			 ON CONFLICT (id) DO NOTHING`,
+			draft.ID, conversationID, actorID, draft.Body, now, replyTo)
+		if err != nil {
+			return fmt.Errorf("insert message: %w", err)
+		}
+		created = tag.RowsAffected() == 1
+		if created {
+			if _, err := tx.Exec(ctx,
+				`UPDATE app.conversations
+				 SET last_message_at = $2, last_message_preview = $3, `+readColumn+` = $2
+				 WHERE id = $1`,
+				conversationID, now, preview(draft.Body)); err != nil {
+				return fmt.Errorf("update conversation: %w", err)
+			}
+		}
+		message, err = selectMessage(ctx, tx, conversationID, draft.ID)
+		if errors.Is(err, ErrMessageNotFound) || (err == nil && message.SenderID != actorID) {
+			return fmt.Errorf("%w: that message id is already taken", ErrInvalidMessage)
+		}
+		return err
+	})
+	if err != nil {
+		return Message{}, Participants{}, false, err
+	}
+	return message, participants, created, nil
+}
+
+func (store *PostgresMessageStore) Delete(ctx context.Context, actorID, conversationID, messageID uuid.UUID) (Participants, error) {
+	var participants Participants
+	err := db.WithUserTx(ctx, store.DB, actorID.String(), func(tx pgx.Tx) error {
+		var err error
+		participants, err = lockParticipants(ctx, tx, actorID, conversationID)
+		if err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx,
+			`DELETE FROM app.messages WHERE id = $1 AND conversation_id = $2 AND sender_id = $3`,
+			messageID, conversationID, actorID)
+		if err != nil {
+			return fmt.Errorf("delete message: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrMessageNotFound
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE app.conversations c
+			 SET last_message_at = latest.created_at, last_message_preview = left(latest.body, $2)
+			 FROM (SELECT max(created_at) AS created_at,
+			              (array_agg(body ORDER BY created_at DESC, id DESC))[1] AS body
+			       FROM app.messages WHERE conversation_id = $1) latest
+			 WHERE c.id = $1`,
+			conversationID, previewRunes); err != nil {
+			return fmt.Errorf("refresh conversation preview: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return Participants{}, err
+	}
+	return participants, nil
+}
+
+func (store *PostgresMessageStore) ToggleReaction(
+	ctx context.Context,
+	actorID, conversationID, messageID, reactionID uuid.UUID,
+	emoji string,
+	now time.Time,
+) ([]Reaction, Participants, error) {
+	var (
+		reactions    []Reaction
+		participants Participants
+	)
+	err := db.WithUserTx(ctx, store.DB, actorID.String(), func(tx pgx.Tx) error {
+		var err error
+		participants, err = lockParticipants(ctx, tx, actorID, conversationID)
+		if err != nil {
+			return err
+		}
+		if err := requireMessageIn(ctx, tx, conversationID, messageID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO app.accounts (id) VALUES ($1) ON CONFLICT (id) DO NOTHING`, actorID); err != nil {
+			return fmt.Errorf("ensure account: %w", err)
+		}
+		removed, err := tx.Exec(ctx,
+			`DELETE FROM app.message_reactions WHERE message_id = $1 AND account_id = $2 AND emoji = $3`,
+			messageID, actorID, emoji)
+		if err != nil {
+			return fmt.Errorf("remove reaction: %w", err)
+		}
+		if removed.RowsAffected() == 0 {
+			if _, err := tx.Exec(ctx,
+				`INSERT INTO app.message_reactions (id, message_id, account_id, emoji, created_at)
+				 VALUES ($1, $2, $3, $4, $5)
+				 ON CONFLICT (message_id, account_id, emoji) DO NOTHING`,
+				reactionID, messageID, actorID, emoji, now); err != nil {
+				return fmt.Errorf("add reaction: %w", err)
+			}
+		}
+		message, err := selectMessage(ctx, tx, conversationID, messageID)
+		if err != nil {
+			return err
+		}
+		reactions = message.Reactions
+		return nil
+	})
+	if err != nil {
+		return nil, Participants{}, err
+	}
+	return reactions, participants, nil
+}
+
+func (store *PostgresMessageStore) Participants(ctx context.Context, actorID, conversationID uuid.UUID) (Participants, error) {
+	var participants Participants
 	err := db.WithUserTx(ctx, store.DB, actorID.String(), func(tx pgx.Tx) error {
 		err := tx.QueryRow(ctx,
 			`SELECT guest_id, host_id FROM app.conversations
@@ -208,35 +366,79 @@ func (store *PostgresMessageStore) Insert(
 		if err != nil {
 			return fmt.Errorf("select conversation: %w", err)
 		}
-
-		role := RoleGuest
-		readColumn := "guest_read_at"
-		if participants.HostID == actorID {
-			role = RoleHost
-			readColumn = "host_read_at"
-		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO app.messages (id, conversation_id, sender_id, body, created_at) VALUES ($1, $2, $3, $4, $5)`,
-			messageID, conversationID, actorID, body, now); err != nil {
-			return fmt.Errorf("insert message: %w", err)
-		}
-		if _, err := tx.Exec(ctx,
-			`UPDATE app.conversations
-			 SET last_message_at = $2, last_message_preview = $3, `+readColumn+` = $2
-			 WHERE id = $1`,
-			conversationID, now, preview(body)); err != nil {
-			return fmt.Errorf("update conversation: %w", err)
-		}
-		message = Message{
-			ID: messageID, ConversationID: conversationID, SenderID: actorID,
-			SenderRole: role, Body: body, CreatedAt: now,
-		}
 		return nil
 	})
-	if err != nil {
-		return Message{}, Participants{}, err
+	return participants, err
+}
+
+func lockParticipants(ctx context.Context, tx pgx.Tx, actorID, conversationID uuid.UUID) (Participants, error) {
+	var participants Participants
+	err := tx.QueryRow(ctx,
+		`SELECT guest_id, host_id FROM app.conversations
+		 WHERE id = $1 AND (guest_id = $2 OR host_id = $2)
+		 FOR UPDATE`,
+		conversationID, actorID).Scan(&participants.GuestID, &participants.HostID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Participants{}, ErrConversationNotFound
 	}
-	return message, participants, nil
+	if err != nil {
+		return Participants{}, fmt.Errorf("select conversation: %w", err)
+	}
+	return participants, nil
+}
+
+func requireMessageIn(ctx context.Context, tx pgx.Tx, conversationID, messageID uuid.UUID) error {
+	var exists bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM app.messages WHERE id = $1 AND conversation_id = $2)`,
+		messageID, conversationID).Scan(&exists); err != nil {
+		return fmt.Errorf("check message: %w", err)
+	}
+	if !exists {
+		return ErrMessageNotFound
+	}
+	return nil
+}
+
+func selectMessage(ctx context.Context, tx pgx.Tx, conversationID, messageID uuid.UUID) (Message, error) {
+	message, err := scanMessage(tx.QueryRow(ctx,
+		`SELECT `+messageColumns+` `+messageFrom+` WHERE m.id = $1 AND m.conversation_id = $2`,
+		messageID, conversationID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Message{}, ErrMessageNotFound
+	}
+	if err != nil {
+		return Message{}, fmt.Errorf("select message: %w", err)
+	}
+	return message, nil
+}
+
+func scanMessage(row pgx.Row) (Message, error) {
+	var (
+		message   Message
+		replyID   *uuid.UUID
+		replyRole *string
+		replyBody *string
+		emoji     []string
+		roles     []string
+	)
+	if err := row.Scan(
+		&message.ID, &message.ConversationID, &message.SenderID, &message.SenderRole,
+		&message.Body, &message.CreatedAt, &message.BookingID,
+		&replyID, &replyRole, &replyBody, &emoji, &roles,
+	); err != nil {
+		return Message{}, err
+	}
+	if replyID != nil && replyRole != nil && replyBody != nil {
+		message.ReplyTo = &Reply{ID: *replyID, SenderRole: Role(*replyRole), Body: *replyBody}
+	}
+	message.Reactions = make([]Reaction, 0, len(emoji))
+	for index, value := range emoji {
+		if index < len(roles) {
+			message.Reactions = append(message.Reactions, Reaction{Emoji: value, Role: Role(roles[index])})
+		}
+	}
+	return message, nil
 }
 
 func (store *PostgresMessageStore) MarkRead(ctx context.Context, actorID, conversationID uuid.UUID, now time.Time) error {

@@ -98,7 +98,7 @@ func (store *PostgresVerificationStore) ApplyStatus(ctx context.Context, account
 		}
 		if _, err := tx.Exec(ctx, `UPDATE app.identity_verifications
 			 SET status = $2, last_event_at = $3, updated_at = now(),
-			     revoked_at = CASE WHEN $2 = 'completed' AND status <> 'completed' THEN NULL ELSE revoked_at END
+			     revoked_at = CASE WHEN $2 = 'completed' AND status <> 'completed' AND deletion_requested_at IS NULL THEN NULL ELSE revoked_at END
 			 WHERE id = $1`,
 			current.id, string(status), occurredAt); err != nil {
 			return fmt.Errorf("update verification: %w", err)
@@ -209,6 +209,9 @@ func readHistory(ctx context.Context, tx pgx.Tx, completion Completion, verifica
 	if len(completion.Fingerprint) == 0 {
 		return history, nil
 	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended(encode($1::bytea, 'hex'), 0))`, completion.Fingerprint); err != nil {
+		return History{}, fmt.Errorf("lock identity fingerprint: %w", err)
+	}
 	if err := tx.QueryRow(ctx, `SELECT app.identity_fingerprint_taken($1)`, completion.Fingerprint).Scan(&history.DuplicateIdentity); err != nil {
 		return History{}, fmt.Errorf("check for a duplicate identity: %w", err)
 	}
@@ -223,7 +226,7 @@ func recordPass(ctx context.Context, tx pgx.Tx, verificationID uuid.UUID, occurr
 	if _, err := tx.Exec(ctx,
 		`UPDATE app.identity_verifications
 		 SET status = 'completed', last_event_at = $2, updated_at = now(),
-		     revoked_at = CASE WHEN $3 THEN NULL ELSE revoked_at END,
+		     revoked_at = CASE WHEN $3 AND deletion_requested_at IS NULL THEN NULL ELSE revoked_at END,
 		     review_state = CASE WHEN cardinality($4::text[]) > 0 THEN 'pending' ELSE review_state END,
 		     review_reasons = CASE WHEN cardinality($4::text[]) > 0 THEN $4::text[] ELSE review_reasons END
 		 WHERE id = $1`,
@@ -307,6 +310,13 @@ func (store *PostgresVerificationStore) ListDueForRedaction(ctx context.Context,
 func (store *PostgresVerificationStore) MarkRedacted(ctx context.Context, id uuid.UUID) error {
 	if _, err := store.DB.Exec(ctx, `SELECT app.mark_identity_verification_redacted($1)`, id); err != nil {
 		return fmt.Errorf("mark verification redacted: %w", err)
+	}
+	return nil
+}
+
+func (store *PostgresVerificationStore) ApplyVerificationPauses(ctx context.Context, validDays, graceDays int) error {
+	if _, err := store.DB.Exec(ctx, `SELECT app.apply_verification_pauses($1, $2)`, validDays, graceDays); err != nil {
+		return fmt.Errorf("apply verification pauses: %w", err)
 	}
 	return nil
 }

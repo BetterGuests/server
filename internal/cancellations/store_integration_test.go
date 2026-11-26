@@ -386,3 +386,31 @@ func TestTheTeamPausesAndReopensAListingAndEveryoneIsTold(t *testing.T) {
 		t.Fatalf("three cancellations after reopening did not pause again: %v", err)
 	}
 }
+
+func TestOldOpenReportsAreNotAnnouncedWhenAlertsStart(t *testing.T) {
+	w := newWorld(t)
+	booking, guest := w.book(1, "confirmed")
+	w.sql(`UPDATE app.listings SET check_in_time = '00:00' WHERE id = $1`, w.listingID)
+	w.sql(`UPDATE app.bookings SET starts_on = (now() AT TIME ZONE 'America/New_York')::date, ends_on = CURRENT_DATE + 3 WHERE id = $1`, booking)
+	if _, err := w.service.Report(w.ctx, guest, booking, "The heater is broken"); err != nil {
+		t.Fatal(err)
+	}
+	w.sql(`UPDATE app.stay_reports SET created_at = now() - interval '10 days' WHERE booking_id = $1`, booking)
+	inbox := notifications.NewPostgresNotificationStore(w.pool)
+	toldGuest := func() bool {
+		t.Helper()
+		alerts, err := inbox.QueueTeamAlerts(w.ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return slices.ContainsFunc(alerts, func(alert notifications.TeamAlert) bool { return alert.Recipient == guest })
+	}
+
+	if toldGuest() {
+		t.Fatal("a report filed days ago must not trigger a new email")
+	}
+	w.sql(`UPDATE app.stay_reports SET created_at = now() WHERE booking_id = $1`, booking)
+	if !toldGuest() {
+		t.Fatal("a fresh report must still be acknowledged")
+	}
+}

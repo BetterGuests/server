@@ -82,7 +82,7 @@ const proofColumns = `
 	coalesce(p.content_type, ''),
 	coalesce(p.size_bytes, 0),
 	p.status, coalesce(p.rejection_reason, ''), p.reviewed_by, p.reviewed_at, p.created_at, p.updated_at,
-	coalesce(p.persona_inquiry_id, ''), p.address_key, p.unit_key,
+	p.address_key, p.unit_key,
 	p.relationship, coalesce(p.owner_name, ''), coalesce(p.owner_contact, ''),
 	coalesce(to_char(p.authority_expires_on, 'YYYY-MM-DD'), '')`
 
@@ -92,7 +92,7 @@ func scanProof(row pgx.Row, extra ...any) (Proof, error) {
 	destinations := append([]any{
 		&proof.ID, &proof.ListingID, &proof.HostID, &documentType, &proof.ObjectKey, &proof.ContentType,
 		&proof.SizeBytes, &status, &proof.RejectionReason, &proof.ReviewedBy, &proof.ReviewedAt,
-		&proof.CreatedAt, &proof.UpdatedAt, &proof.InquiryID, &proof.AddressKey, &proof.UnitKey,
+		&proof.CreatedAt, &proof.UpdatedAt, &proof.AddressKey, &proof.UnitKey,
 		&relationship, &proof.OwnerName, &proof.OwnerContact, &proof.ExpiresOn,
 	}, extra...)
 	if err := row.Scan(destinations...); err != nil {
@@ -222,152 +222,6 @@ func (s *PostgresProofStore) Decide(ctx context.Context, adminID, proofID uuid.U
 		}
 		return nil
 	})
-}
-
-func (s *PostgresProofStore) CheckSubject(ctx context.Context, hostID, listingID uuid.UUID) (CheckSubject, error) {
-	var subject CheckSubject
-	err := db.WithUserTx(ctx, s.DB, hostID.String(), func(tx pgx.Tx) error {
-		err := tx.QueryRow(ctx, `
-			SELECT coalesce(address_line1, ''), coalesce(address_line2, ''), city, coalesce(region, ''),
-				coalesce(postal_code, ''), country_code, address_key, unit_key
-			FROM app.listings
-			WHERE id = $1 AND host_id = $2`, listingID, hostID).Scan(
-			&subject.Address.Line1, &subject.Address.Line2, &subject.Address.City, &subject.Address.Region,
-			&subject.Address.PostalCode,
-			&subject.Address.CountryCode, &subject.AddressKey, &subject.UnitKey)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrListingNotFound
-		}
-		if err != nil {
-			return fmt.Errorf("read listing address: %w", err)
-		}
-		return nil
-	})
-	return subject, err
-}
-
-func (s *PostgresProofStore) IDName(ctx context.Context, hostID uuid.UUID) (IDName, bool, error) {
-	var name IDName
-	found := false
-	err := db.WithUserTx(ctx, s.DB, hostID.String(), func(tx pgx.Tx) error {
-		err := tx.QueryRow(ctx, `
-			SELECT n.first_name, n.middle_name, n.last_name, n.suffix
-			FROM app.identity_names n
-			JOIN app.identity_verifications v ON v.id = n.verification_id
-			WHERE n.account_id = $1 AND v.revoked_at IS NULL
-			  AND (v.review_state IS NULL OR v.review_state = 'cleared')
-			ORDER BY n.verified_at DESC, n.verification_id
-			LIMIT 1`, hostID).Scan(&name.First, &name.Middle, &name.Last, &name.Suffix)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("read ID name: %w", err)
-		}
-		found = true
-		return nil
-	})
-	return name, found, err
-}
-
-func (s *PostgresProofStore) SaveInquiry(ctx context.Context, inquiry CheckInquiry) error {
-	return db.WithUserTx(ctx, s.DB, inquiry.HostID.String(), func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, `
-			INSERT INTO app.property_proof_inquiries (
-				id, persona_inquiry_id, listing_id, host_id, document_type, address_key, unit_key, created_at
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-			inquiry.ID, inquiry.InquiryID, inquiry.ListingID, inquiry.HostID, string(inquiry.DocumentType),
-			inquiry.AddressKey, inquiry.UnitKey, inquiry.CreatedAt)
-		if err != nil {
-			return fmt.Errorf("insert document inquiry: %w", err)
-		}
-		return nil
-	})
-}
-
-func (s *PostgresProofStore) FindInquiry(ctx context.Context, hostID uuid.UUID, inquiryID string) (CheckInquiry, bool, error) {
-	var inquiry CheckInquiry
-	found := false
-	err := db.WithUserTx(ctx, s.DB, hostID.String(), func(tx pgx.Tx) error {
-		var documentType string
-		err := tx.QueryRow(ctx, `
-			SELECT id, persona_inquiry_id, listing_id, host_id, document_type, address_key, unit_key, created_at
-			FROM app.property_proof_inquiries
-			WHERE persona_inquiry_id = $1 AND host_id = $2`, inquiryID, hostID).Scan(
-			&inquiry.ID, &inquiry.InquiryID, &inquiry.ListingID, &inquiry.HostID, &documentType,
-			&inquiry.AddressKey, &inquiry.UnitKey, &inquiry.CreatedAt)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("find document inquiry: %w", err)
-		}
-		inquiry.DocumentType = DocumentType(documentType)
-		found = true
-		return nil
-	})
-	return inquiry, found, err
-}
-
-func (s *PostgresProofStore) HasProofForInquiry(ctx context.Context, hostID uuid.UUID, inquiryID string) (bool, error) {
-	var exists bool
-	err := db.WithUserTx(ctx, s.DB, hostID.String(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx,
-			`SELECT EXISTS (SELECT 1 FROM app.property_proofs WHERE persona_inquiry_id = $1 AND host_id = $2)`,
-			inquiryID, hostID).Scan(&exists)
-	})
-	if err != nil {
-		return false, fmt.Errorf("check document inquiry proof: %w", err)
-	}
-	return exists, nil
-}
-
-func (s *PostgresProofStore) SaveFromInquiry(ctx context.Context, proof Proof) error {
-	return db.WithUserTx(ctx, s.DB, proof.HostID.String(), func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `
-			INSERT INTO app.property_proofs (
-				id, listing_id, host_id, document_type, address_key, unit_key, status,
-				created_at, updated_at, persona_inquiry_id
-			)
-			SELECT $1, l.id, l.host_id, $2, $3, $4, 'submitted', $5, $5, $6
-			FROM app.listings l
-			WHERE l.id = $7 AND l.host_id = $8`,
-			proof.ID, string(proof.DocumentType), proof.AddressKey, proof.UnitKey, proof.CreatedAt,
-			proof.InquiryID, proof.ListingID, proof.HostID)
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == uniqueViolationCode {
-			return ErrProofPending
-		}
-		if err != nil {
-			return fmt.Errorf("insert checked property proof: %w", err)
-		}
-		if tag.RowsAffected() == 0 {
-			return ErrListingNotFound
-		}
-		return nil
-	})
-}
-
-func (s *PostgresProofStore) ApproveFromInquiry(ctx context.Context, hostID uuid.UUID, inquiryID string, at time.Time) (bool, error) {
-	var approved bool
-	err := db.WithUserTx(ctx, s.DB, hostID.String(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT app.approve_persona_property_proof($1, $2)`, inquiryID, at).Scan(&approved)
-	})
-	if err != nil {
-		return false, fmt.Errorf("approve checked property proof: %w", err)
-	}
-	return approved, nil
-}
-
-func (s *PostgresProofStore) DeclineFromInquiry(ctx context.Context, hostID uuid.UUID, inquiryID string, at time.Time) (bool, error) {
-	var revoked bool
-	err := db.WithUserTx(ctx, s.DB, hostID.String(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx, `SELECT app.decline_persona_property_proof($1, $2)`, inquiryID, at).Scan(&revoked)
-	})
-	if err != nil {
-		return false, fmt.Errorf("record declined property document: %w", err)
-	}
-	return revoked, nil
 }
 
 var revokeOutcomes = map[string]error{
