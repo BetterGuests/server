@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/BetterGuests/BetterGuests-Server/internal/accounts"
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 )
@@ -144,6 +145,7 @@ func summarize(members []Member, activities []MemberActivity, total int, now tim
 		days.add(activeDays)
 		summary.Members = append(summary.Members, MemberView{
 			ID:           member.ClerkUserID,
+			AccountID:    accounts.DeterministicID(member.ClerkUserID).String(),
 			Name:         member.Name,
 			ImageURL:     member.ImageURL,
 			City:         activity.Place.City,

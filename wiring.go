@@ -30,6 +30,7 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/screening"
 	"github.com/BetterGuests/BetterGuests-Server/internal/settlements"
 	"github.com/BetterGuests/BetterGuests-Server/internal/stays"
+	"github.com/BetterGuests/BetterGuests-Server/internal/teamevents"
 	"github.com/BetterGuests/BetterGuests-Server/internal/usermap"
 	"github.com/BetterGuests/BetterGuests-Server/internal/verification"
 	"github.com/BetterGuests/BetterGuests-Server/internal/waitlist"
@@ -215,6 +216,7 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		tripUpdates:   journeyService,
 		cancellations: cancellations.NewHTTPHandler(cancellationService, cancellationService).WithListingDesk(cancellationService),
 		userMap:       usermap.NewHTTPHandler(usermap.NewUserMapService(userDirectory, proofService)),
+		teamEvents:    teamevents.NewHTTPHandler(teamevents.NewTeamEventsService(teamevents.NewPostgresTeamEventsStore(pool), proofService)),
 	}, nil
 }
 

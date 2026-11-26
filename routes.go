@@ -21,6 +21,7 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/reviews"
 	"github.com/BetterGuests/BetterGuests-Server/internal/settlements"
 	"github.com/BetterGuests/BetterGuests-Server/internal/stays"
+	"github.com/BetterGuests/BetterGuests-Server/internal/teamevents"
 	"github.com/BetterGuests/BetterGuests-Server/internal/usermap"
 	"github.com/BetterGuests/BetterGuests-Server/internal/verification"
 	"github.com/BetterGuests/BetterGuests-Server/internal/waitlist"
@@ -51,6 +52,7 @@ type routeDeps struct {
 	tripUpdates   backgroundJob
 	cancellations *cancellations.HTTPHandler
 	userMap       *usermap.HTTPHandler
+	teamEvents    *teamevents.HTTPHandler
 }
 
 type backgroundJob interface {
@@ -161,6 +163,7 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.Handle("DELETE /api/v1/listings/{listing_id}", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.DeleteListing)))
 	api.HandleFunc("GET /api/v1/admin/me", deps.proofs.Me)
 	api.HandleFunc("GET /api/v1/admin/user-map", deps.userMap.Summary)
+	api.HandleFunc("GET /api/v1/admin/events", deps.teamEvents.Feed)
 	api.HandleFunc("GET /api/v1/admin/property-proofs", deps.proofs.ListForReview)
 	api.HandleFunc("POST /api/v1/admin/property-proofs/{proof_id}/revoke", deps.proofs.Revoke)
 	api.HandleFunc("GET /api/v1/admin/identity-reviews", deps.verification.ListReviews)

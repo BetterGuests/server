@@ -47,6 +47,7 @@ type Summary struct {
 
 type MemberView struct {
 	ID           string     `json:"id"`
+	AccountID    string     `json:"account_id"`
 	Name         string     `json:"name"`
 	ImageURL     string     `json:"image_url"`
 	City         string     `json:"city"`
