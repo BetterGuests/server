@@ -22,6 +22,7 @@ type Inbox interface {
 	Get(ctx context.Context, actorID, conversationID uuid.UUID) (Summary, error)
 	Messages(ctx context.Context, actorID, conversationID uuid.UUID, before *time.Time, limit int) (MessagePage, error)
 	MarkRead(ctx context.Context, actorID, conversationID uuid.UUID) error
+	Hide(ctx context.Context, actorID, conversationID uuid.UUID) error
 }
 
 type Opener interface {
@@ -217,6 +218,18 @@ func (handler *HTTPHandler) MarkRead(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (handler *HTTPHandler) DeleteConversation(w http.ResponseWriter, r *http.Request) {
+	actorID, conversationID, ok := actorAndConversation(w, r)
+	if !ok {
+		return
+	}
+	if err := handler.inbox.Hide(r.Context(), actorID, conversationID); err != nil {
+		writeServiceError(w, "Delete conversation", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func actor(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
 	actorID, ok := accounts.UserID(r.Context())
 	if !ok {
@@ -293,6 +306,8 @@ func writeServiceError(w http.ResponseWriter, operation string, err error) {
 		writeError(w, http.StatusNotFound, "conversation not found")
 	case errors.Is(err, ErrMessageNotFound):
 		writeError(w, http.StatusNotFound, "message not found")
+	case errors.Is(err, ErrStayStillOpen):
+		writeError(w, http.StatusConflict, "You can delete this conversation once the stay is over.")
 	case errors.Is(err, ErrInvalidConversation), errors.Is(err, ErrInvalidMessage), errors.Is(err, ErrInvalidReaction):
 		writeError(w, http.StatusBadRequest, err.Error())
 	default:

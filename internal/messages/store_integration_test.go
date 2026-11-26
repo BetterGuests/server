@@ -217,3 +217,56 @@ func TestReplyMinutesNeedsThreeRepliesAndIsAveraged(t *testing.T) {
 		t.Fatalf("reply minutes = %v, want 6", summary.CounterpartyReplyMins)
 	}
 }
+
+func TestDeletingAConversationHidesItOnlyForThatPersonUntilSomeoneWritesAgain(t *testing.T) {
+	fixture := newConversationFixture(t)
+	ctx, store, host, guest, conversation := fixture.ctx, fixture.store, fixture.host, fixture.guest, fixture.conversation
+	start := time.Now()
+	if _, _, _, err := store.Insert(ctx, guest, conversation, Draft{ID: uuid.New(), Body: "Thanks for the stay"}, start); err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := store.Get(ctx, guest, conversation)
+	if err != nil || !summary.CanDelete {
+		t.Fatalf("can delete = %v, err = %v", summary.CanDelete, err)
+	}
+	if err := store.Hide(ctx, guest, conversation, start.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	listsConversation := func(viewer uuid.UUID) bool {
+		t.Helper()
+		summaries, err := store.List(ctx, viewer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, summary := range summaries {
+			if summary.ID == conversation {
+				return true
+			}
+		}
+		return false
+	}
+	countMessages := func(viewer uuid.UUID) int {
+		t.Helper()
+		page, err := store.Messages(ctx, viewer, conversation, nil, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(page)
+	}
+
+	if listsConversation(guest) || countMessages(guest) != 0 {
+		t.Fatal("the guest still sees the conversation they deleted")
+	}
+	if !listsConversation(host) || countMessages(host) != 1 {
+		t.Fatal("the host lost their copy of the conversation")
+	}
+
+	if _, _, _, err := store.Insert(ctx, host, conversation, Draft{ID: uuid.New(), Body: "Come back any time"}, start.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if !listsConversation(guest) || countMessages(guest) != 1 {
+		t.Fatal("a new message should bring the conversation back with only the new message")
+	}
+}

@@ -88,6 +88,7 @@ type Summary struct {
 	LastMessagePreview    string     `json:"last_message_preview,omitempty"`
 	UnreadCount           int        `json:"unread_count"`
 	CounterpartyReplyMins *int       `json:"counterparty_reply_minutes,omitempty"`
+	CanDelete             bool       `json:"can_delete"`
 	Participants          `json:"-"`
 }
 
@@ -156,6 +157,7 @@ type Store interface {
 	ToggleReaction(ctx context.Context, actorID, conversationID, messageID, reactionID uuid.UUID, emoji string, now time.Time) ([]Reaction, Participants, error)
 	Participants(ctx context.Context, actorID, conversationID uuid.UUID) (Participants, error)
 	MarkRead(ctx context.Context, actorID, conversationID uuid.UUID, now time.Time) error
+	Hide(ctx context.Context, actorID, conversationID uuid.UUID, now time.Time) error
 }
 
 type Publisher interface {

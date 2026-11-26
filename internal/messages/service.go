@@ -19,6 +19,7 @@ var (
 	ErrInvalidMessage       = errors.New("invalid message")
 	ErrMessageNotFound      = errors.New("message not found")
 	ErrInvalidReaction      = errors.New("invalid reaction")
+	ErrStayStillOpen        = errors.New("stay still open")
 )
 
 var reactionEmoji = []string{"👍", "❤️", "😂", "😮", "😢", "🙏"}
@@ -245,6 +246,10 @@ func (service *MessageService) forgetTyping(actorID, conversationID uuid.UUID) {
 
 func (service *MessageService) MarkRead(ctx context.Context, actorID, conversationID uuid.UUID) error {
 	return service.store.MarkRead(ctx, actorID, conversationID, service.now().UTC())
+}
+
+func (service *MessageService) Hide(ctx context.Context, actorID, conversationID uuid.UUID) error {
+	return service.store.Hide(ctx, actorID, conversationID, service.now().UTC())
 }
 
 func cleanDraft(draft string) (string, error) {

@@ -21,6 +21,7 @@ type inboxStub struct {
 	askedBefore *time.Time
 	askedLimit  int
 	markedRead  bool
+	hidden      bool
 }
 
 func (stub *inboxStub) List(context.Context, uuid.UUID) ([]Summary, error) {
@@ -39,6 +40,11 @@ func (stub *inboxStub) Messages(_ context.Context, _, _ uuid.UUID, before *time.
 
 func (stub *inboxStub) MarkRead(context.Context, uuid.UUID, uuid.UUID) error {
 	stub.markedRead = stub.err == nil
+	return stub.err
+}
+
+func (stub *inboxStub) Hide(context.Context, uuid.UUID, uuid.UUID) error {
+	stub.hidden = stub.err == nil
 	return stub.err
 }
 
@@ -114,6 +120,7 @@ func TestEveryRouteRequiresAnAuthenticatedUser(t *testing.T) {
 		"delete":   handler.DeleteMessage,
 		"react":    handler.ReactToMessage,
 		"typing":   handler.Typing,
+		"hide":     handler.DeleteConversation,
 	}
 	for name, serve := range routes {
 		response := httptest.NewRecorder()
@@ -411,5 +418,31 @@ func TestHTTPTypingPingCarriesNoDraft(t *testing.T) {
 
 	if typist.typingUpdate != (TypingUpdate{}) {
 		t.Fatalf("update = %+v", typist.typingUpdate)
+	}
+}
+
+func TestDeleteConversationHidesItForTheCaller(t *testing.T) {
+	inbox := &inboxStub{}
+	handler := newHandler(inbox, &openerStub{}, &senderStub{})
+	response := httptest.NewRecorder()
+
+	handler.DeleteConversation(response, request(http.MethodDelete, "/", "", true))
+
+	if response.Code != http.StatusNoContent || !inbox.hidden {
+		t.Fatalf("status = %d, hidden = %v", response.Code, inbox.hidden)
+	}
+}
+
+func TestDeleteConversationDuringAnOpenStayIsAConflict(t *testing.T) {
+	handler := newHandler(&inboxStub{err: ErrStayStillOpen}, &openerStub{}, &senderStub{})
+	response := httptest.NewRecorder()
+
+	handler.DeleteConversation(response, request(http.MethodDelete, "/", "", true))
+
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", response.Code)
+	}
+	if !strings.Contains(response.Body.String(), "once the stay is over") {
+		t.Fatalf("body = %s", response.Body.String())
 	}
 }

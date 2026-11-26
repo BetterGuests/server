@@ -206,6 +206,7 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.HandleFunc("GET /api/v1/conversations", deps.messages.ListConversations)
 	api.Handle("POST /api/v1/conversations", deps.compliance.RequireAdult(http.HandlerFunc(deps.messages.OpenConversation)))
 	api.HandleFunc("GET /api/v1/conversations/{conversation_id}", deps.messages.GetConversation)
+	api.HandleFunc("DELETE /api/v1/conversations/{conversation_id}", deps.messages.DeleteConversation)
 	api.HandleFunc("GET /api/v1/conversations/{conversation_id}/messages", deps.messages.ListMessages)
 	api.HandleFunc("POST /api/v1/conversations/{conversation_id}/messages", deps.messages.SendMessage)
 	api.HandleFunc("POST /api/v1/conversations/{conversation_id}/read", deps.messages.MarkRead)

@@ -35,6 +35,8 @@ type storeStub struct {
 	reacted          string
 	participantsErr  error
 	participantCalls int
+	hideErr          error
+	hiddenAt         time.Time
 }
 
 func (stub *storeStub) Open(_ context.Context, _, _ uuid.UUID, target OpenTarget, _ time.Time) (uuid.UUID, error) {
@@ -87,6 +89,11 @@ func (stub *storeStub) Participants(context.Context, uuid.UUID, uuid.UUID) (Part
 func (stub *storeStub) MarkRead(context.Context, uuid.UUID, uuid.UUID, time.Time) error {
 	stub.readCalls++
 	return stub.readErr
+}
+
+func (stub *storeStub) Hide(_ context.Context, _, _ uuid.UUID, now time.Time) error {
+	stub.hiddenAt = now
+	return stub.hideErr
 }
 
 type publishedEvent struct {
