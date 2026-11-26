@@ -21,10 +21,11 @@ type Place struct {
 }
 
 type SignIn struct {
-	At      time.Time
-	Place   Place
-	Device  string
-	Browser string
+	At           time.Time
+	LastActiveAt time.Time
+	Place        Place
+	Device       string
+	Browser      string
 }
 
 type MemberActivity struct {
@@ -74,9 +75,8 @@ type EventView struct {
 }
 
 type DayView struct {
-	Date    string `json:"date"`
-	SignIns int    `json:"sign_ins"`
-	Joins   int    `json:"joins"`
+	Date   string `json:"date"`
+	Active int    `json:"active"`
 }
 
 type Directory interface {

@@ -35,6 +35,15 @@ func (handler *HTTPHandler) AdminListings(w http.ResponseWriter, r *http.Request
 	respond(w, map[string][]AdminListing{"listings": listings}, err)
 }
 
+func (handler *HTTPHandler) PopularListings(w http.ResponseWriter, r *http.Request) {
+	adminID, ok := authenticated(w, r)
+	if !ok {
+		return
+	}
+	listings, err := handler.listings.PopularListings(r.Context(), adminID)
+	respond(w, map[string][]PopularListing{"listings": listings}, err)
+}
+
 func (handler *HTTPHandler) PauseListing(w http.ResponseWriter, r *http.Request) {
 	adminID, listingID, ok := identifyListing(w, r)
 	if !ok {

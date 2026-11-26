@@ -3,6 +3,7 @@ package usermap
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -115,14 +116,46 @@ func TestSummaryListsNewestEventsAndDailyCounts(t *testing.T) {
 	if len(summary.Days) != graphDays {
 		t.Fatalf("days = %d, want %d", len(summary.Days), graphDays)
 	}
-	today := summary.Days[len(summary.Days)-1]
-	if today.Date != "2026-11-25" || today.SignIns != 2 {
-		t.Fatalf("today = %+v, want 2 sign-ins on 2026-11-25", today)
+	activeDays := []int{}
+	for index, day := range summary.Days {
+		if day.Active > 0 {
+			activeDays = append(activeDays, len(summary.Days)-1-index)
+		}
 	}
-	if summary.Days[len(summary.Days)-3].Joins != 1 {
-		t.Fatalf("join not counted two days ago: %+v", summary.Days[len(summary.Days)-3])
+	if fmt.Sprint(activeDays) != "[2 0]" {
+		t.Fatalf("active days ago = %v, want joined two days ago and signed in today", activeDays)
+	}
+	if summary.Days[len(summary.Days)-1].Date != "2026-11-25" || summary.Days[len(summary.Days)-1].Active != 1 {
+		t.Fatalf("today = %+v, want one active member on 2026-11-25", summary.Days[len(summary.Days)-1])
 	}
 	if summary.Members[0].SignIns30d != 2 {
 		t.Fatalf("sign-ins in 30 days = %d, want 2", summary.Members[0].SignIns30d)
+	}
+}
+
+func TestDailyActivityCountsEachMemberOncePerDayAcrossLongSessions(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	joined := now.Add(-400 * 24 * time.Hour)
+	directory := &stubDirectory{
+		members: []Member{{ClerkUserID: "user_a", JoinedAt: joined}, {ClerkUserID: "user_b", JoinedAt: joined}},
+		activities: map[string]MemberActivity{
+			"user_a": {SignIns: []SignIn{
+				{At: now.Add(-3 * 24 * time.Hour), LastActiveAt: now.Add(-1 * 24 * time.Hour)},
+				{At: now.Add(-2 * 24 * time.Hour), LastActiveAt: now.Add(-2 * 24 * time.Hour)},
+			}},
+			"user_b": {SignIns: []SignIn{{At: now.Add(-time.Hour), LastActiveAt: now}}},
+		},
+	}
+	service := NewUserMapService(directory, stubAdmins{admin: true})
+	service.now = func() time.Time { return now }
+
+	summary, err := service.Summary(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := summary.Days[len(summary.Days)-4:]
+	got := []int{last[0].Active, last[1].Active, last[2].Active, last[3].Active}
+	if fmt.Sprint(got) != "[1 1 1 1]" {
+		t.Fatalf("last four days active = %v, want [1 1 1 1]", got)
 	}
 }

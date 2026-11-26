@@ -414,3 +414,36 @@ func TestOldOpenReportsAreNotAnnouncedWhenAlertsStart(t *testing.T) {
 		t.Fatal("a fresh report must still be acknowledged")
 	}
 }
+
+func TestOnlyTheTeamSeesListingsRankedByRecentBookings(t *testing.T) {
+	w := newWorld(t)
+	team := uuid.New()
+	w.sql(`INSERT INTO app.admin_accounts (account_id, email) VALUES ($1, $2)`, team, team.String()+"@example.test")
+	w.book(10, "confirmed")
+	w.book(20, "confirmed")
+	w.book(30, "pending")
+
+	if _, err := w.service.PopularListings(w.ctx, w.host); !errors.Is(err, cancellations.ErrNotAdmin) {
+		t.Fatalf("a host saw the popularity ranking: %v", err)
+	}
+
+	ranked, err := w.service.PopularListings(w.ctx, team)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ranked) == 0 || ranked[0].ListingID != w.listingID || ranked[0].Bookings != 2 {
+		t.Fatalf("ranked = %+v, want the listing first with its two confirmed bookings", ranked)
+	}
+
+	store := cancellations.NewPostgresCancellationStore(w.pool)
+	since := time.Now().Add(-cancellations.PopularityPeriod)
+	stranger, err := store.PopularListings(w.ctx, uuid.New(), since, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, listing := range stranger {
+		if listing.Bookings != 0 {
+			t.Fatalf("a non-admin counted other people's bookings: %+v", listing)
+		}
+	}
+}

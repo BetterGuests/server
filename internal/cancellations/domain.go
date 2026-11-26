@@ -55,6 +55,8 @@ const (
 	maxNoteRunes            = 1000
 	maxListedReports        = 100
 	maxListedListings       = 200
+	maxPopularListings      = 10
+	PopularityPeriod        = 90 * 24 * time.Hour
 	coverPhotoURLLifetime   = time.Hour
 	maxPauseReasonRunes     = 200
 	listingEventKind        = "listing"
@@ -150,6 +152,18 @@ type AdminListing struct {
 	CoverPhotoURL     string     `json:"cover_photo_url,omitempty"`
 }
 
+type PopularListing struct {
+	ListingID     uuid.UUID `json:"listing_id"`
+	Title         string    `json:"title"`
+	HostName      string    `json:"host_name"`
+	City          string    `json:"city"`
+	Bookings      int       `json:"bookings"`
+	Reviews       int       `json:"reviews"`
+	Rating        float64   `json:"rating"`
+	CoverPhotoKey string    `json:"-"`
+	CoverPhotoURL string    `json:"cover_photo_url,omitempty"`
+}
+
 type ListingEvent struct {
 	ListingID uuid.UUID `json:"listing_id"`
 	Paused    bool      `json:"paused"`
@@ -191,6 +205,7 @@ type Store interface {
 	PendingRefunds(ctx context.Context, limit int) ([]PendingRefund, error)
 	MarkRefunded(ctx context.Context, refund PendingRefund, refundID string) error
 	AdminListings(ctx context.Context, adminID uuid.UUID, cancellationsSince time.Time, limit int) ([]AdminListing, error)
+	PopularListings(ctx context.Context, adminID uuid.UUID, bookedSince time.Time, limit int) ([]PopularListing, error)
 	PauseListing(ctx context.Context, adminID, listingID uuid.UUID, reason string) (uuid.UUID, error)
 	UnpauseListing(ctx context.Context, adminID, listingID uuid.UUID, at time.Time) (uuid.UUID, error)
 }
@@ -219,6 +234,7 @@ type Canceller interface {
 
 type ListingDesk interface {
 	AdminListings(ctx context.Context, adminID uuid.UUID) ([]AdminListing, error)
+	PopularListings(ctx context.Context, adminID uuid.UUID) ([]PopularListing, error)
 	PauseListing(ctx context.Context, adminID, listingID uuid.UUID, reason string) error
 	UnpauseListing(ctx context.Context, adminID, listingID uuid.UUID) error
 }

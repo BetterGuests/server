@@ -111,7 +111,11 @@ func summarize(members []Member, activities []MemberActivity, total int, now tim
 		if activity.Place.Country == "" {
 			summary.Unplaced++
 		}
-		days.addJoin(member.JoinedAt)
+		activeDays := days.newMemberActivity()
+		activeDays.mark(member.JoinedAt, member.JoinedAt)
+		if member.LastActiveAt != nil {
+			activeDays.mark(*member.LastActiveAt, *member.LastActiveAt)
+		}
 		events = append(events, EventView{
 			Kind:     Joined,
 			At:       member.JoinedAt,
@@ -122,7 +126,7 @@ func summarize(members []Member, activities []MemberActivity, total int, now tim
 		})
 		recentSignIns := 0
 		for _, signIn := range activity.SignIns {
-			days.addSignIn(signIn.At)
+			activeDays.mark(signIn.At, signIn.LastActiveAt)
 			if now.Sub(signIn.At) <= joinedWindow {
 				recentSignIns++
 			}
@@ -137,6 +141,7 @@ func summarize(members []Member, activities []MemberActivity, total int, now tim
 				Browser:  signIn.Browser,
 			})
 		}
+		days.add(activeDays)
 		summary.Members = append(summary.Members, MemberView{
 			ID:           member.ClerkUserID,
 			Name:         member.Name,
@@ -176,23 +181,35 @@ func newDayCounter(now time.Time, count int) *dayCounter {
 	return &dayCounter{first: first, days: days}
 }
 
-func (counter *dayCounter) index(at time.Time) int {
-	offset := int(at.UTC().Truncate(24*time.Hour).Sub(counter.first) / (24 * time.Hour))
-	if offset < 0 || offset >= len(counter.days) {
-		return -1
-	}
-	return offset
+func (counter *dayCounter) offset(at time.Time) int {
+	return int(at.UTC().Truncate(24*time.Hour).Sub(counter.first) / (24 * time.Hour))
 }
 
-func (counter *dayCounter) addSignIn(at time.Time) {
-	if index := counter.index(at); index >= 0 {
-		counter.days[index].SignIns++
+type memberDays map[int]bool
+
+func (counter *dayCounter) newMemberActivity() *memberActivity {
+	return &memberActivity{counter: counter, days: memberDays{}}
+}
+
+type memberActivity struct {
+	counter *dayCounter
+	days    memberDays
+}
+
+func (activity *memberActivity) mark(from, until time.Time) {
+	if until.Before(from) {
+		until = from
+	}
+	first := max(activity.counter.offset(from), 0)
+	last := min(activity.counter.offset(until), len(activity.counter.days)-1)
+	for index := first; index <= last; index++ {
+		activity.days[index] = true
 	}
 }
 
-func (counter *dayCounter) addJoin(at time.Time) {
-	if index := counter.index(at); index >= 0 {
-		counter.days[index].Joins++
+func (counter *dayCounter) add(activity *memberActivity) {
+	for index := range activity.days {
+		counter.days[index].Active++
 	}
 }
 

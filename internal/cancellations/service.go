@@ -172,18 +172,33 @@ func (service *CancellationService) AdminListings(ctx context.Context, adminID u
 		return nil, err
 	}
 	for index := range listings {
-		listings[index].CoverPhotoURL = service.signedCoverPhoto(ctx, listings[index])
+		listings[index].CoverPhotoURL = service.signedCoverPhoto(ctx, listings[index].ListingID, listings[index].CoverPhotoKey)
 	}
 	return listings, nil
 }
 
-func (service *CancellationService) signedCoverPhoto(ctx context.Context, listing AdminListing) string {
-	if service.photos == nil || listing.CoverPhotoKey == "" {
+func (service *CancellationService) PopularListings(ctx context.Context, adminID uuid.UUID) ([]PopularListing, error) {
+	if err := service.requireAdmin(ctx, adminID); err != nil {
+		return nil, err
+	}
+	since := service.now().UTC().Add(-PopularityPeriod)
+	listings, err := service.store.PopularListings(ctx, adminID, since, maxPopularListings)
+	if err != nil {
+		return nil, err
+	}
+	for index := range listings {
+		listings[index].CoverPhotoURL = service.signedCoverPhoto(ctx, listings[index].ListingID, listings[index].CoverPhotoKey)
+	}
+	return listings, nil
+}
+
+func (service *CancellationService) signedCoverPhoto(ctx context.Context, listingID uuid.UUID, key string) string {
+	if service.photos == nil || key == "" {
 		return ""
 	}
-	url, err := service.photos.PresignDownload(ctx, listing.CoverPhotoKey, coverPhotoURLLifetime)
+	url, err := service.photos.PresignDownload(ctx, key, coverPhotoURLLifetime)
 	if err != nil {
-		slog.Error("presign listing cover photo", "listing_id", listing.ListingID, "error", err)
+		slog.Error("presign listing cover photo", "listing_id", listingID, "error", err)
 		return ""
 	}
 	return url

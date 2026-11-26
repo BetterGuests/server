@@ -330,6 +330,52 @@ func (store *PostgresCancellationStore) AdminListings(ctx context.Context, admin
 	return listings, nil
 }
 
+func (store *PostgresCancellationStore) PopularListings(ctx context.Context, adminID uuid.UUID, bookedSince time.Time, limit int) ([]PopularListing, error) {
+	listings := []PopularListing{}
+	err := db.WithUserTx(ctx, store.DB, adminID.String(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT l.id, l.title, COALESCE(l.host_name, ''), COALESCE(l.city, ''),
+			        COALESCE(b.bookings, 0), COALESCE(r.reviews, 0), COALESCE(r.rating, 0),
+			        COALESCE((SELECT p.object_key FROM app.listing_photos p
+			                  WHERE p.listing_id = l.id AND p.screening = 'passed' ORDER BY p.position LIMIT 1), '')
+			 FROM app.listings l
+			 LEFT JOIN (
+			     SELECT listing_id, count(*)::integer AS bookings
+			     FROM app.bookings
+			     WHERE status IN ('confirmed', 'completed') AND created_at > $1
+			     GROUP BY listing_id
+			 ) b ON b.listing_id = l.id
+			 LEFT JOIN (
+			     SELECT listing_id, count(*)::integer AS reviews, avg(rating)::float8 AS rating
+			     FROM app.listing_reviews
+			     GROUP BY listing_id
+			 ) r ON r.listing_id = l.id
+			 WHERE l.status = 'published'
+			   AND NOT EXISTS (SELECT 1 FROM app.listing_suspensions s WHERE s.listing_id = l.id AND s.lifted_at IS NULL)
+			 ORDER BY COALESCE(b.bookings, 0) DESC, COALESCE(r.reviews, 0) DESC, COALESCE(r.rating, 0) DESC, l.title, l.id
+			 LIMIT $2`, bookedSince, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var listing PopularListing
+			if err := rows.Scan(
+				&listing.ListingID, &listing.Title, &listing.HostName, &listing.City,
+				&listing.Bookings, &listing.Reviews, &listing.Rating, &listing.CoverPhotoKey,
+			); err != nil {
+				return err
+			}
+			listings = append(listings, listing)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list popular listings: %w", err)
+	}
+	return listings, nil
+}
+
 func (store *PostgresCancellationStore) PauseListing(ctx context.Context, adminID, listingID uuid.UUID, reason string) (uuid.UUID, error) {
 	var hostID uuid.UUID
 	err := db.WithUserTx(ctx, store.DB, adminID.String(), func(tx pgx.Tx) error {

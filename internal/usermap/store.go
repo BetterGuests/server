@@ -73,7 +73,11 @@ func activityFrom(sessions []*clerk.Session) MemberActivity {
 	var newest int64
 	for _, found := range sessions {
 		place := placeOf(found.LatestActivity)
-		signIn := SignIn{At: time.UnixMilli(found.CreatedAt).UTC(), Place: place}
+		signIn := SignIn{
+			At:           time.UnixMilli(found.CreatedAt).UTC(),
+			LastActiveAt: time.UnixMilli(found.LastActiveAt).UTC(),
+			Place:        place,
+		}
 		if found.LatestActivity != nil {
 			signIn.Device = strings.TrimSpace(valueOf(found.LatestActivity.DeviceType))
 			signIn.Browser = strings.TrimSpace(valueOf(found.LatestActivity.BrowserName))
