@@ -141,15 +141,15 @@ func TestSubmit(t *testing.T) {
 		wantSaved   int
 		wantRemoved int
 	}{
-		{"valid upload is saved", ownedBy(hostID), &objectsStub{info: ObjectInfo{Size: 500, ContentType: "application/pdf"}}, Lease, validKey, nil, 1, 0},
+		{"valid upload is saved", ownedBy(hostID), &objectsStub{info: ObjectInfo{Size: 500, ContentType: "application/pdf"}}, Deed, validKey, nil, 1, 0},
 		{"unknown document type", ownedBy(hostID), &objectsStub{}, "passport", validKey, ErrInvalidDocument, 0, 0},
-		{"key from another listing", ownedBy(hostID), &objectsStub{}, Lease, otherListingKey, ErrInvalidObjectKey, 0, 0},
-		{"path traversal in key", ownedBy(hostID), &objectsStub{}, Lease, traversalKey, ErrInvalidObjectKey, 0, 0},
-		{"not the host", ownedBy(uuid.New()), &objectsStub{}, Lease, validKey, ErrNotListingOwner, 0, 0},
-		{"nothing was uploaded", ownedBy(hostID), &objectsStub{statErr: errors.New("missing")}, Lease, validKey, ErrNotUploaded, 0, 0},
-		{"wrong content type is deleted", ownedBy(hostID), &objectsStub{info: ObjectInfo{Size: 500, ContentType: "text/html"}}, Lease, validKey, ErrDocumentRejected, 0, 1},
-		{"oversized upload is deleted", ownedBy(hostID), &objectsStub{info: ObjectInfo{Size: maxDocumentBytes + 1, ContentType: "application/pdf"}}, Lease, validKey, ErrDocumentRejected, 0, 1},
-		{"pending proof surfaces as conflict", &storeStub{owner: hostID, saveErr: ErrProofPending}, &objectsStub{info: ObjectInfo{Size: 500, ContentType: "application/pdf"}}, Lease, validKey, ErrProofPending, 1, 0},
+		{"key from another listing", ownedBy(hostID), &objectsStub{}, Deed, otherListingKey, ErrInvalidObjectKey, 0, 0},
+		{"path traversal in key", ownedBy(hostID), &objectsStub{}, Deed, traversalKey, ErrInvalidObjectKey, 0, 0},
+		{"not the host", ownedBy(uuid.New()), &objectsStub{}, Deed, validKey, ErrNotListingOwner, 0, 0},
+		{"nothing was uploaded", ownedBy(hostID), &objectsStub{statErr: errors.New("missing")}, Deed, validKey, ErrNotUploaded, 0, 0},
+		{"wrong content type is deleted", ownedBy(hostID), &objectsStub{info: ObjectInfo{Size: 500, ContentType: "text/html"}}, Deed, validKey, ErrDocumentRejected, 0, 1},
+		{"oversized upload is deleted", ownedBy(hostID), &objectsStub{info: ObjectInfo{Size: maxDocumentBytes + 1, ContentType: "application/pdf"}}, Deed, validKey, ErrDocumentRejected, 0, 1},
+		{"pending proof surfaces as conflict", &storeStub{owner: hostID, saveErr: ErrProofPending}, &objectsStub{info: ObjectInfo{Size: 500, ContentType: "application/pdf"}}, Deed, validKey, ErrProofPending, 1, 0},
 	}
 
 	for _, testCase := range cases {

@@ -119,7 +119,7 @@ Create a second Railway service from the same repo.
     document checks. Without it hosts upload and an admin reviews. Checked files
     stay in Persona and are never copied to our storage. In the Persona dashboard:
     1. Create an inquiry template that only collects a document (Document
-       Verification), limited to utility bills, deeds, leases and property tax
+       Verification), limited to utility bills, deeds and property tax
        bills, with the fraud and recency checks you want turned on.
     2. Add text extractions named exactly `owner_name`, `property_address` and
        `issue_date` (formatted `YYYY-MM-DD`). The server compares the first two

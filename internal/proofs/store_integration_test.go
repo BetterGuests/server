@@ -682,3 +682,80 @@ func TestDeletingADraftQueuesItsDocumentsForDeletion(t *testing.T) {
 		t.Fatal("a deleted provider copy must not be due again")
 	}
 }
+
+func TestManagerPermissionIsReviewedWithItsPapersAndEnds(t *testing.T) {
+	f := newFixture(t)
+	store := NewPostgresProofStore(f.pool)
+	adminID := f.makeAdmin(t)
+	listing := f.draft(t, uuid.New())
+	key := func() string { return keyPrefix(listing.ID) + uuid.NewString() + ".pdf" }
+	agreement := key()
+	proof, err := f.proofs.SubmitAuthority(f.ctx, listing.HostID, listing.ID, Submission{
+		Relationship: PropertyManager, DocumentType: Deed, ObjectKey: key(),
+		Attachments: []SubmittedAttachment{{Kind: ManagementAgreement, ObjectKey: agreement}},
+		OwnerName:   "Sam Owner", OwnerContact: "sam@example.test",
+		ExpiresOn: time.Now().UTC().AddDate(1, 0, 0).Format(time.DateOnly),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := f.proofs.ListSubmitted(f.ctx, adminID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reviewed bool
+	for _, item := range items {
+		if item.ID == proof.ID {
+			reviewed = item.Relationship == PropertyManager && item.OwnerName == "Sam Owner" &&
+				len(item.Attachments) == 1 && item.Attachments[0].URL != ""
+		}
+	}
+	if !reviewed {
+		t.Fatalf("the reviewer must see the owner and the agreement: %+v", items)
+	}
+	if err := f.proofs.Decide(f.ctx, adminID, proof.ID, Approve, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ExpireAuthority(f.ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if latest, _, _ := store.Latest(f.ctx, listing.HostID, listing.ID); latest.Status != Approved {
+		t.Fatalf("current permission must stay approved: %+v", latest)
+	}
+	if _, err := store.ExpireAuthority(f.ctx, time.Now().AddDate(2, 0, 0)); err != nil {
+		t.Fatal(err)
+	}
+	latest, _, err := store.Latest(f.ctx, listing.HostID, listing.ID)
+	if err != nil || latest.Status != Rejected {
+		t.Fatalf("ended permission must be withdrawn: %+v %v", latest, err)
+	}
+	if err := f.listings.PublishListing(f.ctx, listing.HostID, listing.ID); !errors.Is(err, listings.ErrProofRequired) {
+		t.Fatalf("ended permission must not allow publishing: %v", err)
+	}
+	if _, err := f.super.Exec(f.ctx,
+		`UPDATE app.property_proofs SET revoked_at = now() - interval '91 days' WHERE id = $1`, proof.ID); err != nil {
+		t.Fatal(err)
+	}
+	files, err := store.FilesDueForDeletion(f.ctx, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	due := map[string]uuid.UUID{}
+	for _, file := range files {
+		due[file.ObjectKey] = file.ProofID
+	}
+	if due[agreement] == uuid.Nil || due[proof.ObjectKey] == uuid.Nil {
+		t.Fatalf("both files must be due: %v", files)
+	}
+	for _, id := range []uuid.UUID{due[proof.ObjectKey], due[agreement]} {
+		if err := store.MarkFileDeleted(f.ctx, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if latest, _, _ = store.Latest(f.ctx, listing.HostID, listing.ID); latest.OwnerName != "" || latest.OwnerContact != "" {
+		t.Fatalf("owner details must be erased with the file: %+v", latest)
+	}
+	if _, err := listings.NewPostgresListingStore(f.pool).DeleteDraft(f.ctx, listing.HostID.String(), listing.ID); !errors.Is(err, nil) {
+		t.Fatal(err)
+	}
+}

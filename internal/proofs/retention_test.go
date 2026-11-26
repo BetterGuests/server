@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -21,6 +22,8 @@ func (store *retentionStub) MarkFileDeleted(_ context.Context, proofID uuid.UUID
 	store.marked = append(store.marked, proofID)
 	return nil
 }
+
+func (store *retentionStub) ExpireAuthority(context.Context, time.Time) (int, error) { return 0, nil }
 
 type failingRemover string
 

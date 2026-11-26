@@ -36,6 +36,11 @@ type Proof struct {
 	ListingID       uuid.UUID    `json:"listing_id"`
 	HostID          uuid.UUID    `json:"host_id"`
 	DocumentType    DocumentType `json:"document_type"`
+	Relationship    Relationship `json:"relationship"`
+	OwnerName       string       `json:"owner_name,omitempty"`
+	OwnerContact    string       `json:"owner_contact,omitempty"`
+	ExpiresOn       string       `json:"authority_expires_on,omitempty"`
+	Attachments     []Attachment `json:"attachments,omitempty"`
 	ContentType     string       `json:"content_type"`
 	SizeBytes       int64        `json:"size_bytes"`
 	Status          Status       `json:"status"`
@@ -102,7 +107,7 @@ type UploadRequester interface {
 }
 
 type Submitter interface {
-	Submit(ctx context.Context, hostID, listingID uuid.UUID, documentType DocumentType, objectKey string) (Proof, error)
+	SubmitAuthority(ctx context.Context, hostID, listingID uuid.UUID, submission Submission) (Proof, error)
 }
 
 type StatusReader interface {
@@ -198,8 +203,62 @@ type DueFile struct {
 type FileRetentionStore interface {
 	FilesDueForDeletion(ctx context.Context, batchSize int) ([]DueFile, error)
 	MarkFileDeleted(ctx context.Context, proofID uuid.UUID) error
+	AuthorityStore
 }
 
 type FileRemover interface {
 	Remove(ctx context.Context, key string) error
+}
+
+type Relationship string
+
+const (
+	Owner           Relationship = "owner"
+	CompanyOwner    Relationship = "company_owner"
+	PropertyManager Relationship = "property_manager"
+	Renter          Relationship = "renter"
+)
+
+type AttachmentKind string
+
+const (
+	CompanyRegistration  AttachmentKind = "company_registration"
+	SigningAuthorization AttachmentKind = "signing_authorization"
+	ManagementAgreement  AttachmentKind = "management_agreement"
+	LandlordPermission   AttachmentKind = "landlord_permission"
+)
+
+type Attachment struct {
+	ID          uuid.UUID      `json:"-"`
+	Kind        AttachmentKind `json:"kind"`
+	ContentType string         `json:"-"`
+	SizeBytes   int64          `json:"-"`
+	ObjectKey   string         `json:"-"`
+	URL         string         `json:"url,omitempty"`
+}
+
+type SubmittedAttachment struct {
+	Kind      AttachmentKind `json:"kind"`
+	ObjectKey string         `json:"object_key"`
+}
+
+type Submission struct {
+	Relationship Relationship          `json:"relationship"`
+	DocumentType DocumentType          `json:"document_type"`
+	ObjectKey    string                `json:"object_key"`
+	Attachments  []SubmittedAttachment `json:"attachments"`
+	OwnerName    string                `json:"owner_name"`
+	OwnerContact string                `json:"owner_contact"`
+	ExpiresOn    string                `json:"authority_expires_on"`
+}
+
+type authorityRule struct {
+	documents  []DocumentType
+	required   []AttachmentKind
+	optional   []AttachmentKind
+	needsOwner bool
+}
+
+type AuthorityStore interface {
+	ExpireAuthority(ctx context.Context, today time.Time) (int, error)
 }

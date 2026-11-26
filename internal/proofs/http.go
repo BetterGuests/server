@@ -61,11 +61,6 @@ type uploadRequest struct {
 	SizeBytes   int64  `json:"size_bytes"`
 }
 
-type submitRequest struct {
-	DocumentType DocumentType `json:"document_type"`
-	ObjectKey    string       `json:"object_key"`
-}
-
 type revokeRequest struct {
 	Reason string `json:"reason"`
 }
@@ -97,11 +92,11 @@ func (handler *HTTPHandler) Submit(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var request submitRequest
+	var request Submission
 	if !decodeBody(w, r, &request) {
 		return
 	}
-	proof, err := handler.submits.Submit(r.Context(), hostID, listingID, request.DocumentType, request.ObjectKey)
+	proof, err := handler.submits.SubmitAuthority(r.Context(), hostID, listingID, request)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -238,6 +233,12 @@ var statusByError = []struct {
 	status int
 }{
 	{ErrDocumentRejected, http.StatusBadRequest},
+	{ErrInvalidRelationship, http.StatusBadRequest},
+	{ErrWrongDocument, http.StatusBadRequest},
+	{ErrAttachments, http.StatusBadRequest},
+	{ErrOwnerDetails, http.StatusBadRequest},
+	{ErrExpiry, http.StatusBadRequest},
+	{ErrAuthorityExpired, http.StatusConflict},
 	{ErrInvalidDocument, http.StatusBadRequest},
 	{ErrInvalidObjectKey, http.StatusBadRequest},
 	{ErrNotUploaded, http.StatusBadRequest},

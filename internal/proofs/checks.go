@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -49,6 +50,9 @@ func (service *CheckService) Start(ctx context.Context, hostID, listingID uuid.U
 	}
 	if !documentTypes[documentType] {
 		return CheckTicket{}, ErrInvalidDocument
+	}
+	if !slices.Contains(authorityRules[Owner].documents, documentType) {
+		return CheckTicket{}, ErrWrongDocument
 	}
 	owner, err := service.store.ListingHost(ctx, hostID, listingID)
 	if err != nil {

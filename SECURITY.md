@@ -242,3 +242,15 @@ equally deep. A few are worth reading before you trust them blindly:
   `app.release_draft_listing_documents` queues each stored file and Persona
   inquiry for the deletion jobs, then removes the proof rows. The application
   role still cannot delete a proof directly.
+
+## Authority to list
+
+- A host states whether they own the home, own it through a company, manage it or
+  rent it. Only an owner's document can be approved automatically; the rest need
+  an admin, with the supporting files for that connection.
+- Managers and renters give the owner's name, a contact and an end date. The six
+  hourly job withdraws approvals past that date, which pauses the listing.
+- Supporting files follow the main document's deletion schedule. Owner details are
+  erased when the main file is deleted.
+- Not built: contacting the owner automatically, checking company registries, and
+  co-host accounts.

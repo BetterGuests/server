@@ -40,7 +40,22 @@ func (service *FileRetentionService) RunOnce(ctx context.Context) (int, error) {
 	return deleted, nil
 }
 
+func (service *FileRetentionService) endExpiredAuthority(ctx context.Context) {
+	expired, err := service.store.ExpireAuthority(ctx, time.Now())
+	if err != nil {
+		slog.Error("expired listing permissions were not withdrawn", "error", err)
+		return
+	}
+	if expired > 0 {
+		slog.Info("expired listing permissions withdrawn", "withdrawn", expired)
+	}
+}
+
 func (service *FileRetentionService) runCycle(ctx context.Context) {
+	service.endExpiredAuthority(ctx)
+	if service.files == nil {
+		return
+	}
 	for ctx.Err() == nil {
 		deleted, err := service.RunOnce(ctx)
 		if err != nil {
@@ -57,9 +72,6 @@ func (service *FileRetentionService) runCycle(ctx context.Context) {
 }
 
 func (service *FileRetentionService) Run(ctx context.Context) {
-	if service.files == nil {
-		return
-	}
 	service.runCycle(ctx)
 	ticker := time.NewTicker(retentionInterval)
 	defer ticker.Stop()

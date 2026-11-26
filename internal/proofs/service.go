@@ -108,36 +108,69 @@ func (service *ProofService) RequestUpload(ctx context.Context, hostID, listingI
 }
 
 func (service *ProofService) Submit(ctx context.Context, hostID, listingID uuid.UUID, documentType DocumentType, objectKey string) (Proof, error) {
+	return service.SubmitAuthority(ctx, hostID, listingID, Submission{Relationship: Owner, DocumentType: documentType, ObjectKey: objectKey})
+}
+
+func (service *ProofService) SubmitAuthority(ctx context.Context, hostID, listingID uuid.UUID, submission Submission) (Proof, error) {
 	if service.objects == nil {
 		return Proof{}, ErrUploadsDisabled
 	}
-	if !documentTypes[documentType] {
+	if !documentTypes[submission.DocumentType] {
 		return Proof{}, ErrInvalidDocument
 	}
-	if !validObjectKey(objectKey, listingID) {
+	if !validObjectKey(submission.ObjectKey, listingID) {
 		return Proof{}, ErrInvalidObjectKey
+	}
+	for _, attachment := range submission.Attachments {
+		if !validObjectKey(attachment.ObjectKey, listingID) || attachment.ObjectKey == submission.ObjectKey {
+			return Proof{}, ErrInvalidObjectKey
+		}
 	}
 	if err := service.requireOwner(ctx, hostID, listingID); err != nil {
 		return Proof{}, err
 	}
-	info, err := service.objects.Stat(ctx, objectKey)
-	if err != nil {
-		return Proof{}, ErrNotUploaded
-	}
-	if _, allowed := allowedContentTypes[info.ContentType]; !allowed || info.Size <= 0 || info.Size > maxDocumentBytes {
-		service.discard(ctx, objectKey)
-		return Proof{}, ErrDocumentRejected
-	}
 	now := service.now().UTC()
+	submission, err := checkedSubmission(submission, now)
+	if err != nil {
+		return Proof{}, err
+	}
+	info, err := service.uploaded(ctx, submission.ObjectKey)
+	if err != nil {
+		return Proof{}, err
+	}
 	proof := Proof{
-		ID: service.newID(), ListingID: listingID, HostID: hostID, DocumentType: documentType,
+		ID: service.newID(), ListingID: listingID, HostID: hostID, DocumentType: submission.DocumentType,
+		Relationship: submission.Relationship, OwnerName: submission.OwnerName,
+		OwnerContact: submission.OwnerContact, ExpiresOn: submission.ExpiresOn,
 		ContentType: info.ContentType, SizeBytes: info.Size, Status: Submitted,
-		CreatedAt: now, UpdatedAt: now, ObjectKey: objectKey,
+		CreatedAt: now, UpdatedAt: now, ObjectKey: submission.ObjectKey,
+	}
+	for _, attachment := range submission.Attachments {
+		info, err := service.uploaded(ctx, attachment.ObjectKey)
+		if err != nil {
+			return Proof{}, err
+		}
+		proof.Attachments = append(proof.Attachments, Attachment{
+			ID: service.newID(), Kind: attachment.Kind, ContentType: info.ContentType,
+			SizeBytes: info.Size, ObjectKey: attachment.ObjectKey,
+		})
 	}
 	if err := service.store.Save(ctx, proof); err != nil {
 		return Proof{}, err
 	}
 	return proof, nil
+}
+
+func (service *ProofService) uploaded(ctx context.Context, objectKey string) (ObjectInfo, error) {
+	info, err := service.objects.Stat(ctx, objectKey)
+	if err != nil {
+		return ObjectInfo{}, ErrNotUploaded
+	}
+	if _, allowed := allowedContentTypes[info.ContentType]; !allowed || info.Size <= 0 || info.Size > maxDocumentBytes {
+		service.discard(ctx, objectKey)
+		return ObjectInfo{}, ErrDocumentRejected
+	}
+	return info, nil
 }
 
 func (service *ProofService) discard(ctx context.Context, key string) {
@@ -213,6 +246,10 @@ func (service *ProofService) withDocumentLinks(ctx context.Context, items []Revi
 	}
 	for index := range items {
 		items[index].DocumentURL = service.signedDownload(ctx, items[index].ObjectKey)
+		for position := range items[index].Attachments {
+			attachment := &items[index].Attachments[position]
+			attachment.URL = service.signedDownload(ctx, attachment.ObjectKey)
+		}
 	}
 	return items, nil
 }
