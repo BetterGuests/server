@@ -89,6 +89,7 @@ func (deps routeDeps) mountPayments(mux *http.ServeMux) {
 		mux.Handle("POST /api/v1/payments/checkout", deps.authenticate(deps.compliance.RequireAdult(http.HandlerFunc(deps.payments.StartCheckout))))
 		mux.Handle("GET /api/v1/payments/cards", deps.authenticate(http.HandlerFunc(deps.payments.ListSavedCards)))
 		mux.Handle("DELETE /api/v1/payments/cards/{card_id}", deps.authenticate(http.HandlerFunc(deps.payments.RemoveSavedCard)))
+		mux.Handle("PUT /api/v1/payments/cards/{card_id}/style", deps.authenticate(http.HandlerFunc(deps.payments.StyleSavedCard)))
 		mux.Handle("POST /api/v1/payments/cards/{card_id}/art/session", deps.authenticate(deps.compliance.RequireAdult(http.HandlerFunc(deps.payments.StartCardArt))))
 		mux.Handle("PUT /api/v1/payments/cards/{card_id}/art", deps.authenticate(deps.compliance.RequireAdult(http.HandlerFunc(deps.payments.LinkCardArt))))
 	}

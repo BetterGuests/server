@@ -136,6 +136,8 @@ type SavedCard struct {
 	Wallet   string         `json:"wallet"`
 	Billing  BillingDetails `json:"billing"`
 
+	CardStyle
+
 	ArtURL    string `json:"art_url"`
 	ArtCardID string `json:"-"`
 }
@@ -143,6 +145,7 @@ type SavedCard struct {
 type CardManager interface {
 	SavedCards(ctx context.Context, accountID uuid.UUID) ([]SavedCard, error)
 	RemoveCard(ctx context.Context, accountID uuid.UUID, cardID string) error
+	StyleCard(ctx context.Context, accountID uuid.UUID, cardID string, style CardStyle) error
 	CardArtEnabled() bool
 	StartCardArt(ctx context.Context, accountID uuid.UUID, cardID string) (CollectSession, error)
 	LinkCardArt(ctx context.Context, accountID uuid.UUID, cardID, artCardID string) error
@@ -151,6 +154,7 @@ type CardManager interface {
 type Wallet interface {
 	ListCards(ctx context.Context, customerID string) ([]SavedCard, error)
 	DetachCard(ctx context.Context, cardID string) error
+	StyleCard(ctx context.Context, cardID string, style CardStyle) error
 	LinkArtCard(ctx context.Context, cardID, artCardID string) error
 	CreateCustomer(ctx context.Context, accountID uuid.UUID) (string, error)
 	CreateCustomerSession(ctx context.Context, customerID string) (string, error)

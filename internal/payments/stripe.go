@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -26,17 +28,26 @@ func NewStripeGateway(config Config) *StripeGateway {
 }
 
 func (gateway *StripeGateway) CreateIntent(ctx context.Context, params IntentParams) (Intent, error) {
+	types := paymentMethodTypes(params.AmountCents, params.Currency)
+	intent, err := gateway.newIntent(ctx, params, types)
+	if payLaterWasRefused(err, types) {
+		slog.Warn("Pay later was refused, offering cards alone", "error", err)
+		intent, err = gateway.newIntent(ctx, params, []string{string(stripe.PaymentMethodTypeCard)})
+	}
+	if err != nil {
+		return Intent{}, fmt.Errorf("stripe create payment intent: %w", err)
+	}
+	return Intent{ID: intent.ID, ClientSecret: intent.ClientSecret}, nil
+}
+
+func (gateway *StripeGateway) newIntent(ctx context.Context, params IntentParams, types []string) (*stripe.PaymentIntent, error) {
 	request := &stripe.PaymentIntentParams{
-		Amount:   stripe.Int64(int64(params.AmountCents)),
-		Currency: stripe.String(params.Currency),
+		Amount:             stripe.Int64(int64(params.AmountCents)),
+		Currency:           stripe.String(params.Currency),
+		PaymentMethodTypes: stripe.StringSlice(types),
 	}
 	if params.ManualCapture {
 		request.CaptureMethod = stripe.String(string(stripe.PaymentIntentCaptureMethodManual))
-		request.PaymentMethodTypes = stripe.StringSlice([]string{string(stripe.PaymentMethodTypeCard)})
-	} else {
-		request.AutomaticPaymentMethods = &stripe.PaymentIntentAutomaticPaymentMethodsParams{
-			Enabled: stripe.Bool(true),
-		}
 	}
 	if params.CustomerID != "" {
 		request.Customer = stripe.String(params.CustomerID)
@@ -44,14 +55,8 @@ func (gateway *StripeGateway) CreateIntent(ctx context.Context, params IntentPar
 	request.Context = ctx
 	request.AddMetadata(MetadataBookingID, params.BookingID.String())
 	request.AddMetadata(MetadataGuestID, params.GuestID.String())
-	request.SetIdempotencyKey(params.IdempotencyKey)
-
-	client := paymentintent.Client{B: stripe.GetBackend(stripe.APIBackend), Key: gateway.secretKey}
-	intent, err := client.New(request)
-	if err != nil {
-		return Intent{}, fmt.Errorf("stripe create payment intent: %w", err)
-	}
-	return Intent{ID: intent.ID, ClientSecret: intent.ClientSecret}, nil
+	request.SetIdempotencyKey(params.IdempotencyKey + "-" + strings.Join(types, "+"))
+	return gateway.client().New(request)
 }
 
 func (gateway *StripeGateway) CreateCustomer(ctx context.Context, accountID uuid.UUID) (string, error) {
@@ -125,7 +130,23 @@ func (gateway *StripeGateway) DetachCard(ctx context.Context, cardID string) err
 	return nil
 }
 
-const metadataArtCardID = "vgs_card_id"
+const (
+	metadataArtCardID = "vgs_card_id"
+	metadataBankName  = "card_bank"
+	metadataColor     = "card_color"
+)
+
+func (gateway *StripeGateway) StyleCard(ctx context.Context, cardID string, style CardStyle) error {
+	params := &stripe.PaymentMethodParams{}
+	params.Context = ctx
+	params.AddMetadata(metadataBankName, style.BankName)
+	params.AddMetadata(metadataColor, style.Color)
+	client := paymentmethod.Client{B: stripe.GetBackend(stripe.APIBackend), Key: gateway.secretKey}
+	if _, err := client.Update(cardID, params); err != nil {
+		return fmt.Errorf("stripe style card: %w", err)
+	}
+	return nil
+}
 
 func (gateway *StripeGateway) LinkArtCard(ctx context.Context, cardID, artCardID string) error {
 	params := &stripe.PaymentMethodParams{}
@@ -150,6 +171,7 @@ func savedCardFrom(method *stripe.PaymentMethod) (SavedCard, bool) {
 		ExpYear:  int(method.Card.ExpYear),
 		Funding:  string(method.Card.Funding),
 
+		CardStyle: CardStyle{BankName: method.Metadata[metadataBankName], Color: method.Metadata[metadataColor]},
 		ArtCardID: method.Metadata[metadataArtCardID],
 	}
 	if method.Card.Wallet != nil {

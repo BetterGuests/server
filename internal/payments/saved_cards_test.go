@@ -20,6 +20,15 @@ type walletStub struct {
 	listedFor   []string
 	detached    []string
 	linked      map[string]string
+	styled      map[string]CardStyle
+}
+
+func (stub *walletStub) StyleCard(_ context.Context, cardID string, style CardStyle) error {
+	if stub.styled == nil {
+		stub.styled = map[string]CardStyle{}
+	}
+	stub.styled[cardID] = style
+	return nil
 }
 
 func (stub *walletStub) LinkArtCard(_ context.Context, cardID, artCardID string) error {

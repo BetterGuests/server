@@ -81,6 +81,39 @@ func (handler *HTTPHandler) RemoveSavedCard(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (handler *HTTPHandler) StyleSavedCard(w http.ResponseWriter, r *http.Request) {
+	accountID, ok := accounts.UserID(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if handler.cards == nil {
+		writeError(w, http.StatusServiceUnavailable, "saved cards are unavailable")
+		return
+	}
+	var style CardStyle
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&style); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	err := handler.cards.StyleCard(r.Context(), accountID, r.PathValue("card_id"), style)
+	switch {
+	case errors.Is(err, ErrCardNotFound):
+		writeError(w, http.StatusNotFound, "card not found")
+		return
+	case errors.Is(err, ErrInvalidCardStyle):
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	case err != nil:
+		slog.Error("Style saved card", "error", err)
+		writeError(w, http.StatusInternalServerError, "could not save the card style")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 type LinkCardArtRequest struct {
 	VaultCardID string `json:"vgs_card_id"`
 }
