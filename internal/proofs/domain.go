@@ -56,22 +56,31 @@ type Proof struct {
 
 type ReviewItem struct {
 	Proof
-	ListingTitle string `json:"listing_title"`
-	AddressLine1 string `json:"address_line1"`
-	AddressLine2 string `json:"address_line2,omitempty"`
-	City         string `json:"city"`
-	Region       string `json:"region,omitempty"`
-	PostalCode   string `json:"postal_code,omitempty"`
-	CountryCode  string `json:"country_code"`
-	IDFirstName  string `json:"id_first_name,omitempty"`
-	IDMiddleName string `json:"id_middle_name,omitempty"`
-	IDLastName   string `json:"id_last_name,omitempty"`
-	IDNameSuffix string `json:"id_name_suffix,omitempty"`
-	DocumentURL  string `json:"document_url,omitempty"`
-	HostName     string `json:"host_name,omitempty"`
-	CoverKey     string `json:"-"`
-	CoverURL     string `json:"cover_photo_url,omitempty"`
-	OwnListing   bool   `json:"own_listing"`
+	ListingTitle string        `json:"listing_title"`
+	AddressLine1 string        `json:"address_line1"`
+	AddressLine2 string        `json:"address_line2,omitempty"`
+	City         string        `json:"city"`
+	Region       string        `json:"region,omitempty"`
+	PostalCode   string        `json:"postal_code,omitempty"`
+	CountryCode  string        `json:"country_code"`
+	IDFirstName  string        `json:"id_first_name,omitempty"`
+	IDMiddleName string        `json:"id_middle_name,omitempty"`
+	IDLastName   string        `json:"id_last_name,omitempty"`
+	IDNameSuffix string        `json:"id_name_suffix,omitempty"`
+	DocumentURL  string        `json:"document_url,omitempty"`
+	HostName     string        `json:"host_name,omitempty"`
+	CoverKey     string        `json:"-"`
+	CoverURL     string        `json:"cover_photo_url,omitempty"`
+	OwnListing   bool          `json:"own_listing"`
+	Scan         *DocumentScan `json:"scan,omitempty"`
+}
+
+type DocumentScan struct {
+	FoundName      string    `json:"found_name,omitempty"`
+	NameVerdict    string    `json:"name_verdict"`
+	AddressMatched bool      `json:"address_matched"`
+	Error          string    `json:"error,omitempty"`
+	ScannedAt      time.Time `json:"scanned_at"`
 }
 
 type UploadTicket struct {

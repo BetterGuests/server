@@ -153,18 +153,19 @@ func viewOf(record Record, actorID uuid.UUID, now time.Time) (View, error) {
 		return View{}, err
 	}
 	view := View{
-		BookingID:      record.BookingID,
-		ListingID:      record.ListingID,
-		ListingTitle:   record.ListingTitle,
-		Role:           RoleGuest,
-		StartsOn:       record.StartsOn.Format(time.DateOnly),
-		EndsOn:         record.EndsOn.Format(time.DateOnly),
-		CheckInAt:      checkInAt,
-		CheckOutAt:     checkOutAt,
-		ArrivalOpensAt: checkInAt.Add(-ArrivalLeadTime),
-		Schedule:       record.Schedule,
-		CheckedInAt:    record.CheckedInAt,
-		CheckedOutAt:   record.CheckedOutAt,
+		BookingID:       record.BookingID,
+		ListingID:       record.ListingID,
+		ListingTitle:    record.ListingTitle,
+		Role:            RoleGuest,
+		StartsOn:        record.StartsOn.Format(time.DateOnly),
+		EndsOn:          record.EndsOn.Format(time.DateOnly),
+		CheckInAt:       checkInAt,
+		CheckOutAt:      checkOutAt,
+		ArrivalOpensAt:  checkInAt.Add(-ArrivalLeadTime),
+		CheckOutOpensAt: checkOutAt.Add(-CheckOutLeadTime),
+		Schedule:        record.Schedule,
+		CheckedInAt:     record.CheckedInAt,
+		CheckedOutAt:    record.CheckedOutAt,
 	}
 	if record.HostID == actorID {
 		view.Role = RoleHost
@@ -172,7 +173,7 @@ func viewOf(record Record, actorID uuid.UUID, now time.Time) (View, error) {
 	view.Phase = phaseOf(record, view, now)
 	isGuest := view.Role == RoleGuest
 	view.CanCheckIn = isGuest && view.Phase == PhaseCheckInOpen
-	view.CanCheckOut = isGuest && view.Phase == PhaseCheckedIn
+	view.CanCheckOut = isGuest && view.Phase == PhaseCheckedIn && !now.Before(view.CheckOutOpensAt)
 	if !isGuest || arrivalVisible(record, view, now) {
 		view.Arrival = record.Arrival
 	}

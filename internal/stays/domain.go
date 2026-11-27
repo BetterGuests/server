@@ -36,6 +36,7 @@ const (
 
 const (
 	ArrivalLeadTime         = 48 * time.Hour
+	CheckOutLeadTime        = 3 * time.Hour
 	DefaultCheckInTime      = "16:00"
 	DefaultCheckOutTime     = "11:00"
 	DefaultTimeZone         = "America/New_York"
@@ -91,16 +92,17 @@ type Record struct {
 }
 
 type View struct {
-	BookingID      uuid.UUID `json:"booking_id"`
-	ListingID      uuid.UUID `json:"listing_id"`
-	ListingTitle   string    `json:"listing_title"`
-	Role           Role      `json:"role"`
-	Phase          Phase     `json:"phase"`
-	StartsOn       string    `json:"starts_on"`
-	EndsOn         string    `json:"ends_on"`
-	CheckInAt      time.Time `json:"check_in_at"`
-	CheckOutAt     time.Time `json:"check_out_at"`
-	ArrivalOpensAt time.Time `json:"arrival_opens_at"`
+	BookingID       uuid.UUID `json:"booking_id"`
+	ListingID       uuid.UUID `json:"listing_id"`
+	ListingTitle    string    `json:"listing_title"`
+	Role            Role      `json:"role"`
+	Phase           Phase     `json:"phase"`
+	StartsOn        string    `json:"starts_on"`
+	EndsOn          string    `json:"ends_on"`
+	CheckInAt       time.Time `json:"check_in_at"`
+	CheckOutAt      time.Time `json:"check_out_at"`
+	ArrivalOpensAt  time.Time `json:"arrival_opens_at"`
+	CheckOutOpensAt time.Time `json:"check_out_opens_at"`
 	Schedule
 	CheckedInAt  *time.Time      `json:"checked_in_at,omitempty"`
 	CheckedOutAt *time.Time      `json:"checked_out_at,omitempty"`

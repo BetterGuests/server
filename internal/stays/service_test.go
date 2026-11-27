@@ -82,12 +82,14 @@ func TestGuestStayThroughItsPhases(t *testing.T) {
 		canCheckIn  bool
 		canCheckOut bool
 	}{
-		"a week out":               {now: checkInUTC.Add(-7 * 24 * time.Hour), phase: PhaseUpcoming},
-		"one second before reveal": {now: checkInUTC.Add(-ArrivalLeadTime - time.Second), phase: PhaseUpcoming},
-		"reveal opens":             {now: checkInUTC.Add(-ArrivalLeadTime), phase: PhaseArrivalReady, seesCode: true},
-		"check-in time":            {now: checkInUTC, phase: PhaseCheckInOpen, seesCode: true, canCheckIn: true},
-		"in the house":             {now: checkInUTC.Add(time.Hour), checkedIn: true, phase: PhaseCheckedIn, seesCode: true, canCheckOut: true},
-		"checkout time passed":     {now: checkOutUTC, checkedIn: true, phase: PhaseCheckedOut},
+		"a week out":                 {now: checkInUTC.Add(-7 * 24 * time.Hour), phase: PhaseUpcoming},
+		"one second before reveal":   {now: checkInUTC.Add(-ArrivalLeadTime - time.Second), phase: PhaseUpcoming},
+		"reveal opens":               {now: checkInUTC.Add(-ArrivalLeadTime), phase: PhaseArrivalReady, seesCode: true},
+		"check-in time":              {now: checkInUTC, phase: PhaseCheckInOpen, seesCode: true, canCheckIn: true},
+		"in the house":               {now: checkInUTC.Add(time.Hour), checkedIn: true, phase: PhaseCheckedIn, seesCode: true},
+		"just before checkout opens": {now: checkOutUTC.Add(-CheckOutLeadTime - time.Second), checkedIn: true, phase: PhaseCheckedIn, seesCode: true},
+		"checkout opens":             {now: checkOutUTC.Add(-CheckOutLeadTime), checkedIn: true, phase: PhaseCheckedIn, seesCode: true, canCheckOut: true},
+		"checkout time passed":       {now: checkOutUTC, checkedIn: true, phase: PhaseCheckedOut},
 	}
 	for name, test := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -136,6 +138,10 @@ func TestCheckInAndOut(t *testing.T) {
 	if _, err := service.CheckIn(context.Background(), guest, booking); err != nil {
 		t.Fatalf("a second tap on check in must succeed quietly: %v", err)
 	}
+	if _, err := service.CheckOut(context.Background(), guest, booking); !errors.Is(err, ErrCheckOutClosed) {
+		t.Fatalf("checked out before the checkout window opened: %v", err)
+	}
+	service.now = func() time.Time { return checkOutUTC.Add(-time.Hour) }
 	view, err := service.CheckOut(context.Background(), guest, booking)
 	if err != nil || view.Phase != PhaseCheckedOut || store.completed != 1 {
 		t.Fatalf("check out: %+v %v", view, err)

@@ -184,16 +184,28 @@ func TestAWholeTripFromConfirmationToPublishedReviews(t *testing.T) {
 	if err != nil || view.Arrival == nil || view.Arrival.EntryCode != "4821" {
 		t.Fatalf("check in: %+v %v", view, err)
 	}
-	if view, err = trip.stays.CheckOut(ctx, trip.guest, trip.bookingID); err != nil || view.Phase != stays.PhaseCheckedOut {
-		t.Fatalf("early check out must not complete the stay: %+v %v", view, err)
-	}
 	trip.sweep()
-	trip.expectKinds(trip.host, notifications.KindGuestCheckedIn, notifications.KindGuestCheckedOut)
-
+	trip.expectKinds(trip.host, notifications.KindGuestCheckedIn)
 	early := reviews.CreateReviewInput{BookingID: trip.bookingID, Rating: 5, Comment: "Too soon"}
 	if _, err := trip.reviews.CreateReview(ctx, trip.guest, early); !errors.Is(err, reviews.ErrBookingNotReviewable) {
 		t.Fatalf("reviewed an unfinished stay: %v", err)
 	}
+
+	if _, err := trip.stays.CheckOut(ctx, trip.guest, trip.bookingID); !errors.Is(err, stays.ErrCheckOutClosed) {
+		t.Fatalf("checked out days before check-out time: %v", err)
+	}
+	trip.administer(`UPDATE app.listings
+	                 SET time_zone = 'America/Phoenix', check_out_time = (now() AT TIME ZONE 'America/Phoenix' + interval '1 hour')::time
+	                 WHERE id = $1`, trip.listingID)
+	trip.administer(`UPDATE app.bookings
+	                 SET ends_on = (now() AT TIME ZONE 'America/Phoenix' + interval '1 hour')::date,
+	                     starts_on = (now() AT TIME ZONE 'America/Phoenix' + interval '1 hour')::date - 2
+	                 WHERE id = $1`, trip.bookingID)
+	if view, err = trip.stays.CheckOut(ctx, trip.guest, trip.bookingID); err != nil || view.Phase != stays.PhaseCompleted {
+		t.Fatalf("checking out on the last day must complete the stay: %+v %v", view, err)
+	}
+	trip.sweep()
+	trip.expectKinds(trip.host, notifications.KindGuestCheckedOut)
 
 	trip.administer(`UPDATE app.bookings SET ends_on = CURRENT_DATE - 1, starts_on = CURRENT_DATE - 3 WHERE id = $1`, trip.bookingID)
 	trip.sweep()

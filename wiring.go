@@ -25,6 +25,7 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/payments"
 	"github.com/BetterGuests/BetterGuests-Server/internal/profiles"
 	"github.com/BetterGuests/BetterGuests-Server/internal/proofs"
+	"github.com/BetterGuests/BetterGuests-Server/internal/proofscan"
 	"github.com/BetterGuests/BetterGuests-Server/internal/realtime"
 	"github.com/BetterGuests/BetterGuests-Server/internal/reviewdigest"
 	"github.com/BetterGuests/BetterGuests-Server/internal/reviews"
@@ -452,6 +453,31 @@ func buildDocumentRetention(pool *pgxpool.Pool) (*proofs.FileRetentionService, e
 		files = remover
 	}
 	return proofs.NewFileRetentionService(proofs.NewPostgresProofStore(pool), files), nil
+}
+
+type documentReader interface {
+	Read(ctx context.Context, key string, maxBytes int64) ([]byte, error)
+}
+
+func buildProofScan(pool *pgxpool.Pool) *proofscan.Service {
+	if !proofscan.Enabled(os.Getenv) {
+		return nil
+	}
+	if missing := proofscan.MissingTools(); len(missing) > 0 {
+		slog.Warn("ownership documents are not scanned: OCR tools are missing", "missing", missing)
+		return nil
+	}
+	objectStore, err := cashback.NewObjectStoreFromEnv()
+	if err != nil {
+		slog.Warn("ownership documents are not scanned: document storage is not configured", "error", err)
+		return nil
+	}
+	reader, ok := objectStore.(documentReader)
+	if !ok {
+		slog.Warn("ownership documents are not scanned: document storage cannot be read")
+		return nil
+	}
+	return proofscan.NewService(proofscan.NewPostgresStore(pool), reader, proofscan.NewCommandExtractor())
 }
 
 func buildVerificationPauses(pool *pgxpool.Pool) *verification.VerificationPauseService {

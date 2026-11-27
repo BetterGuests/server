@@ -61,6 +61,9 @@ func run() error {
 	defer stopJobs()
 	go superviseJob(jobs, "id redaction", redaction.Run)
 	go superviseJob(jobs, "document retention", documents.Run)
+	if scan := buildProofScan(pool); scan != nil {
+		go superviseJob(jobs, "document scan", scan.Run)
+	}
 	go superviseJob(jobs, "verification pauses", pauses.Run)
 	go superviseJob(jobs, "settlement", settlement.Run)
 	go superviseJob(jobs, "trip updates", deps.tripUpdates.Run)
