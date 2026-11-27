@@ -1,6 +1,7 @@
 package cancellations_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/BetterGuests/BetterGuests-Server/internal/notifications"
@@ -108,6 +109,35 @@ func TestCashbackDuringTheStayAndPhotoRetakesTellTheGuest(t *testing.T) {
 	}
 	if got["cashback_earned"] != "You earned $50.00 back" || got["photo_retake"] != "Retake a checkout photo" {
 		t.Fatalf("guest alerts = %+v", got)
+	}
+}
+
+func TestPhotosFromAGuestTellTheHostOnceADay(t *testing.T) {
+	w := newWorldAwayFromThePhoenixRankings(t)
+	store := notifications.NewPostgresNotificationStore(w.pool)
+	booking, guest := w.book(10, "requested")
+	for _, task := range []string{"strip_beds", "wipe_counters"} {
+		w.sql(`INSERT INTO app.booking_task_submissions (id, booking_id, guest_id, task_key, photo_url, status, created_at, updated_at)
+		       VALUES ($1, $2, $3, $4, 'https://example.test/photo.jpg', 'checking', now(), now())`, uuid.New(), booking, guest, task)
+	}
+
+	alerts, err := store.QueueTeamAlerts(w.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var waiting []notifications.TeamAlert
+	for _, alert := range alerts {
+		if alert.Recipient == w.host && alert.Kind == "photos_waiting" {
+			waiting = append(waiting, alert)
+		}
+	}
+	if len(waiting) != 1 || waiting[0].Title != "Photos to review" || !strings.Contains(waiting[0].Body, "sent 2 photos") {
+		t.Fatalf("host alerts = %+v, want one photos_waiting about 2 photos", waiting)
+	}
+	for _, alert := range queuedMoney(t, w, store)[w.host] {
+		if alert.kind == "photos_waiting" {
+			t.Fatalf("the host was told twice: %+v", alert)
+		}
 	}
 }
 
