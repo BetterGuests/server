@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/stripe/stripe-go/v82"
 )
 
 func TestHostAccountIsATransfersOnlyExpressRecipient(t *testing.T) {
@@ -31,5 +32,25 @@ func TestTransferIsTiedToTheBookingsCharge(t *testing.T) {
 	}
 	if *params.IdempotencyKey != "settlement-transfer-"+booking.String() || params.Metadata[MetadataBookingID] != booking.String() {
 		t.Fatalf("params = %+v", params)
+	}
+}
+
+func TestOnlyAClosedInOurFavourDisputeReleasesTheCharge(t *testing.T) {
+	cases := map[string]struct {
+		statuses []stripe.DisputeStatus
+		stands   bool
+	}{
+		"won":                     {[]stripe.DisputeStatus{stripe.DisputeStatusWon}, false},
+		"inquiry closed":          {[]stripe.DisputeStatus{stripe.DisputeStatusWarningClosed}, false},
+		"lost":                    {[]stripe.DisputeStatus{stripe.DisputeStatusLost}, true},
+		"needs a response":        {[]stripe.DisputeStatus{stripe.DisputeStatusNeedsResponse}, true},
+		"under review":            {[]stripe.DisputeStatus{stripe.DisputeStatusUnderReview}, true},
+		"one won and one open":    {[]stripe.DisputeStatus{stripe.DisputeStatusWon, stripe.DisputeStatusNeedsResponse}, true},
+		"flagged but none listed": {nil, true},
+	}
+	for name, test := range cases {
+		if got := disputeStands(test.statuses); got != test.stands {
+			t.Errorf("%s: stands = %v", name, got)
+		}
 	}
 }

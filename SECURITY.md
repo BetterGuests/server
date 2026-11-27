@@ -215,6 +215,16 @@ equally deep. A few are worth reading before you trust them blindly:
   hold is released.
 - Check-in times and time zone are locked while a guest is staying.
 
+## Payout holds
+
+- A team takedown holds the host payout and the guest's cash back for that
+  listing, because both settle together. Restoring the listing releases them on
+  the next run. Automatic pauses hold nothing.
+- A blocked settlement is listed only to admins and can only be queued again by
+  an admin who is neither its host nor its guest. The next run reads the charge
+  again. A dispute stops it unless every dispute on the payment was won or closed
+  as an inquiry.
+
 ## Cancellations and refunds
 
 - Refund amounts are worked out on the server from the stored payment. The

@@ -118,6 +118,57 @@ func (store *PostgresSettlementStore) SaveHostAccount(ctx context.Context, hostI
 	return saved, nil
 }
 
+func (store *PostgresSettlementStore) IsAdmin(ctx context.Context, accountID uuid.UUID) (bool, error) {
+	var admin bool
+	err := db.WithUserTx(ctx, store.DB, accountID.String(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT app.is_admin()`).Scan(&admin)
+	})
+	if err != nil {
+		return false, fmt.Errorf("check admin: %w", err)
+	}
+	return admin, nil
+}
+
+func (store *PostgresSettlementStore) ListBlocked(ctx context.Context, adminID uuid.UUID, limit int) ([]BlockedSettlement, error) {
+	blocked := []BlockedSettlement{}
+	err := db.WithUserTx(ctx, store.DB, adminID.String(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT booking_id, listing_title, host_name, ends_on, payout_cents, cashback_cents, currency, reason,
+			        blocked_at, can_retry
+			 FROM app.blocked_settlements($1)`, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item BlockedSettlement
+			var endsOn time.Time
+			if err := rows.Scan(&item.BookingID, &item.ListingTitle, &item.HostName, &endsOn, &item.PayoutCents,
+				&item.CashbackCents, &item.Currency, &item.Reason, &item.BlockedAt, &item.CanRetry); err != nil {
+				return err
+			}
+			item.EndsOn = endsOn.Format(time.DateOnly)
+			blocked = append(blocked, item)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list blocked settlements: %w", err)
+	}
+	return blocked, nil
+}
+
+func (store *PostgresSettlementStore) Retry(ctx context.Context, adminID, bookingID uuid.UUID) (bool, error) {
+	var released bool
+	err := db.WithUserTx(ctx, store.DB, adminID.String(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT app.retry_blocked_settlement($1)`, bookingID).Scan(&released)
+	})
+	if err != nil {
+		return false, fmt.Errorf("retry blocked settlement: %w", err)
+	}
+	return released, nil
+}
+
 func textOrEmpty(value *string) string {
 	if value == nil {
 		return ""

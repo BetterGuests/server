@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stripe/stripe-go/v82"
+	"github.com/stripe/stripe-go/v82/dispute"
 	"github.com/stripe/stripe-go/v82/paymentintent"
 	"github.com/stripe/stripe-go/v82/rawrequest"
 	"github.com/stripe/stripe-go/v82/refund"
@@ -51,7 +52,13 @@ func (gateway *StripeGateway) Charge(ctx context.Context, paymentIntentID string
 		ID:            intent.LatestCharge.ID,
 		CapturedCents: int(intent.LatestCharge.AmountCaptured),
 		RefundedCents: int(intent.LatestCharge.AmountRefunded),
-		Disputed:      intent.LatestCharge.Disputed,
+	}
+	if intent.LatestCharge.Disputed {
+		statuses, err := gateway.disputeStatuses(ctx, paymentIntentID)
+		if err != nil {
+			return Charge{}, err
+		}
+		charge.Disputed = disputeStands(statuses)
 	}
 
 	list := &stripe.RefundListParams{PaymentIntent: stripe.String(paymentIntentID)}
@@ -74,6 +81,30 @@ func (gateway *StripeGateway) Charge(ctx context.Context, paymentIntentID string
 		return Charge{}, fmt.Errorf("stripe list refunds: %w", err)
 	}
 	return charge, nil
+}
+
+func (gateway *StripeGateway) disputeStatuses(ctx context.Context, paymentIntentID string) ([]stripe.DisputeStatus, error) {
+	params := &stripe.DisputeListParams{PaymentIntent: stripe.String(paymentIntentID)}
+	params.Context = ctx
+	client := dispute.Client{B: stripe.GetBackend(stripe.APIBackend), Key: gateway.secretKey}
+	found := client.List(params)
+	var statuses []stripe.DisputeStatus
+	for found.Next() {
+		statuses = append(statuses, found.Dispute().Status)
+	}
+	if err := found.Err(); err != nil {
+		return nil, fmt.Errorf("stripe list disputes: %w", err)
+	}
+	return statuses, nil
+}
+
+func disputeStands(statuses []stripe.DisputeStatus) bool {
+	for _, status := range statuses {
+		if status != stripe.DisputeStatusWon && status != stripe.DisputeStatusWarningClosed {
+			return true
+		}
+	}
+	return len(statuses) == 0
 }
 
 func (gateway *StripeGateway) Refund(ctx context.Context, request RefundRequest) (string, error) {

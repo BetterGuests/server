@@ -18,6 +18,8 @@ const (
 
 const MetadataBookingID = "settlement_booking_id"
 
+const maxListedBlocked = 100
+
 type Config struct {
 	Enabled   bool
 	StartsOn  time.Time
@@ -94,6 +96,30 @@ type PayoutStatus struct {
 	Ready         bool `json:"ready"`
 	FeePercent    int  `json:"fee_percent"`
 	FeeFixedCents int  `json:"fee_fixed_cents"`
+}
+
+type BlockedSettlement struct {
+	BookingID     uuid.UUID `json:"booking_id"`
+	ListingTitle  string    `json:"listing_title"`
+	HostName      string    `json:"host_name"`
+	EndsOn        string    `json:"ends_on"`
+	PayoutCents   int       `json:"payout_cents"`
+	CashbackCents int       `json:"cashback_cents"`
+	Currency      string    `json:"currency"`
+	Reason        string    `json:"reason"`
+	BlockedAt     time.Time `json:"blocked_at"`
+	CanRetry      bool      `json:"can_retry"`
+}
+
+type ReviewStore interface {
+	IsAdmin(ctx context.Context, accountID uuid.UUID) (bool, error)
+	ListBlocked(ctx context.Context, adminID uuid.UUID, limit int) ([]BlockedSettlement, error)
+	Retry(ctx context.Context, adminID, bookingID uuid.UUID) (bool, error)
+}
+
+type BlockedReviewer interface {
+	Blocked(ctx context.Context, adminID uuid.UUID) ([]BlockedSettlement, error)
+	Retry(ctx context.Context, adminID, bookingID uuid.UUID) error
 }
 
 type Store interface {

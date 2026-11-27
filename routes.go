@@ -218,6 +218,8 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.HandleFunc("DELETE /api/v1/admin/listings/{listing_id}/pause", deps.cancellations.UnpauseListing)
 	api.HandleFunc("POST /api/v1/admin/stay-reports/{booking_id}/decision", deps.cancellations.Resolve)
 	api.Handle("POST /api/v1/reports", perAccountFunc(userReportBudget, deps.reports.File))
+	api.HandleFunc("GET /api/v1/admin/settlements/blocked", deps.payouts.ListBlocked)
+	api.HandleFunc("POST /api/v1/admin/settlements/{booking_id}/retry", deps.payouts.RetryBlocked)
 	api.HandleFunc("GET /api/v1/admin/user-reports", deps.reports.List)
 	api.HandleFunc("POST /api/v1/admin/user-reports/{report_id}/decision", deps.reports.Resolve)
 	api.HandleFunc("GET /api/v1/notifications", deps.inbox.List)

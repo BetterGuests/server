@@ -33,7 +33,12 @@ const (
 	reasonRefundMismatch = "an earlier settlement refund has a different amount"
 )
 
-var ErrOnboardingDisabled = errors.New("host payouts are not set up")
+var (
+	ErrOnboardingDisabled = errors.New("host payouts are not set up")
+	ErrNotAdmin           = errors.New("not found")
+	ErrNotBlocked         = errors.New("this payout is not blocked")
+	ErrOwnBooking         = errors.New("someone else on the team has to retry a payout for your own booking")
+)
 
 type SettlementService struct {
 	store   Store
@@ -320,4 +325,49 @@ func (service *PayoutService) StartOnboarding(ctx context.Context, hostID uuid.U
 		return "", fmt.Errorf("create onboarding link: %w", err)
 	}
 	return link, nil
+}
+
+type SettlementReviewService struct{ store ReviewStore }
+
+func NewSettlementReviewService(store ReviewStore) *SettlementReviewService {
+	return &SettlementReviewService{store: store}
+}
+
+func (service *SettlementReviewService) Blocked(ctx context.Context, adminID uuid.UUID) ([]BlockedSettlement, error) {
+	if err := service.requireAdmin(ctx, adminID); err != nil {
+		return nil, err
+	}
+	return service.store.ListBlocked(ctx, adminID, maxListedBlocked)
+}
+
+func (service *SettlementReviewService) Retry(ctx context.Context, adminID, bookingID uuid.UUID) error {
+	blocked, err := service.Blocked(ctx, adminID)
+	if err != nil {
+		return err
+	}
+	for _, item := range blocked {
+		if item.BookingID == bookingID && !item.CanRetry {
+			return ErrOwnBooking
+		}
+	}
+	released, err := service.store.Retry(ctx, adminID, bookingID)
+	if err != nil {
+		return err
+	}
+	if !released {
+		return ErrNotBlocked
+	}
+	slog.Info("Blocked settlement queued again", "booking_id", bookingID, "admin_id", adminID)
+	return nil
+}
+
+func (service *SettlementReviewService) requireAdmin(ctx context.Context, accountID uuid.UUID) error {
+	admin, err := service.store.IsAdmin(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	if !admin {
+		return ErrNotAdmin
+	}
+	return nil
 }
