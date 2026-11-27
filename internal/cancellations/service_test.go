@@ -50,6 +50,23 @@ func TestWhatAGuestGetsBack(t *testing.T) {
 	}
 }
 
+func TestALateCancellationHalvesTheStayAndKeepsTheServiceFee(t *testing.T) {
+	booking := paidBooking(checkIn.Add(-30 * 24 * time.Hour))
+	booking.AmountCents, booking.GuestFeeCents = 61515, 1515
+	late, err := optionsFor(booking, booking.GuestID, checkIn.Add(-time.Hour))
+	if err != nil || late.RefundCents != 30000 {
+		t.Fatalf("late = %+v %v, want 30000 back", late, err)
+	}
+	early, err := optionsFor(booking, booking.GuestID, checkIn.Add(-FullRefundNotice-time.Minute))
+	if err != nil || early.RefundCents != 61515 {
+		t.Fatalf("early = %+v %v, want everything back including the fee", early, err)
+	}
+	host, err := optionsFor(booking, booking.HostID, checkIn.Add(-time.Hour))
+	if err != nil || host.RefundCents != 61515 {
+		t.Fatalf("host = %+v %v, want everything back including the fee", host, err)
+	}
+}
+
 func TestAHostCancellationAlwaysRefundsEverythingAndOnlyBeforeCheckIn(t *testing.T) {
 	booking := paidBooking(checkIn.Add(-30 * 24 * time.Hour))
 	before, err := optionsFor(booking, booking.HostID, checkIn.Add(-time.Minute))

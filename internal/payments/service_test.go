@@ -76,17 +76,23 @@ func newService(store *fakeStore, intents *fakeIntents, parser fakeParser) *Paym
 	return NewPaymentService(store, intents, parser, Config{})
 }
 
-func TestStartCheckoutChargesNightsTimesNightlyPrice(t *testing.T) {
+func TestStartCheckoutChargesOnlyTheStayBecauseTheHostPaysTheFee(t *testing.T) {
 	store := &fakeStore{quote: pricedQuote()}
 	intents := &fakeIntents{}
 	result, err := newService(store, intents, fakeParser{}).StartCheckout(context.Background(), uuid.New(), store.quote.BookingID)
 	if err != nil {
 		t.Fatalf("StartCheckout() error = %v", err)
 	}
-	if result.AmountCents != 36000 || result.Currency != "usd" || result.ClientSecret == "" {
+	if result.AmountCents != 36000 {
+		t.Fatalf("result = %+v, want 36000 with no guest fee", result)
+	}
+	if result.Currency != "usd" || result.ClientSecret == "" {
 		t.Fatalf("result = %+v", result)
 	}
-	if len(store.created) != 1 || store.created[0].Status != StatusPending {
+	if len(intents.params) != 1 || intents.params[0].AmountCents != 36000 {
+		t.Fatalf("intent params = %+v, want one intent for 36000", intents.params)
+	}
+	if len(store.created) != 1 || store.created[0].Status != StatusPending || store.created[0].GuestFeeCents != 0 || store.created[0].AmountCents != 36000 {
 		t.Fatalf("created = %+v", store.created)
 	}
 }

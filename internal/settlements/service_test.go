@@ -96,14 +96,18 @@ type harness struct {
 	booking uuid.UUID
 }
 
-func newHarness(amount int, accepted []string) harness {
+func newHarness(stay int, accepted []string) harness {
+	return newHarnessCharging(stay, 0, accepted)
+}
+
+func newHarnessCharging(amount, guestFee int, accepted []string) harness {
 	booking := uuid.New()
 	store := &memoryStore{saved: map[uuid.UUID]Settlement{}, due: []Due{{
 		BookingID: booking, GuestID: uuid.New(), HostID: uuid.New(), PaymentIntentID: "pi_1",
-		AmountCents: amount, Currency: "usd", AcceptedTaskKeys: accepted, HostAccountID: "acct_1",
+		AmountCents: amount, GuestFeeCents: guestFee, Currency: "usd", AcceptedTaskKeys: accepted, HostAccountID: "acct_1",
 	}}}
 	gateway := &fakeGateway{charge: Charge{ID: "ch_1", CapturedCents: amount}, hostReady: true}
-	service := NewSettlementService(store, gateway, Config{FeePercent: 12, BatchSize: 10})
+	service := NewSettlementService(store, gateway, Config{BatchSize: 10})
 	service.now = func() time.Time { return time.Date(2026, 7, 20, 0, 0, 0, 0, time.UTC) }
 	return harness{service: service, store: store, gateway: gateway, booking: booking}
 }
@@ -117,15 +121,15 @@ func (h harness) run(t *testing.T) Report {
 	return report
 }
 
-func TestSettlementRefundsCashbackAndPaysTheHostTheRest(t *testing.T) {
+func TestSettlementRefundsCashbackAndPaysTheHostTheRestMinusTheFee(t *testing.T) {
 	cases := map[string]struct {
 		amount, refund, payout int
 		accepted               []string
 	}{
-		"no chores":               {60000, 0, 52800, nil},
-		"one bundle":              {60000, 5000, 47800, everyTask[:3]},
-		"every bundle":            {60000, 15000, 37800, everyTask},
-		"cheap stay hits the cap": {10000, 2500, 6300, everyTask},
+		"no chores":               {60000, 0, 55170, nil},
+		"one bundle":              {60000, 5000, 50170, everyTask[:3]},
+		"every bundle":            {60000, 15000, 40170, everyTask},
+		"cheap stay hits the cap": {10000, 2500, 6670, everyTask},
 	}
 	for name, test := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -220,12 +224,12 @@ func TestGuestIsRefundedWhileThePayoutWaitsForTheHostAccount(t *testing.T) {
 			}
 			h.store.due[0].HostAccountID = "acct_1"
 			h.gateway.hostReady = true
-			h.service.config.FeePercent = 30
+			h.store.due[0].AcceptedTaskKeys = nil
 			if report := h.run(t); report.Settled != 1 || len(h.gateway.refunds) != 1 {
 				t.Fatalf("report = %+v", report)
 			}
-			if got := h.gateway.transfers[0].AmountCents; got != 37800 {
-				t.Fatalf("payout = %d, the fee must stay as first recorded", got)
+			if got := h.gateway.transfers[0].AmountCents; got != 40170 {
+				t.Fatalf("payout = %d, the settlement must stay as first recorded", got)
 			}
 		})
 	}
@@ -264,8 +268,19 @@ func TestCashbackAlreadyRefundedUnderTheOldFlowIsNotRefundedAgain(t *testing.T) 
 	if report := h.run(t); report.Settled != 1 || len(h.gateway.refunds) != 0 {
 		t.Fatalf("report = %+v, refunds = %+v", report, h.gateway.refunds)
 	}
-	if got := h.gateway.transfers[0].AmountCents; got != 47800 {
+	if got := h.gateway.transfers[0].AmountCents; got != 50170 {
 		t.Fatalf("payout = %d", got)
+	}
+}
+
+func TestAGuestFeeRecordedOnThePaymentIsNeverPaidOutToTheHost(t *testing.T) {
+	h := newHarnessCharging(61515, 1515, nil)
+	if report := h.run(t); report.Settled != 1 {
+		t.Fatalf("report = %+v", report)
+	}
+	saved := h.store.saved[h.booking]
+	if saved.FeeCents != 4830 || saved.PayoutCents != 55170 {
+		t.Fatalf("saved = %+v, want fee 4830 on the 60000 stay and payout 55170", saved)
 	}
 }
 
@@ -288,8 +303,6 @@ func TestConfigFromLookup(t *testing.T) {
 		"defaults are off":           {map[string]string{}, false},
 		"enabled needs a start date": {map[string]string{"SETTLEMENT_ENABLED": "true"}, true},
 		"enabled with a start date":  {map[string]string{"SETTLEMENT_ENABLED": "true", "SETTLEMENT_STARTS_ON": "2026-12-01"}, false},
-		"fee too high":               {map[string]string{"PLATFORM_FEE_PERCENT": "51"}, true},
-		"negative fee":               {map[string]string{"PLATFORM_FEE_PERCENT": "-1"}, true},
 		"interval too short":         {map[string]string{"SETTLEMENT_INTERVAL": "1s"}, true},
 		"plain http web address":     {map[string]string{"PAYOUTS_WEB_URL": "http://example.com"}, true},
 		"localhost web address":      {map[string]string{"PAYOUTS_WEB_URL": "http://localhost:5173"}, false},
@@ -301,7 +314,7 @@ func TestConfigFromLookup(t *testing.T) {
 			if (err != nil) != test.fails {
 				t.Fatalf("config = %+v, err = %v", config, err)
 			}
-			if name == "defaults are off" && (config.Enabled || config.FeePercent != 12) {
+			if name == "defaults are off" && config.Enabled {
 				t.Fatalf("config = %+v", config)
 			}
 		})

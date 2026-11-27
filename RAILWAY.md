@@ -21,7 +21,7 @@ credentials; the api service never does.
 
 Both services build from this same repository; only the build/start command
 and environment variables differ. Neither needs a Dockerfile — Railway's
-Nixpacks builder detects `go.mod` and builds Go binaries on its own — but
+Railpack builder detects `go.mod` and builds Go binaries on its own — but
 its default build only builds the root package, so the migrate service
 needs an explicit build command pointing at `cmd/migrate` (see step 3).
 Override both the build and start command on each service rather than
@@ -116,7 +116,10 @@ The dashboard cannot override a value the config file sets.
   - `PERSONA_API_KEY`, `PERSONA_TEMPLATE_ID`, `PERSONA_WEBHOOK_SECRET` — all
     three are required; the server refuses to start without them. The API key
     must be allowed to redact inquiries, because the server deletes ID data
-    through Persona's redact call.
+    through Persona's redact call. It must also be allowed to retrieve and
+    resume inquiries. When a webhook is late or lost, the status check asks
+    Persona directly (at most once every 10 seconds per check), and starting
+    again reuses a check opened in the last 20 hours instead of making a new one.
   - The Persona webhook must include related objects in its payload. The server
     saves the host's name from the passed `verification/government-id` entry and
     shows it to proof reviewers. Without it, reviewers see "No ID name on file",
@@ -132,9 +135,12 @@ The dashboard cannot override a value the config file sets.
   - `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`
   - Settlement (cashback refunds and host payouts), off by default:
     `SETTLEMENT_ENABLED`, `SETTLEMENT_STARTS_ON` (required when enabled; stays
-    that ended earlier are never settled), `PLATFORM_FEE_PERCENT` (default 12),
+    that ended earlier are never settled),
     `SETTLEMENT_INTERVAL` (default 1h), `SETTLEMENT_BATCH` (default 50) and
-    `PAYOUTS_WEB_URL` (the web origin hosts return to after Stripe onboarding)
+    `PAYOUTS_WEB_URL` (the web origin hosts return to after Stripe onboarding).
+    The platform fee is not configurable: it is 8% of the stay plus 30¢, taken
+    from the host's payout; guests pay only the stay price (`internal/fees`).
+    `PLATFORM_FEE_PERCENT` is no longer read.
   - Optional email: `RESEND_API_KEY`, `EMAIL_FROM` (an address on a domain
     verified in Resend) and `APP_WEB_URL` (the web origin used in email links).
     Without the key no email is sent; with it the other two are required.
@@ -150,6 +156,19 @@ The dashboard cannot override a value the config file sets.
     refuses explicit, violent, hateful and unrelated images, personal documents
     and advertised contact details. Without the key photos are accepted
     unscreened and the server logs a warning at startup
+  - `PROOF_SCAN_ENABLED=true`: every proof of property is read for the
+    host's name and the listing's address, and the review screen shows what
+    was found. It is a hint for the admin, never an automatic decision. It
+    needs `pdftotext`, `pdftoppm` and `tesseract`, which `railpack.json`
+    installs in the runtime image, and the `S3_*` variables. If either is
+    missing the server logs a warning at startup and skips scanning
+  - Optional `PROOF_AUTO_APPROVE=true`: a scanned proof is approved without a
+    person only when it is a utility bill, the host says they own the home,
+    the bill names the host as on their current ID, shows the listing's
+    address and carries a date within 90 days of when it was sent. Every
+    other proof waits for an admin. Automatic approvals show as "approved
+    automatically" on the admin Approved tab, where an admin can withdraw
+    them. Leave it unset to keep every decision with a person
   - `SENTRY_DSN`, `SENTRY_ENVIRONMENT`
   - Optional `GEOAPIFY_API_KEY`: `GET /api/v1/listings/{id}/nearby?category=drinks`
     asks Geoapify Places for bars, cafes and similar places around a stay's

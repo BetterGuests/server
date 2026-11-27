@@ -60,17 +60,18 @@ func (store *PostgresPaymentStore) ExistingPayment(ctx context.Context, guestID,
 func (store *PostgresPaymentStore) CreatePayment(ctx context.Context, payment Payment) error {
 	return db.WithUserTx(ctx, store.DB, payment.GuestID.String(), func(tx pgx.Tx) error {
 		_, err := tx.Exec(ctx,
-			`INSERT INTO app.payments (id, booking_id, guest_id, host_id, stripe_payment_intent_id, amount_cents, currency, status, created_at, updated_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			`INSERT INTO app.payments (id, booking_id, guest_id, host_id, stripe_payment_intent_id, amount_cents, guest_fee_cents, currency, status, created_at, updated_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 			 ON CONFLICT (booking_id) DO UPDATE
 			 SET stripe_payment_intent_id = EXCLUDED.stripe_payment_intent_id,
 			     amount_cents = EXCLUDED.amount_cents,
+			     guest_fee_cents = EXCLUDED.guest_fee_cents,
 			     status = 'pending',
 			     last_event_at = NULL,
 			     updated_at = EXCLUDED.updated_at
 			 WHERE app.payments.status <> 'succeeded'`,
 			payment.ID, payment.BookingID, payment.GuestID, payment.HostID, payment.StripePaymentIntentID,
-			payment.AmountCents, payment.Currency, string(payment.Status), payment.CreatedAt, payment.UpdatedAt)
+			payment.AmountCents, payment.GuestFeeCents, payment.Currency, string(payment.Status), payment.CreatedAt, payment.UpdatedAt)
 		if err != nil {
 			return fmt.Errorf("insert payment: %w", err)
 		}

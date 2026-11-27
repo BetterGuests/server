@@ -119,7 +119,7 @@ func TestSandboxSettlesAStayAndPaysTheHostWhenReady(t *testing.T) {
 		AcceptedTaskKeys: everyTask, HostAccountID: hostAccount,
 	}
 	store := &memoryStore{saved: map[uuid.UUID]Settlement{}, due: []Due{booking}}
-	service := NewSettlementService(store, gateway, Config{FeePercent: 12, BatchSize: 1})
+	service := NewSettlementService(store, gateway, Config{BatchSize: 1})
 
 	want := StatusAwaitingHost
 	if hostAccount != "" {
@@ -130,7 +130,7 @@ func TestSandboxSettlesAStayAndPaysTheHostWhenReady(t *testing.T) {
 			t.Fatalf("run %d: %v", run, err)
 		}
 		saved := store.saved[booking.BookingID]
-		if saved.Status != want || saved.RefundID == "" || saved.PayoutCents != 37800 {
+		if saved.Status != want || saved.RefundID == "" || saved.PayoutCents != 40170 {
 			t.Fatalf("run %d: saved = %+v", run, saved)
 		}
 		if want == StatusSettled && saved.TransferID == "" {

@@ -57,7 +57,7 @@ func TestSettlementAgainstPostgres(t *testing.T) {
 	paymentStore := payments.NewPostgresPaymentStore(pool)
 	intentID := "pi_settlement_" + uuid.NewString()
 	now := time.Now().UTC()
-	if err := paymentStore.CreatePayment(ctx, payments.Payment{ID: uuid.New(), BookingID: bookingID, GuestID: guestID, HostID: hostID, StripePaymentIntentID: intentID, AmountCents: 60000, Currency: "usd", Status: payments.StatusPending, CreatedAt: now, UpdatedAt: now}); err != nil {
+	if err := paymentStore.CreatePayment(ctx, payments.Payment{ID: uuid.New(), BookingID: bookingID, GuestID: guestID, HostID: hostID, StripePaymentIntentID: intentID, AmountCents: 60000, GuestFeeCents: 1515, Currency: "usd", Status: payments.StatusPending, CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	if err := paymentStore.ApplyOutcome(ctx, guestID, intentID, payments.StatusSucceeded, now); err != nil {
@@ -113,7 +113,7 @@ func TestSettlementAgainstPostgres(t *testing.T) {
 			t.Fatalf("due = %+v", found)
 		}
 		due = found[0]
-		if due.HostID != hostID || due.GuestID != guestID || due.AmountCents != 60000 || due.PaymentIntentID != intentID || len(due.AcceptedTaskKeys) != 2 || due.HostAccountID == "" || due.Saved != nil {
+		if due.HostID != hostID || due.GuestID != guestID || due.AmountCents != 60000 || due.GuestFeeCents != 1515 || due.PaymentIntentID != intentID || len(due.AcceptedTaskKeys) != 2 || due.HostAccountID == "" || due.Saved != nil {
 			t.Fatalf("due = %+v", due)
 		}
 	})

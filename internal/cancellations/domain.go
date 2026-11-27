@@ -87,6 +87,7 @@ type Booking struct {
 	TimeZone        string
 	ApprovedAt      *time.Time
 	AmountCents     int
+	GuestFeeCents   int
 	Currency        string
 	PaymentStatus   string
 	PaymentIntentID string

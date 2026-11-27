@@ -52,6 +52,7 @@ type Payment struct {
 	HostID                uuid.UUID `json:"-"`
 	StripePaymentIntentID string    `json:"stripe_payment_intent_id"`
 	AmountCents           int       `json:"amount_cents"`
+	GuestFeeCents         int       `json:"guest_fee_cents"`
 	Currency              string    `json:"currency"`
 	Status                Status    `json:"status"`
 	CreatedAt             time.Time `json:"created_at"`

@@ -25,7 +25,7 @@ func (store *PostgresCashbackStore) BookingState(ctx context.Context, actingID, 
 	state := BookingState{BookingID: bookingID}
 	err := db.WithUserTx(ctx, store.DB, actingID.String(), func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx,
-			`SELECT b.status, COALESCE(p.stripe_payment_intent_id, ''), COALESCE(p.status, ''), COALESCE(p.amount_cents, 0), b.ends_on
+			`SELECT b.status, COALESCE(p.stripe_payment_intent_id, ''), COALESCE(p.status, ''), COALESCE(p.amount_cents - p.guest_fee_cents, 0), b.ends_on
 			 FROM app.bookings b
 			 LEFT JOIN app.payments p ON p.booking_id = b.id
 			 WHERE b.id = $1 AND b.guest_id = $2`,
@@ -124,7 +124,7 @@ func (store *PostgresCashbackStore) HostBooking(ctx context.Context, hostID, boo
 	booking := HostBooking{BookingID: bookingID}
 	err := db.WithUserTx(ctx, store.DB, hostID.String(), func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx,
-			`SELECT b.guest_id, l.title, b.ends_on, COALESCE(p.amount_cents, 0)
+			`SELECT b.guest_id, l.title, b.ends_on, COALESCE(p.amount_cents - p.guest_fee_cents, 0)
 			 FROM app.bookings b
 			 JOIN app.listings l ON l.id = b.listing_id
 			 LEFT JOIN app.payments p ON p.booking_id = b.id AND p.status = 'succeeded'

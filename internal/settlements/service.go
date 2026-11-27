@@ -12,18 +12,16 @@ import (
 	"time"
 
 	"github.com/BetterGuests/BetterGuests-Server/internal/cashback"
+	"github.com/BetterGuests/BetterGuests-Server/internal/fees"
 	"github.com/google/uuid"
 )
 
 const (
-	defaultFeePercent = 12
-	maxFeePercent     = 50
-	defaultInterval   = time.Hour
-	minInterval       = time.Minute
-	defaultBatch      = 50
-	maxBatch          = 500
-	payoutsPagePath   = "/hosting/payouts"
-	percent           = 100
+	defaultInterval = time.Hour
+	minInterval     = time.Minute
+	defaultBatch    = 50
+	maxBatch        = 500
+	payoutsPagePath = "/hosting/payouts"
 )
 
 const (
@@ -53,20 +51,13 @@ func ConfigFromEnv() (Config, error) {
 }
 
 func configFromLookup(lookup func(string) string) (Config, error) {
-	config := Config{FeePercent: defaultFeePercent, Interval: defaultInterval, BatchSize: defaultBatch}
+	config := Config{Interval: defaultInterval, BatchSize: defaultBatch}
 	if value := lookup("SETTLEMENT_ENABLED"); value != "" {
 		enabled, err := strconv.ParseBool(value)
 		if err != nil {
 			return Config{}, errors.New("SETTLEMENT_ENABLED must be true or false")
 		}
 		config.Enabled = enabled
-	}
-	if value := lookup("PLATFORM_FEE_PERCENT"); value != "" {
-		fee, err := strconv.Atoi(value)
-		if err != nil || fee < 0 || fee > maxFeePercent {
-			return Config{}, fmt.Errorf("PLATFORM_FEE_PERCENT must be a whole number from 0 to %d", maxFeePercent)
-		}
-		config.FeePercent = fee
 	}
 	if value := lookup("SETTLEMENT_STARTS_ON"); value != "" {
 		startsOn, err := time.Parse(time.DateOnly, value)
@@ -156,10 +147,11 @@ func (service *SettlementService) plan(due Due) Settlement {
 	if due.Saved != nil {
 		return *due.Saved
 	}
-	kept := max(due.AmountCents-due.AdjustmentCents, 0)
+	stay := due.AmountCents - due.GuestFeeCents
+	kept := max(stay-due.AdjustmentCents, 0)
 	earned := cashback.EarnableCents(due.AcceptedTaskKeys, kept)
 	total := max(earned, due.EarlierRefundCents)
-	fee := kept * service.config.FeePercent / percent
+	fee := fees.HostShare(kept)
 	return Settlement{
 		ID:             service.newID(),
 		BookingID:      due.BookingID,
@@ -279,7 +271,7 @@ func NewPayoutService(accounts AccountStore, onboarder Onboarder, emails Contact
 }
 
 func (service *PayoutService) Status(ctx context.Context, hostID uuid.UUID) (PayoutStatus, error) {
-	status := PayoutStatus{FeePercent: service.config.FeePercent}
+	status := PayoutStatus{FeePercent: fees.PercentOfStay, FeeFixedCents: fees.FixedCents}
 	accountID, found, err := service.accounts.HostAccount(ctx, hostID)
 	if err != nil || !found {
 		return status, err

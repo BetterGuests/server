@@ -19,12 +19,11 @@ const (
 const MetadataBookingID = "settlement_booking_id"
 
 type Config struct {
-	Enabled    bool
-	FeePercent int
-	StartsOn   time.Time
-	Interval   time.Duration
-	BatchSize  int
-	WebURL     string
+	Enabled   bool
+	StartsOn  time.Time
+	Interval  time.Duration
+	BatchSize int
+	WebURL    string
 }
 
 type Settlement struct {
@@ -48,6 +47,7 @@ type Due struct {
 	HostID             uuid.UUID
 	PaymentIntentID    string
 	AmountCents        int
+	GuestFeeCents      int
 	Currency           string
 	AcceptedTaskKeys   []string
 	EarlierRefundCents int
@@ -89,9 +89,10 @@ type Report struct {
 }
 
 type PayoutStatus struct {
-	HasAccount bool `json:"has_account"`
-	Ready      bool `json:"ready"`
-	FeePercent int  `json:"fee_percent"`
+	HasAccount    bool `json:"has_account"`
+	Ready         bool `json:"ready"`
+	FeePercent    int  `json:"fee_percent"`
+	FeeFixedCents int  `json:"fee_fixed_cents"`
 }
 
 type Store interface {

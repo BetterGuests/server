@@ -4,8 +4,8 @@ import "testing"
 
 func TestTheHostIsPaidOnlyOnWhatTheGuestDidNotGetBack(t *testing.T) {
 	cases := map[string]struct{ adjustment, payout int }{
-		"half refunded on cancellation": {30000, 26400},
-		"team refunded part of a stay":  {10000, 44000},
+		"half refunded on cancellation": {30000, 27570},
+		"team refunded part of a stay":  {10000, 45970},
 		"everything refunded":           {60000, 0},
 	}
 	for name, test := range cases {

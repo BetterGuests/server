@@ -375,5 +375,6 @@ func guestRefund(booking Booking, checkInAt, now time.Time) (int, *time.Time) {
 	if now.Before(freeUntil) {
 		return booking.AmountCents, &freeUntil
 	}
-	return booking.AmountCents - booking.AmountCents/lateRefundDivisor, nil
+	stay := booking.AmountCents - booking.GuestFeeCents
+	return stay - stay/lateRefundDivisor, nil
 }

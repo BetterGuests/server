@@ -38,7 +38,7 @@ func (store *PostgresCancellationStore) Booking(ctx context.Context, actorID, bo
 		if err := tx.QueryRow(ctx,
 			`SELECT b.id, b.listing_id, l.title, b.guest_id, l.host_id, b.status, b.starts_on,
 			        to_char(l.check_in_time, 'HH24:MI'), l.time_zone, b.decided_at,
-			        COALESCE(p.amount_cents, 0), COALESCE(p.currency, 'usd'), COALESCE(p.status, ''),
+			        COALESCE(p.amount_cents, 0), COALESCE(p.guest_fee_cents, 0), COALESCE(p.currency, 'usd'), COALESCE(p.status, ''),
 			        COALESCE(p.stripe_payment_intent_id, '')
 			 FROM app.bookings b
 			 JOIN app.listings l ON l.id = b.listing_id
@@ -48,7 +48,7 @@ func (store *PostgresCancellationStore) Booking(ctx context.Context, actorID, bo
 		).Scan(
 			&booking.BookingID, &booking.ListingID, &booking.ListingTitle, &booking.GuestID, &booking.HostID,
 			&booking.Status, &booking.StartsOn, &booking.CheckInTime, &booking.TimeZone, &booking.ApprovedAt,
-			&booking.AmountCents, &booking.Currency, &booking.PaymentStatus, &booking.PaymentIntentID,
+			&booking.AmountCents, &booking.GuestFeeCents, &booking.Currency, &booking.PaymentStatus, &booking.PaymentIntentID,
 		); err != nil {
 			return err
 		}
