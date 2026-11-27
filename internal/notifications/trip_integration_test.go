@@ -146,6 +146,10 @@ func newTrip(t *testing.T) *trip {
 	return trip
 }
 
+const soonButStillToday = `least(
+	(now() AT TIME ZONE 'America/Phoenix') + interval '1 hour',
+	date_trunc('day', now() AT TIME ZONE 'America/Phoenix') + interval '23 hours 59 minutes')`
+
 func TestAWholeTripFromConfirmationToPublishedReviews(t *testing.T) {
 	trip := newTrip(t)
 	ctx := trip.ctx
@@ -195,11 +199,11 @@ func TestAWholeTripFromConfirmationToPublishedReviews(t *testing.T) {
 		t.Fatalf("checked out days before check-out time: %v", err)
 	}
 	trip.administer(`UPDATE app.listings
-	                 SET time_zone = 'America/Phoenix', check_out_time = (now() AT TIME ZONE 'America/Phoenix' + interval '1 hour')::time
+	                 SET time_zone = 'America/Phoenix', check_out_time = (`+soonButStillToday+`)::time
 	                 WHERE id = $1`, trip.listingID)
 	trip.administer(`UPDATE app.bookings
-	                 SET ends_on = (now() AT TIME ZONE 'America/Phoenix' + interval '1 hour')::date,
-	                     starts_on = (now() AT TIME ZONE 'America/Phoenix' + interval '1 hour')::date - 2
+	                 SET ends_on = (`+soonButStillToday+`)::date,
+	                     starts_on = (`+soonButStillToday+`)::date - 2
 	                 WHERE id = $1`, trip.bookingID)
 	if view, err = trip.stays.CheckOut(ctx, trip.guest, trip.bookingID); err != nil || view.Phase != stays.PhaseCompleted {
 		t.Fatalf("checking out on the last day must complete the stay: %+v %v", view, err)
