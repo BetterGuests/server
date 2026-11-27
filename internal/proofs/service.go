@@ -26,7 +26,6 @@ var (
 	ErrNotAwaitingReview = errors.New("proof is not awaiting review")
 	ErrInvalidDecision   = errors.New("decision must be approve or reject")
 	ErrReasonRequired    = errors.New("a rejection needs a reason of 500 characters or fewer")
-	ErrOwnListing        = errors.New("admins cannot review proof for their own listing")
 	ErrNotApproved       = errors.New("proof is not approved")
 )
 

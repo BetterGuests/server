@@ -38,7 +38,6 @@ func TestAdminEndpointsMapErrorsToStatusCodes(t *testing.T) {
 	}{
 		{"allowed", nil, http.StatusOK},
 		{"not an admin", ErrNotAdmin, http.StatusForbidden},
-		{"own listing", ErrOwnListing, http.StatusForbidden},
 		{"already decided", ErrNotAwaitingReview, http.StatusConflict},
 		{"missing proof", ErrProofNotFound, http.StatusNotFound},
 		{"missing reason", ErrReasonRequired, http.StatusBadRequest},

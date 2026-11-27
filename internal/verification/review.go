@@ -58,11 +58,14 @@ type ReviewStore interface {
 type IdentityReviewer interface {
 	Pending(ctx context.Context, adminID uuid.UUID) ([]PendingReview, error)
 	Decide(ctx context.Context, adminID, verificationID uuid.UUID, decision string) error
+	Preview(ctx context.Context, adminID, verificationID uuid.UUID) ([]ReviewedID, error)
 }
 
 type ReviewService struct {
-	store ReviewStore
-	now   func() time.Time
+	store     ReviewStore
+	inquiries ReviewInquiryStore
+	reader    InquiryReader
+	now       func() time.Time
 }
 
 func NewReviewService(store ReviewStore) *ReviewService {

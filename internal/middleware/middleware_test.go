@@ -3,6 +3,7 @@ package middleware
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -84,13 +85,44 @@ func TestRateLimitMiddlewareRejectsWithRetryAfter(t *testing.T) {
 	}
 }
 
-func TestClientIPPrefersForwardedFor(t *testing.T) {
+func TestClientIPUsesRailwayRealIP(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
 	request.RemoteAddr = "10.0.0.1:1234"
-	request.Header.Set("X-Forwarded-For", "203.0.113.5, 10.0.0.1")
+	request.Header.Set("X-Real-IP", "203.0.113.5")
 
-	if got := clientIP(request); got != "203.0.113.5" {
-		t.Fatalf("expected the first forwarded address, got %q", got)
+	if got := ClientIP(request); got != "203.0.113.5" {
+		t.Fatalf("expected the Railway client address, got %q", got)
+	}
+}
+
+func TestClientIPIgnoresClientSuppliedForwardedFor(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.RemoteAddr = "10.0.0.1:1234"
+	request.Header.Set("X-Real-IP", "203.0.113.5")
+	request.Header.Set("X-Forwarded-For", "198.51.100.77")
+
+	if got := ClientIP(request); got != "203.0.113.5" {
+		t.Fatalf("a spoofed X-Forwarded-For must not change the client key, got %q", got)
+	}
+}
+
+func TestSpoofedForwardedForCannotDodgeTheLimit(t *testing.T) {
+	handler := RateLimit(RateLimiterConfig{RequestsPerWindow: 2, Window: time.Minute})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	codes := []int{}
+	for attempt := range 3 {
+		request := httptest.NewRequest(http.MethodPost, "/", nil)
+		request.RemoteAddr = "10.0.0.1:1234"
+		request.Header.Set("X-Real-IP", "203.0.113.5")
+		request.Header.Set("X-Forwarded-For", "198.51.100."+strconv.Itoa(attempt))
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		codes = append(codes, recorder.Code)
+	}
+	if codes[2] != http.StatusTooManyRequests {
+		t.Fatalf("expected the third request to be limited, got %v", codes)
 	}
 }
 
@@ -98,8 +130,30 @@ func TestClientIPFallsBackToRemoteAddr(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
 	request.RemoteAddr = "10.0.0.1:1234"
 
-	if got := clientIP(request); got != "10.0.0.1" {
+	if got := ClientIP(request); got != "10.0.0.1" {
 		t.Fatalf("expected the remote address host, got %q", got)
+	}
+}
+
+func TestRateLimitByKeepsSeparateBucketsPerKey(t *testing.T) {
+	handler := RateLimitBy(RateLimiterConfig{RequestsPerWindow: 1, Window: time.Minute}, func(r *http.Request) string {
+		return r.Header.Get("X-Account")
+	})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	send := func(account string) int {
+		request := httptest.NewRequest(http.MethodPost, "/", nil)
+		request.Header.Set("X-Account", account)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		return recorder.Code
+	}
+	if send("a") != http.StatusOK || send("b") != http.StatusOK {
+		t.Fatal("each key should get its own allowance")
+	}
+	if send("a") != http.StatusTooManyRequests {
+		t.Fatal("a key over its allowance should be limited")
 	}
 }
 

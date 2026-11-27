@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"github.com/BetterGuests/BetterGuests-Server/internal/middleware"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -281,7 +282,7 @@ func TestRateLimitedResponsesStillCarryCORSHeaders(t *testing.T) {
 	}), []string{origin})
 
 	var last *httptest.ResponseRecorder
-	for range 200 {
+	for range middleware.DefaultRateLimiterConfig().RequestsPerWindow + 1 {
 		r := httptest.NewRequest(http.MethodGet, "/api/v1/listings", nil)
 		r.Header.Set("Origin", origin)
 		r.RemoteAddr = "203.0.113.9:1234"

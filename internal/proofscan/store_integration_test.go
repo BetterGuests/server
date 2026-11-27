@@ -55,7 +55,7 @@ func newScanFixture(t *testing.T) scanFixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = super.Close(ctx) })
-	return scanFixture{ctx: ctx, pool: pool, super: super, store: NewPostgresStore(pool)}
+	return scanFixture{ctx: ctx, pool: pool, super: super, store: NewPostgresStore(pool, true)}
 }
 
 func (f scanFixture) submittedProof(t *testing.T, line1 string) uuid.UUID {
@@ -104,10 +104,10 @@ func TestAScannedProofIsNotDueAgain(t *testing.T) {
 	}
 
 	result := Result{ProofID: proofID, FoundName: "Jason Coawette", NameVerdict: NameMatch, AddressMatched: true, Excerpt: "text", ScannedAt: time.Now()}
-	if err := f.store.Record(f.ctx, result); err != nil {
+	if _, err := f.store.Record(f.ctx, result); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.store.Record(f.ctx, Result{ProofID: proofID, NameVerdict: NameNoMatch, ScannedAt: time.Now()}); err != nil {
+	if _, err := f.store.Record(f.ctx, Result{ProofID: proofID, NameVerdict: NameNoMatch, ScannedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
 	if _, stillDue := f.dueIDs(t)[proofID]; stillDue {
@@ -125,7 +125,7 @@ func TestAScannedProofIsNotDueAgain(t *testing.T) {
 func TestScanTextIsForgottenOnceTheDocumentIsDeleted(t *testing.T) {
 	f := newScanFixture(t)
 	proofID := f.submittedProof(t, uuid.NewString()[:6]+" Forget Way")
-	if err := f.store.Record(f.ctx, Result{ProofID: proofID, FoundName: "Jason Coawette", NameVerdict: NameMatch, Excerpt: "private text", ScannedAt: time.Now()}); err != nil {
+	if _, err := f.store.Record(f.ctx, Result{ProofID: proofID, FoundName: "Jason Coawette", NameVerdict: NameMatch, Excerpt: "private text", ScannedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.super.Exec(f.ctx, `UPDATE app.property_proofs SET file_deleted_at = now() WHERE id = $1`, proofID); err != nil {
@@ -189,7 +189,7 @@ func TestTheReviewListCarriesTheScanOnlyOnceItExists(t *testing.T) {
 		t.Fatalf("expected no scan yet, got %+v", scan)
 	}
 
-	if err := f.store.Record(f.ctx, Result{ProofID: proofID, FoundName: "JASON COAWETTE", NameVerdict: NameMatch, AddressMatched: true, ScannedAt: time.Now()}); err != nil {
+	if _, err := f.store.Record(f.ctx, Result{ProofID: proofID, FoundName: "JASON COAWETTE", NameVerdict: NameMatch, AddressMatched: true, ScannedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
 	after, err := reviews.ListSubmitted(f.ctx, adminID)

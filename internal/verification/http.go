@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -16,6 +17,8 @@ import (
 
 const (
 	maxWebhookBodyBytes = 1 << 20
+	lookupTimeout       = 5 * time.Second
+	lookupWindow        = 48 * time.Hour
 	signatureHeaderName = "Persona-Signature"
 	replaceQueryParam   = "replace"
 	inquiryQueryParam   = "inquiry_id"
@@ -28,6 +31,16 @@ type HTTPHandler struct {
 	status    StatusReader
 	deletion  IDDeleter
 	reviews   IdentityReviewer
+	lookups   Reconciler
+}
+
+type Reconciler interface {
+	Reconcile(ctx context.Context, accountID uuid.UUID, inquiryID string) error
+}
+
+func (handler *HTTPHandler) WithReconciler(reconciler Reconciler) *HTTPHandler {
+	handler.lookups = reconciler
+	return handler
 }
 
 type IDDeleter interface {
@@ -86,7 +99,15 @@ func (handler *HTTPHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not read verification status")
 		return
 	}
-	response, found := summarize(attempts, r.URL.Query().Get(inquiryQueryParam), time.Now())
+	inquiryID := r.URL.Query().Get(inquiryQueryParam)
+	if handler.reconcile(r.Context(), accountID, attempts, inquiryID) {
+		if refreshed, err := handler.status.Attempts(r.Context(), accountID); err == nil {
+			attempts = refreshed
+		} else {
+			slog.Warn("Reread verification status", "error", err)
+		}
+	}
+	response, found := summarize(attempts, inquiryID, time.Now())
 	if !found {
 		writeError(w, http.StatusNotFound, "verification inquiry not found")
 		return
@@ -95,6 +116,30 @@ func (handler *HTTPHandler) GetStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (handler *HTTPHandler) reconcile(ctx context.Context, accountID uuid.UUID, attempts []Attempt, inquiryID string) bool {
+	if handler.lookups == nil || len(attempts) == 0 {
+		return false
+	}
+	target := attempts[0]
+	if inquiryID != "" {
+		index := slices.IndexFunc(attempts, func(attempt Attempt) bool { return attempt.InquiryID == inquiryID })
+		if index < 0 {
+			return false
+		}
+		target = attempts[index]
+	}
+	if target.Status != StatusCreated || time.Since(target.CompletedAt) > lookupWindow {
+		return false
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, lookupTimeout)
+	defer cancel()
+	if err := handler.lookups.Reconcile(lookupCtx, accountID, target.InquiryID); err != nil {
+		slog.Warn("Look up ID check with Persona", "inquiry_id", target.InquiryID, "error", err)
+		return false
+	}
+	return true
 }
 
 func (handler *HTTPHandler) StartVerification(w http.ResponseWriter, r *http.Request) {

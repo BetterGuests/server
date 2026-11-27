@@ -81,7 +81,7 @@ func (deps routeDeps) mountVerification(mux *http.ServeMux) {
 	}
 	mux.HandleFunc("POST /api/v1/webhooks/persona", deps.verification.PersonaWebhook)
 	mux.Handle("DELETE /api/v1/verification/data", deps.authenticate(http.HandlerFunc(deps.verification.DeleteIDData)))
-	mux.Handle("POST /api/v1/verification/inquiries", deps.authenticate(deps.compliance.RequireAdult(http.HandlerFunc(deps.verification.StartVerification))))
+	mux.Handle("POST /api/v1/verification/inquiries", deps.authenticate(perAccount(idCheckBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.verification.StartVerification)))))
 }
 
 func (deps routeDeps) mountPayments(mux *http.ServeMux) {
@@ -90,11 +90,11 @@ func (deps routeDeps) mountPayments(mux *http.ServeMux) {
 	}
 	mux.HandleFunc("POST /api/v1/webhooks/stripe", deps.payments.StripeWebhook)
 	if deps.authenticate != nil {
-		mux.Handle("POST /api/v1/payments/checkout", deps.authenticate(deps.compliance.RequireAdult(http.HandlerFunc(deps.payments.StartCheckout))))
+		mux.Handle("POST /api/v1/payments/checkout", deps.authenticate(perAccount(checkoutBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.payments.StartCheckout)))))
 		mux.Handle("GET /api/v1/payments/cards", deps.authenticate(http.HandlerFunc(deps.payments.ListSavedCards)))
 		mux.Handle("DELETE /api/v1/payments/cards/{card_id}", deps.authenticate(http.HandlerFunc(deps.payments.RemoveSavedCard)))
 		mux.Handle("PUT /api/v1/payments/cards/{card_id}/style", deps.authenticate(http.HandlerFunc(deps.payments.StyleSavedCard)))
-		mux.Handle("POST /api/v1/payments/cards/{card_id}/art/session", deps.authenticate(deps.compliance.RequireAdult(http.HandlerFunc(deps.payments.StartCardArt))))
+		mux.Handle("POST /api/v1/payments/cards/{card_id}/art/session", deps.authenticate(perAccount(cardArtBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.payments.StartCardArt)))))
 		mux.Handle("PUT /api/v1/payments/cards/{card_id}/art", deps.authenticate(deps.compliance.RequireAdult(http.HandlerFunc(deps.payments.LinkCardArt))))
 	}
 }
@@ -140,7 +140,7 @@ func (deps routeDeps) mountWaitlist(mux *http.ServeMux) {
 	if deps.waitlist == nil {
 		return
 	}
-	mux.HandleFunc("POST /api/v1/waitlist", deps.waitlist.Join)
+	mux.Handle("POST /api/v1/waitlist", perAccountFunc(waitlistJoinBudget, deps.waitlist.Join))
 }
 
 func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
@@ -151,14 +151,14 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.HandleFunc("GET /api/v1/compliance/status", deps.compliance.GetStatus)
 	api.HandleFunc("POST /api/v1/compliance/age", deps.compliance.ConfirmAge)
 	api.HandleFunc("POST /api/v1/compliance/consents", deps.compliance.GrantConsent)
-	api.Handle("POST /api/v1/listings", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.CreateListing)))
-	api.Handle("POST /api/v1/listings/{listing_id}/publish", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.PublishListing)))
-	api.Handle("POST /api/v1/listings/{listing_id}/proof/uploads", deps.compliance.RequireAdult(http.HandlerFunc(deps.proofs.RequestUpload)))
-	api.Handle("POST /api/v1/listings/{listing_id}/proof", deps.compliance.RequireAdult(http.HandlerFunc(deps.proofs.Submit)))
+	api.Handle("POST /api/v1/listings", perAccount(listingCreateBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.CreateListing))))
+	api.Handle("POST /api/v1/listings/{listing_id}/publish", perAccount(listingPublishBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.PublishListing))))
+	api.Handle("POST /api/v1/listings/{listing_id}/proof/uploads", perAccount(proofUploadBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.proofs.RequestUpload))))
+	api.Handle("POST /api/v1/listings/{listing_id}/proof", perAccount(proofUploadBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.proofs.Submit))))
 	api.HandleFunc("GET /api/v1/listings/{listing_id}/proof", deps.proofs.Status)
 	api.HandleFunc("GET /api/v1/listings/{listing_id}/setup", deps.listings.GetSetup)
-	api.Handle("POST /api/v1/listings/{listing_id}/photos/uploads", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.RequestPhotoUpload)))
-	api.Handle("POST /api/v1/listings/{listing_id}/photos", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.AddPhoto)))
+	api.Handle("POST /api/v1/listings/{listing_id}/photos/uploads", perAccount(photoUploadBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.RequestPhotoUpload))))
+	api.Handle("POST /api/v1/listings/{listing_id}/photos", perAccount(photoUploadBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.AddPhoto))))
 	api.Handle("DELETE /api/v1/listings/{listing_id}/photos/{photo_id}", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.RemovePhoto)))
 	api.Handle("PUT /api/v1/listings/{listing_id}/photos/order", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.ReorderPhotos)))
 	api.Handle("PUT /api/v1/listings/{listing_id}/price", deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.SetPrice)))
@@ -169,9 +169,10 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.HandleFunc("GET /api/v1/admin/property-proofs", deps.proofs.ListForReview)
 	api.HandleFunc("POST /api/v1/admin/property-proofs/{proof_id}/revoke", deps.proofs.Revoke)
 	api.HandleFunc("GET /api/v1/admin/identity-reviews", deps.verification.ListReviews)
+	api.HandleFunc("GET /api/v1/admin/identity-reviews/{verification_id}/preview", deps.verification.PreviewReview)
 	api.HandleFunc("POST /api/v1/admin/identity-reviews/{verification_id}/decision", deps.verification.DecideReview)
 	api.HandleFunc("POST /api/v1/admin/property-proofs/{proof_id}/decision", deps.proofs.Decide)
-	api.HandleFunc("POST /api/v1/reviews", deps.reviews.CreateReview)
+	api.Handle("POST /api/v1/reviews", perAccountFunc(reviewBudget, deps.reviews.CreateReview))
 	api.HandleFunc("GET /api/v1/reviews/pending", deps.reviews.PendingReviews)
 	api.HandleFunc("GET /api/v1/reviews/about-me", deps.reviews.ReviewsAboutMe)
 	api.HandleFunc("GET /api/v1/bookings/{booking_id}/reviews", deps.reviews.BookingReviews)
@@ -184,7 +185,7 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.Handle("PUT /api/v1/listings/{listing_id}/arrival-guide", deps.compliance.RequireAdult(http.HandlerFunc(deps.stays.SaveGuide)))
 	api.HandleFunc("GET /api/v1/bookings/{booking_id}/cancellation", deps.cancellations.Options)
 	api.HandleFunc("POST /api/v1/bookings/{booking_id}/cancellation", deps.cancellations.Cancel)
-	api.HandleFunc("POST /api/v1/bookings/{booking_id}/report", deps.cancellations.Report)
+	api.Handle("POST /api/v1/bookings/{booking_id}/report", perAccountFunc(stayReportBudget, deps.cancellations.Report))
 	api.HandleFunc("GET /api/v1/admin/stay-reports", deps.cancellations.OpenReports)
 	api.HandleFunc("GET /api/v1/admin/listings", deps.cancellations.AdminListings)
 	api.HandleFunc("GET /api/v1/admin/listings/popular", deps.cancellations.PopularListings)
@@ -194,7 +195,7 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.HandleFunc("GET /api/v1/notifications", deps.inbox.List)
 	api.HandleFunc("POST /api/v1/notifications/read", deps.inbox.MarkAllRead)
 	api.HandleFunc("POST /api/v1/notifications/{notification_id}/read", deps.inbox.MarkRead)
-	api.Handle("POST /api/v1/bookings", deps.compliance.RequireAdult(http.HandlerFunc(deps.bookings.CreateBooking)))
+	api.Handle("POST /api/v1/bookings", perAccount(bookingRequestBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.bookings.CreateBooking))))
 	api.HandleFunc("GET /api/v1/bookings", deps.bookings.ListMyBookings)
 	api.HandleFunc("GET /api/v1/bookings/{booking_id}", deps.bookings.GetBooking)
 	api.HandleFunc("POST /api/v1/bookings/{booking_id}/cancel", deps.bookings.CancelBooking)
@@ -204,11 +205,11 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.HandleFunc("POST /api/v1/hosting/bookings/{booking_id}/approve", deps.bookings.ApproveBooking)
 	api.HandleFunc("POST /api/v1/hosting/bookings/{booking_id}/decline", deps.bookings.DeclineBooking)
 	api.HandleFunc("GET /api/v1/conversations", deps.messages.ListConversations)
-	api.Handle("POST /api/v1/conversations", deps.compliance.RequireAdult(http.HandlerFunc(deps.messages.OpenConversation)))
+	api.Handle("POST /api/v1/conversations", perAccount(conversationBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.messages.OpenConversation))))
 	api.HandleFunc("GET /api/v1/conversations/{conversation_id}", deps.messages.GetConversation)
 	api.HandleFunc("DELETE /api/v1/conversations/{conversation_id}", deps.messages.DeleteConversation)
 	api.HandleFunc("GET /api/v1/conversations/{conversation_id}/messages", deps.messages.ListMessages)
-	api.HandleFunc("POST /api/v1/conversations/{conversation_id}/messages", deps.messages.SendMessage)
+	api.Handle("POST /api/v1/conversations/{conversation_id}/messages", perAccountFunc(messageBudget, deps.messages.SendMessage))
 	api.HandleFunc("POST /api/v1/conversations/{conversation_id}/read", deps.messages.MarkRead)
 	api.HandleFunc("POST /api/v1/conversations/{conversation_id}/typing", deps.messages.Typing)
 	api.HandleFunc("DELETE /api/v1/conversations/{conversation_id}/messages/{message_id}", deps.messages.DeleteMessage)
@@ -226,7 +227,7 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.HandleFunc("DELETE /api/v1/profile/banner", deps.profiles.RemoveBanner)
 	api.HandleFunc("GET /api/v1/verification/status", deps.verification.GetStatus)
 	api.HandleFunc("POST /api/v1/cashback/submissions/{submission_id}/review", deps.cashback.ReviewSubmission)
-	mux.Handle("/api/v1/", deps.authenticate(api))
+	mux.Handle("/api/v1/", deps.authenticate(limitAccountWrites(api)))
 }
 
 const preflightCacheSeconds = 600

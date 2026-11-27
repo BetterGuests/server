@@ -84,7 +84,8 @@ const proofColumns = `
 	p.status, coalesce(p.rejection_reason, ''), p.reviewed_by, p.reviewed_at, p.created_at, p.updated_at,
 	p.address_key, p.unit_key,
 	p.relationship, coalesce(p.owner_name, ''), coalesce(p.owner_contact, ''),
-	coalesce(to_char(p.authority_expires_on, 'YYYY-MM-DD'), '')`
+	coalesce(to_char(p.authority_expires_on, 'YYYY-MM-DD'), ''),
+	p.auto_approved_at IS NOT NULL`
 
 func scanProof(row pgx.Row, extra ...any) (Proof, error) {
 	var proof Proof
@@ -93,7 +94,7 @@ func scanProof(row pgx.Row, extra ...any) (Proof, error) {
 		&proof.ID, &proof.ListingID, &proof.HostID, &documentType, &proof.ObjectKey, &proof.ContentType,
 		&proof.SizeBytes, &status, &proof.RejectionReason, &proof.ReviewedBy, &proof.ReviewedAt,
 		&proof.CreatedAt, &proof.UpdatedAt, &proof.AddressKey, &proof.UnitKey,
-		&relationship, &proof.OwnerName, &proof.OwnerContact, &proof.ExpiresOn,
+		&relationship, &proof.OwnerName, &proof.OwnerContact, &proof.ExpiresOn, &proof.AutoApproved,
 	}, extra...)
 	if err := row.Scan(destinations...); err != nil {
 		return Proof{}, err
@@ -202,20 +203,16 @@ func (s *PostgresProofStore) listForReview(ctx context.Context, adminID uuid.UUI
 
 func (s *PostgresProofStore) Decide(ctx context.Context, adminID, proofID uuid.UUID, status Status, reason string, at time.Time) error {
 	return db.WithUserTx(ctx, s.DB, adminID.String(), func(tx pgx.Tx) error {
-		var hostID uuid.UUID
 		var current string
 		var ended bool
 		err := tx.QueryRow(ctx, `
-			SELECT host_id, status, coalesce(authority_expires_on < ($2::timestamptz AT TIME ZONE 'UTC')::date, false)
-			FROM app.property_proofs WHERE id = $1`, proofID, at).Scan(&hostID, &current, &ended)
+			SELECT status, coalesce(authority_expires_on < ($2::timestamptz AT TIME ZONE 'UTC')::date, false)
+			FROM app.property_proofs WHERE id = $1`, proofID, at).Scan(&current, &ended)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrProofNotFound
 		}
 		if err != nil {
 			return fmt.Errorf("read proof: %w", err)
-		}
-		if hostID == adminID {
-			return ErrOwnListing
 		}
 		if Status(current) != Submitted {
 			return ErrNotAwaitingReview
@@ -239,7 +236,7 @@ func (s *PostgresProofStore) Decide(ctx context.Context, adminID, proofID uuid.U
 }
 
 var revokeOutcomes = map[string]error{
-	"done": nil, "forbidden": ErrNotAdmin, "not_found": ErrProofNotFound, "own": ErrOwnListing, "wrong_state": ErrNotApproved,
+	"done": nil, "forbidden": ErrNotAdmin, "not_found": ErrProofNotFound, "wrong_state": ErrNotApproved,
 }
 
 func (s *PostgresProofStore) Revoke(ctx context.Context, adminID, proofID uuid.UUID, reason string, at time.Time) error {

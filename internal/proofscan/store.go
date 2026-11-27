@@ -8,11 +8,12 @@ import (
 )
 
 type PostgresStore struct {
-	DB *pgxpool.Pool
+	DB          *pgxpool.Pool
+	AutoApprove bool
 }
 
-func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
-	return &PostgresStore{DB: pool}
+func NewPostgresStore(pool *pgxpool.Pool, autoApprove bool) *PostgresStore {
+	return &PostgresStore{DB: pool, AutoApprove: autoApprove}
 }
 
 func (store *PostgresStore) DueForScan(ctx context.Context, limit int) ([]Due, error) {
@@ -35,14 +36,17 @@ func (store *PostgresStore) DueForScan(ctx context.Context, limit int) ([]Due, e
 	return due, rows.Err()
 }
 
-func (store *PostgresStore) Record(ctx context.Context, result Result) error {
-	_, err := store.DB.Exec(ctx, `SELECT app.record_property_proof_scan($1, $2, $3, $4, $5, $6, $7)`,
+const autoApprovedOutcome = "approved"
+
+func (store *PostgresStore) Record(ctx context.Context, result Result) (bool, error) {
+	var outcome string
+	err := store.DB.QueryRow(ctx, `SELECT app.record_property_proof_scan($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 		result.ProofID, result.FoundName, string(result.NameVerdict), result.AddressMatched,
-		result.Excerpt, result.Error, result.ScannedAt)
+		result.Excerpt, result.Error, result.ScannedAt, result.DocumentDate, store.AutoApprove).Scan(&outcome)
 	if err != nil {
-		return fmt.Errorf("record proof scan: %w", err)
+		return false, fmt.Errorf("record proof scan: %w", err)
 	}
-	return nil
+	return outcome == autoApprovedOutcome, nil
 }
 
 func (store *PostgresStore) ForgetDeletedText(ctx context.Context) (int, error) {

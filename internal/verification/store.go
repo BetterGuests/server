@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/BetterGuests/BetterGuests-Server/db"
@@ -74,6 +75,26 @@ func (store *PostgresVerificationStore) Attempts(ctx context.Context, accountID 
 		return nil, fmt.Errorf("list verification attempts: %w", err)
 	}
 	return attempts, nil
+}
+
+func (store *PostgresVerificationStore) LatestOpenInquiry(ctx context.Context, accountID uuid.UUID, since time.Time) (string, bool, error) {
+	var inquiryID string
+	err := db.WithUserTx(ctx, store.DB, accountID.String(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT persona_inquiry_id FROM app.identity_verifications
+			 WHERE account_id = $1 AND status = 'created' AND created_at >= $2
+			   AND deletion_requested_at IS NULL AND redacted_at IS NULL
+			 ORDER BY created_at DESC, id
+			 LIMIT 1`,
+			accountID, since).Scan(&inquiryID)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("latest open verification: %w", err)
+	}
+	return inquiryID, true, nil
 }
 
 func (store *PostgresVerificationStore) Create(ctx context.Context, verification Verification) error {
@@ -170,6 +191,16 @@ func (store *PostgresVerificationStore) Complete(ctx context.Context, completion
 			if err := recordPass(ctx, tx, current.id, completion.OccurredAt, firstPass, held); err != nil {
 				return err
 			}
+			if len(held) > 0 {
+				settled, err := settleReview(ctx, tx, current.id, completion.OccurredAt)
+				if err != nil {
+					return err
+				}
+				if settled != outcomeHeld {
+					slog.Info("ID check settled without a person", "inquiry_id", completion.InquiryID, "reasons", held, "outcome", settled)
+					held = nil
+				}
+			}
 		}
 		if err := saveIDName(ctx, tx, completion.AccountID, completion.InquiryID, completion.Name); err != nil {
 			return err
@@ -216,6 +247,16 @@ func readHistory(ctx context.Context, tx pgx.Tx, completion Completion, verifica
 		return History{}, fmt.Errorf("check for a duplicate identity: %w", err)
 	}
 	return history, nil
+}
+
+const outcomeHeld = "held"
+
+func settleReview(ctx context.Context, tx pgx.Tx, verificationID uuid.UUID, at time.Time) (string, error) {
+	var outcome string
+	if err := tx.QueryRow(ctx, `SELECT app.settle_identity_review($1, $2)`, verificationID, at).Scan(&outcome); err != nil {
+		return "", fmt.Errorf("settle ID review: %w", err)
+	}
+	return outcome, nil
 }
 
 func recordPass(ctx context.Context, tx pgx.Tx, verificationID uuid.UUID, occurredAt time.Time, firstPass bool, held []ReviewReason) error {

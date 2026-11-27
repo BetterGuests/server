@@ -337,3 +337,117 @@ func TestACheckFinishingAfterADeletionRequestStaysRevoked(t *testing.T) {
 		t.Fatalf("no fingerprint may be stored after a deletion request: %d %v", kept, err)
 	}
 }
+
+func (f fixture) passJudged(t *testing.T, accountID uuid.UUID, name verification.IDName, mark []byte, at time.Time, reasons ...verification.ReviewReason) (string, []verification.ReviewReason) {
+	t.Helper()
+	inquiryID := f.open(t, accountID, at)
+	completion := verification.Completion{AccountID: accountID, InquiryID: inquiryID, OccurredAt: at, Name: name, Fingerprint: mark}
+	held, err := verification.NewPostgresVerificationStore(f.pool).Complete(f.ctx, completion, func(verification.History) []verification.ReviewReason {
+		return reasons
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return inquiryID, held
+}
+
+func (f fixture) reviewState(t *testing.T, inquiryID string) string {
+	t.Helper()
+	var state string
+	if err := f.super.QueryRow(f.ctx, `SELECT coalesce(review_state, '') FROM app.identity_verifications WHERE persona_inquiry_id = $1`, inquiryID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	return state
+}
+
+func TestAnUnderAgeIDIsRejectedWithoutAPerson(t *testing.T) {
+	f := newFixture(t)
+	hostID, listingID, _, adminID := f.published(t)
+	name := verification.IDName{First: "John", Last: "Smith"}
+	now := time.Now().UTC().Truncate(time.Second)
+
+	f.pass(t, hostID, name, nil, now.Add(-time.Hour))
+	young, held := f.passJudged(t, hostID, name, nil, now, verification.ReasonUnderAge, verification.ReasonNameChanged)
+	if len(held) != 0 || f.reviewState(t, young) != "rejected" {
+		t.Fatalf("held = %v, state = %s", held, f.reviewState(t, young))
+	}
+	f.sweep(t)
+	if f.verified(t, hostID) || !f.paused(t, listingID) {
+		t.Fatal("an under-age ID must also end the earlier pass")
+	}
+	pending, err := verification.NewPostgresVerificationStore(f.pool).PendingReviews(f.ctx, adminID, 200)
+	if err != nil || slices.ContainsFunc(pending, func(review verification.PendingReview) bool { return review.AccountID == hostID }) {
+		t.Fatalf("the queue must not show it: %+v %v", pending, err)
+	}
+}
+
+func TestALoneUnconfirmedNameClearsAndSendsPropertyProofsBack(t *testing.T) {
+	f := newFixture(t)
+	hostID, listingID, _, _ := f.published(t)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	f.pass(t, hostID, verification.IDName{First: "John", Last: "Smith"}, nil, now.Add(-time.Hour))
+	unread, held := f.passJudged(t, hostID, verification.IDName{}, nil, now, verification.ReasonNameUnconfirmed)
+	if len(held) != 0 || f.reviewState(t, unread) != "cleared" || !f.verified(t, hostID) {
+		t.Fatalf("held = %v, state = %s", held, f.reviewState(t, unread))
+	}
+	f.sweep(t)
+	latest, _, err := NewPostgresProofStore(f.pool).Latest(f.ctx, hostID, listingID)
+	if err != nil || latest.Status != Rejected || !f.paused(t, listingID) {
+		t.Fatalf("proof = %+v, err = %v", latest.Status, err)
+	}
+}
+
+func TestAnUnconfirmedNameWithAnotherReasonStillWaitsForAPerson(t *testing.T) {
+	f := newFixture(t)
+	hostID := uuid.New()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	unread, held := f.passJudged(t, hostID, verification.IDName{}, nil, now, verification.ReasonNameUnconfirmed, verification.ReasonPreviouslyDeclined)
+	if len(held) != 2 || f.reviewState(t, unread) != "pending" {
+		t.Fatalf("held = %v, state = %s", held, f.reviewState(t, unread))
+	}
+}
+
+func TestAdminsGetTheInquiriesToCompareAgainst(t *testing.T) {
+	f := newFixture(t)
+	adminID := f.makeAdmin(t)
+	store := verification.NewPostgresVerificationStore(f.pool)
+	mark := []byte(uuid.NewString()[:32])
+	name := verification.IDName{First: "John", Last: "Smith"}
+	now := time.Now().UTC().Truncate(time.Second)
+	first, second := uuid.New(), uuid.New()
+
+	original, _ := f.pass(t, first, name, mark, now.Add(-time.Hour))
+	secondOld, _ := f.pass(t, second, verification.IDName{First: "Jon", Last: "Smith"}, nil, now.Add(-time.Hour))
+	copied, held := f.pass(t, second, name, mark, now)
+	if len(held) == 0 {
+		t.Fatal("the copied identity must be held")
+	}
+	pending, err := store.PendingReviews(f.ctx, adminID, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := slices.IndexFunc(pending, func(review verification.PendingReview) bool { return review.InquiryID == copied })
+	if index < 0 {
+		t.Fatalf("review missing: %+v", pending)
+	}
+	inquiries, err := store.ReviewInquiries(f.ctx, adminID, pending[index].VerificationID)
+	want := []verification.ReviewInquiry{
+		{Role: verification.RoleThis, InquiryID: copied},
+		{Role: verification.RolePrevious, InquiryID: secondOld},
+		{Role: verification.RoleOtherAccount, InquiryID: original},
+	}
+	if err != nil || !slices.Equal(inquiries, want) {
+		t.Fatalf("inquiries = %+v, err = %v", inquiries, err)
+	}
+	if _, err := store.ReviewInquiries(f.ctx, second, pending[index].VerificationID); !errors.Is(err, verification.ErrNotAdmin) {
+		t.Fatalf("only admins may look, got %v", err)
+	}
+	if err := store.DecideReview(f.ctx, adminID, pending[index].VerificationID, false, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReviewInquiries(f.ctx, adminID, pending[index].VerificationID); !errors.Is(err, verification.ErrReviewNotFound) {
+		t.Fatalf("a decided check has nothing to preview, got %v", err)
+	}
+}

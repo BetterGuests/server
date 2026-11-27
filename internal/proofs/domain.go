@@ -47,6 +47,7 @@ type Proof struct {
 	RejectionReason string       `json:"rejection_reason,omitempty"`
 	ReviewedBy      *uuid.UUID   `json:"reviewed_by,omitempty"`
 	ReviewedAt      *time.Time   `json:"reviewed_at,omitempty"`
+	AutoApproved    bool         `json:"auto_approved"`
 	CreatedAt       time.Time    `json:"created_at"`
 	UpdatedAt       time.Time    `json:"updated_at"`
 	ObjectKey       string       `json:"-"`

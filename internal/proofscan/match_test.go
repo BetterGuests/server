@@ -48,6 +48,29 @@ func TestFindNameReportsADifferentPersonAsNoMatch(t *testing.T) {
 	}
 }
 
+func TestFindNameIgnoresTheColumnBesideTheName(t *testing.T) {
+	text := "Account holder\nJason Coawette                                  Billing period\n128 Juniper Lane"
+	found, verdict := FindName(text, "Jason Coawette")
+	if found != "Jason Coawette" || verdict != NameMatch {
+		t.Fatalf("got %q %q", found, verdict)
+	}
+}
+
+func TestFindNameSkipsALabelOnTheSameLine(t *testing.T) {
+	found, verdict := FindName("Account holder: Jason M. Coawette\n", "Jason Coawette")
+	if found != "Jason M. Coawette" || verdict != NameMatch {
+		t.Fatalf("got %q %q", found, verdict)
+	}
+}
+
+func TestFindNameDoesNotJoinAHeaderColumnToAName(t *testing.T) {
+	text := "Juniper Valley Power & Water                    SAMPLE - TEST ONLY"
+	found, verdict := FindName(text, "Alexander Sample")
+	if found != "SAMPLE TEST" || verdict != NameNoMatch {
+		t.Fatalf("got %q %q", found, verdict)
+	}
+}
+
 func TestFindNameReportsNotFoundWhenNoLineSharesAWord(t *testing.T) {
 	found, verdict := FindName(utilityBill, "Alexander Sample")
 	if found != "" || verdict != NameNotFound {

@@ -217,7 +217,6 @@ var statusByError = []struct {
 	{ErrProofNotFound, http.StatusNotFound},
 	{ErrNotListingOwner, http.StatusForbidden},
 	{ErrNotAdmin, http.StatusForbidden},
-	{ErrOwnListing, http.StatusForbidden},
 	{ErrProofPending, http.StatusConflict},
 	{ErrNotAwaitingReview, http.StatusConflict},
 	{ErrNotApproved, http.StatusConflict},

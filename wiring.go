@@ -211,8 +211,8 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		realtime: realtime.NewHTTPHandler(realtimeService, authService, origins).
 			WithReceiver(messages.TypingEventKind, messages.NewTypingReceiver(messageService)),
 		cashback: cashback.NewHTTPHandler(cashbackService, cashbackService, cashbackService, cashbackService, cashbackService),
-		verification: verification.NewHTTPHandler(verificationService, verificationService).WithStatusReader(verificationStore).WithDeletion(deletionService).
-			WithReviews(verification.NewReviewService(verificationStore)),
+		verification: verification.NewHTTPHandler(verificationService, verificationService).WithStatusReader(verificationStore).WithReconciler(verificationService).WithDeletion(deletionService).
+			WithReviews(verification.NewReviewService(verificationStore).WithInquiries(verificationStore, personaClient)),
 		payments:      payments.NewHTTPHandler(paymentService, paymentService).WithCards(paymentService),
 		payouts:       settlements.NewHTTPHandler(payoutService, payoutService),
 		compliance:    compliance.NewHTTPHandler(complianceService, complianceService, complianceService),
@@ -477,7 +477,7 @@ func buildProofScan(pool *pgxpool.Pool) *proofscan.Service {
 		slog.Warn("ownership documents are not scanned: document storage cannot be read")
 		return nil
 	}
-	return proofscan.NewService(proofscan.NewPostgresStore(pool), reader, proofscan.NewCommandExtractor())
+	return proofscan.NewService(proofscan.NewPostgresStore(pool, proofscan.AutoApproveEnabled(os.Getenv)), reader, proofscan.NewCommandExtractor())
 }
 
 func buildVerificationPauses(pool *pgxpool.Pool) *verification.VerificationPauseService {

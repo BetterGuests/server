@@ -55,6 +55,7 @@ type VerificationService struct {
 	fingerprints  []byte
 	now           func() time.Time
 	newID         func() uuid.UUID
+	lookups       lookupGate
 }
 
 func ConfigFromEnv() (Config, error) {
@@ -107,7 +108,7 @@ func (service *VerificationService) WithConsents(consents ConsentChecker) *Verif
 type inquiryFactory func(ctx context.Context, templateID, referenceID string) (Inquiry, error)
 
 func (service *VerificationService) StartVerification(ctx context.Context, accountID uuid.UUID, replace bool) (StartResult, error) {
-	return service.start(ctx, accountID, replace, service.inquiries.CreateInquiry)
+	return service.start(ctx, accountID, replace, false, service.inquiries.CreateInquiry)
 }
 
 func (service *VerificationService) StartHandoff(ctx context.Context, accountID uuid.UUID, replace bool) (StartResult, error) {
@@ -115,12 +116,16 @@ func (service *VerificationService) StartHandoff(ctx context.Context, accountID 
 	if !ok {
 		return StartResult{}, ErrHandoffUnavailable
 	}
-	return service.start(ctx, accountID, replace, creator.CreateHandoffInquiry)
+	return service.start(ctx, accountID, replace, true, creator.CreateHandoffInquiry)
 }
 
-func (service *VerificationService) start(ctx context.Context, accountID uuid.UUID, replace bool, create inquiryFactory) (StartResult, error) {
+func (service *VerificationService) start(ctx context.Context, accountID uuid.UUID, replace, handoff bool, create inquiryFactory) (StartResult, error) {
 	if err := service.requireConsent(ctx, accountID); err != nil {
 		return StartResult{}, err
+	}
+	var openInquiryID string
+	if !handoff {
+		openInquiryID = service.openInquiry(ctx, accountID)
 	}
 	completed, err := service.store.HasCompleted(ctx, accountID)
 	if err != nil {
@@ -128,6 +133,9 @@ func (service *VerificationService) start(ctx context.Context, accountID uuid.UU
 	}
 	if completed && !replace {
 		return StartResult{}, ErrAlreadyVerified
+	}
+	if resumed, ok := service.resume(ctx, openInquiryID); ok {
+		return resumed, nil
 	}
 	inquiry, err := create(ctx, service.templateID, accountID.String())
 	if err != nil {
@@ -157,6 +165,10 @@ func (service *VerificationService) HandleWebhook(ctx context.Context, signature
 	if err != nil {
 		return err
 	}
+	return service.apply(ctx, event)
+}
+
+func (service *VerificationService) apply(ctx context.Context, event WebhookEvent) error {
 	status, mapped := eventStatuses[event.Name]
 	if !mapped {
 		slog.Info("Ignoring unmapped persona event", "event", event.Name)

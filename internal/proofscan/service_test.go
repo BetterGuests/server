@@ -20,9 +20,9 @@ func (store *storeStub) DueForScan(context.Context, int) ([]Due, error) {
 	return store.due, store.failRead
 }
 
-func (store *storeStub) Record(_ context.Context, result Result) error {
+func (store *storeStub) Record(_ context.Context, result Result) (bool, error) {
 	store.recorded = append(store.recorded, result)
-	return nil
+	return false, nil
 }
 
 func (store *storeStub) ForgetDeletedText(context.Context) (int, error) { return 0, nil }
@@ -135,5 +135,20 @@ func TestTheJobIsOffUnlessTheFlagIsTrue(t *testing.T) {
 		if got := Enabled(lookup); got != want {
 			t.Fatalf("Enabled(%q) = %v, want %v", value, got, want)
 		}
+	}
+}
+
+func TestRunOnceRecordsTheNewestDateOnTheBill(t *testing.T) {
+	proof := phoenixProof("")
+	store := &storeStub{due: []Due{proof}}
+	bill := utilityBill + "\nStatement date: Nov 3, 2026\nTotal due Dec 4, 2026"
+	service := newTestService(store, map[string][]byte{proof.ObjectKey: []byte(bill)}, extractorStub{})
+
+	if _, err := service.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got := store.recorded[0].DocumentDate
+	if got == nil || !got.Equal(time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)) {
+		t.Fatalf("got %v", got)
 	}
 }

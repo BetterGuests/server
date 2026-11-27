@@ -195,14 +195,17 @@ func TestDatabaseRefusesSelfApprovalByTheHost(t *testing.T) {
 	}
 }
 
-func TestAdminCannotApproveTheirOwnListing(t *testing.T) {
+func TestAdminCanApproveAndRevokeTheirOwnListing(t *testing.T) {
 	f := newFixture(t)
 	adminID := f.makeAdmin(t)
 	listing := f.draft(t, adminID)
 	proof := f.submit(t, listing)
 
-	if err := f.proofs.Decide(f.ctx, adminID, proof.ID, Approve, ""); !errors.Is(err, ErrOwnListing) {
-		t.Fatalf("expected ErrOwnListing, got %v", err)
+	if err := f.proofs.Decide(f.ctx, adminID, proof.ID, Approve, ""); err != nil {
+		t.Fatalf("approve own listing: %v", err)
+	}
+	if err := f.proofs.Revoke(f.ctx, adminID, proof.ID, "Moved out."); err != nil {
+		t.Fatalf("revoke own listing: %v", err)
 	}
 }
 

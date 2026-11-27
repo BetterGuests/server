@@ -18,6 +18,7 @@ const (
 	excerptRunes    = 500
 	errorRunes      = 280
 	enabledFlag     = "PROOF_SCAN_ENABLED"
+	autoApproveFlag = "PROOF_AUTO_APPROVE"
 )
 
 type Due struct {
@@ -44,11 +45,12 @@ type Result struct {
 	Excerpt        string
 	Error          string
 	ScannedAt      time.Time
+	DocumentDate   *time.Time
 }
 
 type Store interface {
 	DueForScan(ctx context.Context, limit int) ([]Due, error)
-	Record(ctx context.Context, result Result) error
+	Record(ctx context.Context, result Result) (approved bool, err error)
 	ForgetDeletedText(ctx context.Context) (int, error)
 }
 
@@ -65,6 +67,10 @@ type Service struct {
 
 func Enabled(lookup func(string) string) bool {
 	return strings.EqualFold(strings.TrimSpace(lookup(enabledFlag)), "true")
+}
+
+func AutoApproveEnabled(lookup func(string) string) bool {
+	return strings.EqualFold(strings.TrimSpace(lookup(autoApproveFlag)), "true")
 }
 
 func NewService(store Store, documents DocumentReader, extractor TextExtractor) *Service {
@@ -99,6 +105,9 @@ func (service *Service) Scan(ctx context.Context, due Due) (Result, error) {
 	}
 	result.FoundName, result.NameVerdict = FindName(text, due.ExpectedName())
 	result.AddressMatched = AddressMatches(text, due.Address)
+	if date, found := LatestDate(text, result.ScannedAt); found {
+		result.DocumentDate = &date
+	}
 	result.Excerpt = excerptOf(text)
 	return result, nil
 }
@@ -121,9 +130,13 @@ func (service *Service) RunOnce(ctx context.Context) (int, error) {
 			slog.Warn("document scan will retry", "proof_id", proof.ProofID, "error", err)
 			continue
 		}
-		if err := service.store.Record(ctx, result); err != nil {
+		approved, err := service.store.Record(ctx, result)
+		if err != nil {
 			slog.Error("document scan not recorded and will retry", "proof_id", proof.ProofID, "error", err)
 			continue
+		}
+		if approved {
+			slog.Info("property proof approved automatically", "proof_id", proof.ProofID)
 		}
 		scanned++
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -375,5 +376,49 @@ func TestRequestDeletionIsScopedHoldAwareAndPickedUpByTheJob(t *testing.T) {
 	}
 	if requestedAt(otherID) != nil {
 		t.Fatal("calling without a user context must never flag anyone")
+	}
+}
+
+func TestLatestOpenInquiryFindsOnlyRecentUnfinishedChecks(t *testing.T) {
+	databaseURL := os.Getenv("TEST_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set TEST_DATABASE_URL through go run ./cmd/dev test")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	store := NewPostgresVerificationStore(pool)
+	accountID, otherAccountID := dbtest.SignedUpAccount(t, ctx, pool), dbtest.SignedUpAccount(t, ctx, pool)
+	now := time.Now().UTC().Truncate(time.Second)
+	create := func(account uuid.UUID, createdAt time.Time) string {
+		inquiryID := "inq_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+		if err := store.Create(ctx, Verification{ID: uuid.New(), AccountID: account, PersonaInquiryID: inquiryID, Status: StatusCreated, CreatedAt: createdAt, UpdatedAt: createdAt}); err != nil {
+			t.Fatal(err)
+		}
+		return inquiryID
+	}
+	since := now.Add(-OpenInquiryReuse)
+
+	create(accountID, now.Add(-OpenInquiryReuse-time.Hour))
+	if _, found, err := store.LatestOpenInquiry(ctx, accountID, since); err != nil || found {
+		t.Fatalf("an old check must not be reused: found = %v err = %v", found, err)
+	}
+
+	older := create(accountID, now.Add(-2*time.Hour))
+	newer := create(accountID, now.Add(-time.Hour))
+	create(otherAccountID, now)
+	if got, found, err := store.LatestOpenInquiry(ctx, accountID, since); err != nil || !found || got != newer {
+		t.Fatalf("got %q found = %v err = %v, want %q", got, found, err, newer)
+	}
+
+	if err := store.ApplyStatus(ctx, accountID, newer, StatusFailed, now); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, err := store.LatestOpenInquiry(ctx, accountID, since); err != nil || got != older {
+		t.Fatalf("a finished check must not be reused: got %q err = %v", got, err)
 	}
 }
