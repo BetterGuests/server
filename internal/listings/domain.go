@@ -300,7 +300,27 @@ const (
 	cardPhotoSuffix    = ".card.jpg"
 )
 
-var exifMarker = []byte("Exif\x00\x00")
+const (
+	jpegSegmentExif    = 0xe1
+	jpegSegmentProfile = 0xe2
+	jpegStartOfScan    = 0xda
+	jpegStartBytes     = 2
+	exifOrientationTag = 0x0112
+	exifShortType      = 3
+	exifUpright        = 1
+	tiffHeaderBytes    = 8
+	tiffEntryBytes     = 12
+)
+
+var (
+	exifHeader    = []byte("Exif\x00\x00")
+	profileHeader = []byte("ICC_PROFILE\x00")
+)
+
+type jpegMetadata struct {
+	colourProfile []byte
+	upright       bool
+}
 
 type PublicListingReader interface {
 	ListPublished(ctx context.Context) ([]PublicListing, error)

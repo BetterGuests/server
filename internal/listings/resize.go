@@ -3,13 +3,19 @@ package listings
 import (
 	"bytes"
 	"image"
+	"image/color"
 	"image/draw"
 	"image/jpeg"
+	"slices"
 )
 
 func cardVersionOf(data []byte) []byte {
 	config, format, err := image.DecodeConfig(bytes.NewReader(data))
-	if err != nil || format != "jpeg" || bytes.Contains(data, exifMarker) {
+	if err != nil || format != "jpeg" || (config.ColorModel != color.YCbCrModel && config.ColorModel != color.RGBAModel) {
+		return nil
+	}
+	metadata, readable := jpegMetadataOf(data)
+	if !readable || !metadata.upright {
 		return nil
 	}
 	if max(config.Width, config.Height) <= cardPhotoEdge || config.Width*config.Height > maxResizedPixels {
@@ -25,10 +31,14 @@ func cardVersionOf(data []byte) []byte {
 	scaled := func(edge int) int { return max(1, (edge*cardPhotoEdge+longEdge/2)/longEdge) }
 	small := shrink(source, scaled(config.Width), scaled(config.Height))
 	var encoded bytes.Buffer
-	if err := jpeg.Encode(&encoded, small, &jpeg.Options{Quality: cardPhotoQuality}); err != nil || encoded.Len() >= len(data) {
+	if err := jpeg.Encode(&encoded, small, &jpeg.Options{Quality: cardPhotoQuality}); err != nil {
 		return nil
 	}
-	return encoded.Bytes()
+	card := slices.Concat(encoded.Bytes()[:jpegStartBytes], metadata.colourProfile, encoded.Bytes()[jpegStartBytes:])
+	if len(card) >= len(data) {
+		return nil
+	}
+	return card
 }
 
 func shrink(source *image.RGBA, width, height int) *image.RGBA {
