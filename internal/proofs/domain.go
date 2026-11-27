@@ -68,6 +68,10 @@ type ReviewItem struct {
 	IDLastName   string `json:"id_last_name,omitempty"`
 	IDNameSuffix string `json:"id_name_suffix,omitempty"`
 	DocumentURL  string `json:"document_url,omitempty"`
+	HostName     string `json:"host_name,omitempty"`
+	CoverKey     string `json:"-"`
+	CoverURL     string `json:"cover_photo_url,omitempty"`
+	OwnListing   bool   `json:"own_listing"`
 }
 
 type UploadTicket struct {

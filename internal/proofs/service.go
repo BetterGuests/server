@@ -206,7 +206,7 @@ func (service *ProofService) ListSubmitted(ctx context.Context, adminID uuid.UUI
 		return nil, err
 	}
 	items, err := service.store.ListSubmitted(ctx, adminID)
-	return service.withDocumentLinks(ctx, items, err)
+	return service.withDocumentLinks(ctx, markOwnListings(items, adminID), err)
 }
 
 func (service *ProofService) ListApproved(ctx context.Context, adminID uuid.UUID) ([]ReviewItem, error) {
@@ -214,7 +214,7 @@ func (service *ProofService) ListApproved(ctx context.Context, adminID uuid.UUID
 		return nil, err
 	}
 	items, err := service.store.ListApproved(ctx, adminID)
-	return service.withDocumentLinks(ctx, items, err)
+	return service.withDocumentLinks(ctx, markOwnListings(items, adminID), err)
 }
 
 func (service *ProofService) Revoke(ctx context.Context, adminID, proofID uuid.UUID, reason string) error {
@@ -240,12 +240,20 @@ func requiredReason(reason string) (string, error) {
 	return reason, nil
 }
 
+func markOwnListings(items []ReviewItem, adminID uuid.UUID) []ReviewItem {
+	for index := range items {
+		items[index].OwnListing = items[index].HostID == adminID
+	}
+	return items
+}
+
 func (service *ProofService) withDocumentLinks(ctx context.Context, items []ReviewItem, err error) ([]ReviewItem, error) {
 	if err != nil {
 		return nil, err
 	}
 	for index := range items {
 		items[index].DocumentURL = service.signedDownload(ctx, items[index].ObjectKey)
+		items[index].CoverURL = service.signedDownload(ctx, items[index].CoverKey)
 		for position := range items[index].Attachments {
 			attachment := &items[index].Attachments[position]
 			attachment.URL = service.signedDownload(ctx, attachment.ObjectKey)

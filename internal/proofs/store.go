@@ -149,7 +149,10 @@ func (s *PostgresProofStore) listForReview(ctx context.Context, adminID uuid.UUI
 			SELECT `+proofColumns+`,
 				l.title, coalesce(l.address_line1, ''), coalesce(l.address_line2, ''), l.city,
 				coalesce(l.region, ''), coalesce(l.postal_code, ''), l.country_code,
-				coalesce(n.first_name, ''), coalesce(n.middle_name, ''), coalesce(n.last_name, ''), coalesce(n.suffix, '')
+				coalesce(n.first_name, ''), coalesce(n.middle_name, ''), coalesce(n.last_name, ''), coalesce(n.suffix, ''),
+				coalesce(l.host_name, ''),
+				coalesce((SELECT ph.object_key FROM app.listing_photos ph
+				          WHERE ph.listing_id = l.id AND ph.screening = 'passed' ORDER BY ph.position LIMIT 1), '')
 			FROM app.property_proofs p
 			JOIN app.listings l ON l.id = p.listing_id
 			LEFT JOIN LATERAL (
@@ -171,7 +174,8 @@ func (s *PostgresProofStore) listForReview(ctx context.Context, adminID uuid.UUI
 			proof, err := scanProof(rows,
 				&item.ListingTitle, &item.AddressLine1, &item.AddressLine2, &item.City,
 				&item.Region, &item.PostalCode, &item.CountryCode,
-				&item.IDFirstName, &item.IDMiddleName, &item.IDLastName, &item.IDNameSuffix)
+				&item.IDFirstName, &item.IDMiddleName, &item.IDLastName, &item.IDNameSuffix,
+				&item.HostName, &item.CoverKey)
 			if err != nil {
 				return fmt.Errorf("scan proof for review: %w", err)
 			}

@@ -223,3 +223,37 @@ func TestListSubmittedRequiresAdminAndSignsShortLivedLinks(t *testing.T) {
 		t.Fatalf("download link was not signed: %q", listed[0].DocumentURL)
 	}
 }
+
+func TestReviewItemsCarryASignedCoverPhotoOnlyWhenTheListingHasOne(t *testing.T) {
+	items := []ReviewItem{
+		{Proof: Proof{ObjectKey: "property-proofs/a/b.pdf"}, CoverKey: "listings/a/cover.webp"},
+		{Proof: Proof{ObjectKey: "property-proofs/c/d.pdf"}},
+	}
+
+	listed, err := NewProofService(&storeStub{admin: true, items: items}, &objectsStub{}).ListApproved(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(listed[0].CoverURL, "download/listings/a/cover.webp") {
+		t.Fatalf("cover photo was not signed: %q", listed[0].CoverURL)
+	}
+	if listed[1].CoverURL != "" {
+		t.Fatalf("expected no cover link, got %q", listed[1].CoverURL)
+	}
+}
+
+func TestReviewItemsFlagListingsTheReviewingAdminHosts(t *testing.T) {
+	adminID := uuid.New()
+	items := []ReviewItem{
+		{Proof: Proof{HostID: adminID, ObjectKey: "property-proofs/a/b.pdf"}},
+		{Proof: Proof{HostID: uuid.New(), ObjectKey: "property-proofs/c/d.pdf"}},
+	}
+
+	listed, err := NewProofService(&storeStub{admin: true, items: items}, &objectsStub{}).ListSubmitted(context.Background(), adminID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !listed[0].OwnListing || listed[1].OwnListing {
+		t.Fatalf("own listing flags were %v and %v", listed[0].OwnListing, listed[1].OwnListing)
+	}
+}
