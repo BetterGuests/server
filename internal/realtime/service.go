@@ -133,6 +133,14 @@ func (service *RealtimeService) OpenConnections(userID uuid.UUID) int {
 	return len(service.connections[userID])
 }
 
+func (service *RealtimeService) Disconnect(userID uuid.UUID) {
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	for connection := range service.connections[userID] {
+		service.drop(connection)
+	}
+}
+
 func (service *RealtimeService) drop(connection *Connection) {
 	open, subscribed := service.connections[connection.userID]
 	if !subscribed {

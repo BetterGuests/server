@@ -9,27 +9,21 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/accounts"
 )
 
-// Authenticator is HTTP middleware that authenticates bearer tokens.
+const bannedCode = "account_banned"
+
 type Authenticator struct {
 	service *AuthService
 }
 
-// NewAuthenticator returns middleware backed by service.
 func NewAuthenticator(service *AuthService) *Authenticator {
 	return &Authenticator{service: service}
 }
 
-// Middleware verifies the Authorization bearer token, ensures the account row
-// exists, and stores the internal account ID on the request context.
 func (auth *Authenticator) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		accountID, err := auth.service.Authenticate(r.Context(), r.Header.Get("Authorization"))
 		switch {
 		case errors.Is(err, ErrUnauthenticated):
-			// Warn, not Debug: a rejected authentication attempt is exactly
-			// the signal an alert on repeated failures from one client would
-			// watch for, and Debug-level logs are commonly dropped in
-			// production.
 			slog.Warn("Authentication rejected",
 				"error", err,
 				"method", r.Method,
@@ -37,6 +31,9 @@ func (auth *Authenticator) Middleware(next http.Handler) http.Handler {
 				"remote_addr", r.RemoteAddr,
 			)
 			writeError(w, http.StatusUnauthorized, "authentication required")
+			return
+		case errors.Is(err, ErrBanned):
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": ErrBanned.Error(), "code": bannedCode})
 			return
 		case err != nil:
 			slog.Error("Authenticate request", "error", err)
@@ -49,7 +46,11 @@ func (auth *Authenticator) Middleware(next http.Handler) http.Handler {
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {
+	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func writeJSON(w http.ResponseWriter, status int, body map[string]string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
+	_ = json.NewEncoder(w).Encode(body)
 }

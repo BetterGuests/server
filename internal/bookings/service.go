@@ -21,6 +21,7 @@ var (
 	ErrPaymentNotAuthorized = errors.New("the guest has not put a card on hold for this booking")
 	ErrCaptureFailed        = errors.New("the payment could not be completed")
 	ErrStayAlreadyStarted   = errors.New("the check-in date has passed, so this booking can no longer be approved")
+	ErrGuestBanned          = errors.New("this guest is suspended, so the booking cannot be approved")
 	ErrReleaseFailed        = errors.New("we could not release the card, so the booking was not cancelled")
 	ErrListingPaused        = errors.New("this listing is not taking bookings right now")
 	ErrTripOverlaps         = errors.New("you already have a trip on these dates")
@@ -41,6 +42,7 @@ type BookingService struct {
 	verified  VerificationChecker
 	publisher Publisher
 	payments  PaymentHold
+	bans      BanChecker
 	now       func() time.Time
 	newID     func() uuid.UUID
 }
@@ -51,6 +53,11 @@ func NewBookingService(store BookingStore) *BookingService {
 
 func (service *BookingService) WithVerification(checker VerificationChecker) *BookingService {
 	service.verified = checker
+	return service
+}
+
+func (service *BookingService) WithBans(bans BanChecker) *BookingService {
+	service.bans = bans
 	return service
 }
 
@@ -203,6 +210,9 @@ func (service *BookingService) Approve(ctx context.Context, hostID, bookingID uu
 	if err := service.requireHostID(ctx, hostID); err != nil {
 		return Detail{}, err
 	}
+	if err := service.refuseBannedGuest(ctx, detail.GuestID); err != nil {
+		return Detail{}, err
+	}
 	switch detail.Status {
 	case StatusRequested:
 		if err := service.details.Decide(ctx, hostID, bookingID, StatusPending, service.now().UTC()); err != nil {
@@ -219,6 +229,20 @@ func (service *BookingService) Approve(ctx context.Context, hostID, bookingID uu
 		}
 	}
 	return service.finish(ctx, hostID, bookingID, detail.GuestID)
+}
+
+func (service *BookingService) refuseBannedGuest(ctx context.Context, guestID uuid.UUID) error {
+	if service.bans == nil {
+		return nil
+	}
+	banned, err := service.bans.IsBanned(ctx, guestID)
+	if err != nil {
+		return fmt.Errorf("check guest ban: %w", err)
+	}
+	if banned {
+		return ErrGuestBanned
+	}
+	return nil
 }
 
 func (service *BookingService) Decline(ctx context.Context, hostID, bookingID uuid.UUID) (Detail, error) {

@@ -23,10 +23,23 @@ const summaryColumns = `c.id, c.listing_id, COALESCE(l.title, ''), c.guest_id, c
 	NOT EXISTS (SELECT 1 FROM app.bookings b WHERE ` + stayStillOpen + `),
 	` + pinnedAtFor + ` IS NOT NULL,
 	EXISTS (SELECT 1 FROM app.bookings b WHERE b.listing_id = c.listing_id AND b.guest_id = c.guest_id)
-	  AND NOT EXISTS (SELECT 1 FROM app.bookings b WHERE ` + stayStillOpen + `)`
+	  AND NOT EXISTS (SELECT 1 FROM app.bookings b WHERE ` + stayStillOpen + `),
+	stay.id, to_char(stay.starts_on, 'YYYY-MM-DD'), to_char(stay.ends_on, 'YYYY-MM-DD'), stay.status`
 
-const stayStillOpen = `b.listing_id = c.listing_id AND b.guest_id = c.guest_id
-	AND (b.status IN ('requested', 'pending') OR (b.status = 'confirmed' AND b.ends_on >= current_date))`
+const stayStillOpen = `b.listing_id = c.listing_id AND b.guest_id = c.guest_id AND ` + bookingStillOpen
+
+const bookingStillOpen = `(b.status IN ('requested', 'pending') OR (b.status = 'confirmed' AND b.ends_on >= current_date))`
+
+const stayJoin = `LEFT JOIN LATERAL (
+		SELECT b.id, b.starts_on, b.ends_on, b.status::text AS status
+		FROM app.bookings b
+		WHERE b.listing_id = c.listing_id AND b.guest_id = c.guest_id
+		ORDER BY ` + bookingStillOpen + ` DESC,
+		         CASE WHEN ` + bookingStillOpen + ` THEN b.starts_on END ASC,
+		         b.status IN ('confirmed', 'completed') DESC,
+		         b.starts_on DESC, b.id
+		LIMIT 1
+	) stay ON true`
 
 const hiddenAtFor = `CASE WHEN c.host_id = $1 THEN c.host_hidden_at ELSE c.guest_hidden_at END`
 
@@ -35,7 +48,8 @@ const pinnedAtFor = `CASE WHEN c.host_id = $1 THEN c.host_pinned_at ELSE c.guest
 const summaryFrom = `FROM app.conversations c
 	LEFT JOIN app.listings l ON l.id = c.listing_id
 	LEFT JOIN app.account_names gn ON gn.account_id = c.guest_id
-	LEFT JOIN app.account_names hn ON hn.account_id = c.host_id`
+	LEFT JOIN app.account_names hn ON hn.account_id = c.host_id
+	` + stayJoin
 
 const messageColumns = `m.id, m.conversation_id, COALESCE(m.sender_id, '00000000-0000-0000-0000-000000000000'::uuid),
 	CASE WHEN m.sender_id IS NULL THEN 'system' WHEN m.sender_id = c.host_id THEN 'host' ELSE 'guest' END,
@@ -539,12 +553,20 @@ func requireParticipant(ctx context.Context, tx pgx.Tx, actorID, conversationID 
 }
 
 func scanSummary(row pgx.Row) (Summary, error) {
-	var summary Summary
+	var (
+		summary                  Summary
+		bookingID                *uuid.UUID
+		startsOn, endsOn, status *string
+	)
 	err := row.Scan(
 		&summary.ID, &summary.ListingID, &summary.ListingTitle, &summary.GuestID, &summary.HostID,
 		&summary.Role, &summary.CounterpartyName, &summary.CounterpartyAvatarURL,
 		&summary.LastMessageAt, &summary.LastMessagePreview, &summary.UnreadCount, &summary.CanDelete,
 		&summary.Pinned, &summary.StayEnded,
+		&bookingID, &startsOn, &endsOn, &status,
 	)
+	if bookingID != nil {
+		summary.Stay = &Stay{BookingID: *bookingID, StartsOn: *startsOn, EndsOn: *endsOn, Status: *status}
+	}
 	return summary, err
 }

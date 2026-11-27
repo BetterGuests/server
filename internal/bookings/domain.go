@@ -89,6 +89,10 @@ type Publisher interface {
 	Publish(userID uuid.UUID, kind string, payload any)
 }
 
+type BanChecker interface {
+	IsBanned(ctx context.Context, accountID uuid.UUID) (bool, error)
+}
+
 type PaymentHold interface {
 	Capture(ctx context.Context, actorID, bookingID uuid.UUID) error
 	Release(ctx context.Context, actorID, bookingID uuid.UUID) error

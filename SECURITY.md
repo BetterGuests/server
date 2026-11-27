@@ -222,7 +222,7 @@ equally deep. A few are worth reading before you trust them blindly:
 - A cancellation or decision is recorded first, then refunded. Failed refunds
   stay `pending`, are retried by the job, and hold the host payout.
 - Only an admin who is neither the guest nor the host can decide a problem
-  report; a database trigger enforces it.
+  report; row-level security enforces it.
 - Paused listings live in `app.listing_suspensions`. Rows are never removed; an
   admin lifts a pause from `/admin/listings`, and a database trigger stops
   anyone else doing it.
@@ -250,6 +250,24 @@ equally deep. A few are worth reading before you trust them blindly:
 - Names and the listing title are copied into the report so it stays readable if
   they later change. Message contents are not copied, and admins gain no access
   to conversations.
+
+## Banned accounts
+
+- A banned account is refused by `auth.AuthService`, so every signed-in request
+  and realtime connection fails with `account_banned`. Open connections are
+  closed on the replica that handled the ban. If the ban cannot be checked, the
+  request fails.
+- Only an admin bans or lifts, through `app.account_bans`. Admins cannot be
+  banned. Rows are never removed.
+- Banning pauses the account's published listings. A database trigger refuses new
+  bookings and approvals that involve a banned account, and stops anyone
+  reopening a listing paused by the ban.
+- A ban moves no money. An admin cancels upcoming bookings one at a time, each
+  with a full refund, and only before check-in.
+- A banned host's share of a settlement waits as `awaiting_host`; the guest is
+  still refunded their cash back. Money already transferred to the host's Stripe
+  account is not affected.
+- A banned account's listings and reviews stay visible.
 
 ## Identity standing
 

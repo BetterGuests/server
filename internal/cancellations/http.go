@@ -15,6 +15,7 @@ type HTTPHandler struct {
 	canceller Canceller
 	desk      ReportDesk
 	listings  ListingDesk
+	team      TeamCanceller
 }
 
 func NewHTTPHandler(canceller Canceller, desk ReportDesk) *HTTPHandler {
@@ -23,6 +24,11 @@ func NewHTTPHandler(canceller Canceller, desk ReportDesk) *HTTPHandler {
 
 func (handler *HTTPHandler) WithListingDesk(listings ListingDesk) *HTTPHandler {
 	handler.listings = listings
+	return handler
+}
+
+func (handler *HTTPHandler) WithTeamCanceller(team TeamCanceller) *HTTPHandler {
+	handler.team = team
 	return handler
 }
 
@@ -120,13 +126,31 @@ func (handler *HTTPHandler) Report(w http.ResponseWriter, r *http.Request) {
 	respond(w, options, err)
 }
 
-func (handler *HTTPHandler) OpenReports(w http.ResponseWriter, r *http.Request) {
+func (handler *HTTPHandler) Reports(w http.ResponseWriter, r *http.Request) {
 	adminID, ok := authenticated(w, r)
 	if !ok {
 		return
 	}
-	reports, err := handler.desk.OpenReports(r.Context(), adminID)
-	respond(w, map[string][]Report{"reports": reports}, err)
+	status := ReportStatus(r.URL.Query().Get("status"))
+	switch status {
+	case "":
+		status = ReportOpen
+	case ReportOpen, ReportResolved:
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "status must be open or resolved"})
+		return
+	}
+	reports, err := handler.desk.Reports(r.Context(), adminID, status)
+	respond(w, map[string][]TeamReport{"reports": reports}, err)
+}
+
+func (handler *HTTPHandler) TeamCancel(w http.ResponseWriter, r *http.Request) {
+	adminID, bookingID, ok := identify(w, r)
+	if !ok {
+		return
+	}
+	err := handler.team.TeamCancel(r.Context(), adminID, bookingID)
+	respond(w, BookingEvent{BookingID: bookingID, Status: statusCancelled}, err)
 }
 
 func (handler *HTTPHandler) Resolve(w http.ResponseWriter, r *http.Request) {
@@ -190,8 +214,11 @@ func respond(w http.ResponseWriter, body any, err error) {
 		status, message = http.StatusBadRequest, err.Error()
 	case errors.Is(err, ErrNotCancellable), errors.Is(err, ErrRefundChanged), errors.Is(err, ErrReportClosed),
 		errors.Is(err, ErrAlreadyReported), errors.Is(err, ErrAlreadyDecided),
-		errors.Is(err, ErrAlreadyPaused), errors.Is(err, ErrNotPaused):
+		errors.Is(err, ErrAlreadyPaused), errors.Is(err, ErrNotPaused),
+		errors.Is(err, ErrStayUnderway), errors.Is(err, ErrHostBanned):
 		status, message = http.StatusConflict, err.Error()
+	case errors.Is(err, ErrPartyToReport):
+		status, message = http.StatusForbidden, err.Error()
 	default:
 		slog.Error("Cancellation request", "error", err)
 	}

@@ -366,6 +366,17 @@ func (p *planner) cancelled() {
 			fmt.Sprintf("The stay at %s, %s, is off. You are being refunded %s.", p.journey.ListingTitle, p.dates(), dollars(p.journey.CancelRefundCents)))
 		p.note(KindBookingCancelled, "The host cancelled this booking.")
 		return
+	case cancelledByTeam:
+		money := "You were not charged."
+		if p.journey.CancelRefundCents > 0 {
+			money = fmt.Sprintf("You are being refunded %s.", dollars(p.journey.CancelRefundCents))
+		}
+		p.alert(KindBookingCancelled, p.journey.GuestID, "Booking cancelled",
+			fmt.Sprintf("Better Guests cancelled the stay at %s, %s. %s", p.journey.ListingTitle, p.dates(), money))
+		p.alert(KindBookingCancelled, p.journey.HostID, "Booking cancelled",
+			fmt.Sprintf("Better Guests cancelled the stay at %s, %s.", p.journey.ListingTitle, p.dates()))
+		p.note(KindBookingCancelled, "Better Guests cancelled this booking.")
+		return
 	case cancelledByGuest:
 		p.alert(KindBookingCancelled, p.journey.GuestID, "Booking cancelled",
 			fmt.Sprintf("You cancelled %s, %s. Your refund is %s.", p.journey.ListingTitle, p.dates(), dollars(p.journey.CancelRefundCents)))

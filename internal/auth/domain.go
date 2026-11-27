@@ -25,8 +25,10 @@ type TokenVerifier interface {
 	VerifyIDToken(ctx context.Context, rawIDToken string) (ClerkIdentity, error)
 }
 
-// AccountProvisioner makes sure an internal account exists for a verified
-// identity before a handler uses it.
 type AccountProvisioner interface {
 	EnsureAccount(ctx context.Context, clerkUserID string) (uuid.UUID, error)
+}
+
+type BanChecker interface {
+	IsBanned(ctx context.Context, accountID uuid.UUID) (bool, error)
 }

@@ -94,7 +94,15 @@ type Summary struct {
 	CanDelete             bool       `json:"can_delete"`
 	Pinned                bool       `json:"pinned"`
 	StayEnded             bool       `json:"stay_ended"`
+	Stay                  *Stay      `json:"stay,omitempty"`
 	Participants          `json:"-"`
+}
+
+type Stay struct {
+	BookingID uuid.UUID `json:"booking_id"`
+	StartsOn  string    `json:"starts_on"`
+	EndsOn    string    `json:"ends_on"`
+	Status    string    `json:"status"`
 }
 
 type OpenTarget struct {

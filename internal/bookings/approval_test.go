@@ -395,3 +395,22 @@ func TestSomeoneElseCannotCancelOrReleaseABooking(t *testing.T) {
 		t.Fatal("the host released the guest's card through cancel")
 	}
 }
+
+type suspendedGuests map[uuid.UUID]bool
+
+func (banned suspendedGuests) IsBanned(_ context.Context, accountID uuid.UUID) (bool, error) {
+	return banned[accountID], nil
+}
+
+func TestARequestFromABannedGuestCannotBeApprovedEvenOnARetry(t *testing.T) {
+	for _, status := range []Status{StatusRequested, StatusPending} {
+		service, details, publisher, detail := approvalFixture()
+		details.detail.Status = status
+		service.WithBans(suspendedGuests{detail.GuestID: true})
+
+		_, err := service.Approve(context.Background(), detail.HostID, detail.ID)
+		if !errors.Is(err, ErrGuestBanned) || details.decidedTo != "" || len(publisher.events) != 0 {
+			t.Fatalf("%s: err=%v decided=%q events=%d", status, err, details.decidedTo, len(publisher.events))
+		}
+	}
+}

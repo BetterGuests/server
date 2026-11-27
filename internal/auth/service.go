@@ -9,26 +9,26 @@ import (
 	"github.com/google/uuid"
 )
 
-// ErrUnauthenticated is returned when a request has no valid bearer token.
-var ErrUnauthenticated = errors.New("authentication required")
+var (
+	ErrUnauthenticated = errors.New("authentication required")
+	ErrBanned          = errors.New("your account is suspended")
+)
 
-// AuthService authenticates bearer tokens and resolves them to internal
-// accounts.
 type AuthService struct {
 	verifier    TokenVerifier
 	provisioner AccountProvisioner
+	bans        BanChecker
 }
 
-// NewAuthService returns an authentication service backed by verifier and
-// provisioner.
 func NewAuthService(verifier TokenVerifier, provisioner AccountProvisioner) *AuthService {
 	return &AuthService{verifier: verifier, provisioner: provisioner}
 }
 
-// Authenticate verifies the Authorization header value and returns the internal
-// account it belongs to. Invalid or missing tokens return ErrUnauthenticated;
-// provisioning failures return the underlying error so callers can distinguish a
-// client problem from a server problem.
+func (service *AuthService) WithBans(bans BanChecker) *AuthService {
+	service.bans = bans
+	return service
+}
+
 func (service *AuthService) Authenticate(ctx context.Context, authorization string) (uuid.UUID, error) {
 	rawToken, err := bearerToken(authorization)
 	if err != nil {
@@ -47,7 +47,24 @@ func (service *AuthService) Authenticate(ctx context.Context, authorization stri
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("provision account: %w", err)
 	}
+	if err := service.refuseBanned(ctx, accountID); err != nil {
+		return uuid.Nil, err
+	}
 	return accountID, nil
+}
+
+func (service *AuthService) refuseBanned(ctx context.Context, accountID uuid.UUID) error {
+	if service.bans == nil {
+		return nil
+	}
+	banned, err := service.bans.IsBanned(ctx, accountID)
+	if err != nil {
+		return fmt.Errorf("check ban: %w", err)
+	}
+	if banned {
+		return ErrBanned
+	}
+	return nil
 }
 
 func bearerToken(authorization string) (string, error) {

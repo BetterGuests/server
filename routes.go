@@ -6,6 +6,7 @@ import (
 
 	"github.com/BetterGuests/BetterGuests-Server/internal/automessages"
 	"github.com/BetterGuests/BetterGuests-Server/internal/availability"
+	"github.com/BetterGuests/BetterGuests-Server/internal/bans"
 	"github.com/BetterGuests/BetterGuests-Server/internal/bookings"
 	"github.com/BetterGuests/BetterGuests-Server/internal/cancellations"
 	"github.com/BetterGuests/BetterGuests-Server/internal/cashback"
@@ -57,6 +58,7 @@ type routeDeps struct {
 	userMap       *usermap.HTTPHandler
 	teamEvents    *teamevents.HTTPHandler
 	reports       *reports.HTTPHandler
+	bans          *bans.HTTPHandler
 }
 
 type backgroundJob interface {
@@ -198,7 +200,11 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.HandleFunc("GET /api/v1/bookings/{booking_id}/cancellation", deps.cancellations.Options)
 	api.HandleFunc("POST /api/v1/bookings/{booking_id}/cancellation", deps.cancellations.Cancel)
 	api.Handle("POST /api/v1/bookings/{booking_id}/report", perAccountFunc(stayReportBudget, deps.cancellations.Report))
-	api.HandleFunc("GET /api/v1/admin/stay-reports", deps.cancellations.OpenReports)
+	api.HandleFunc("GET /api/v1/admin/stay-reports", deps.cancellations.Reports)
+	api.HandleFunc("GET /api/v1/admin/bans", deps.bans.List)
+	api.HandleFunc("POST /api/v1/admin/bans", deps.bans.Ban)
+	api.HandleFunc("POST /api/v1/admin/bans/{ban_id}/lift", deps.bans.Lift)
+	api.HandleFunc("POST /api/v1/admin/bookings/{booking_id}/cancellation", deps.cancellations.TeamCancel)
 	api.HandleFunc("GET /api/v1/admin/listings", deps.cancellations.AdminListings)
 	api.HandleFunc("GET /api/v1/admin/listings/popular", deps.cancellations.PopularListings)
 	api.HandleFunc("POST /api/v1/admin/listings/{listing_id}/pause", deps.cancellations.PauseListing)

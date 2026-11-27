@@ -20,6 +20,8 @@ type conversationFixture struct {
 	store        *PostgresMessageStore
 	host         uuid.UUID
 	guest        uuid.UUID
+	listing      uuid.UUID
+	pool         *pgxpool.Pool
 	conversation uuid.UUID
 }
 
@@ -77,7 +79,45 @@ func newConversationFixture(t *testing.T) conversationFixture {
 		t.Fatal(err)
 	}
 
-	return conversationFixture{ctx: ctx, store: store, host: host, guest: guest, conversation: conversation}
+	return conversationFixture{
+		ctx: ctx, store: store, host: host, guest: guest,
+		listing: listing.ID, pool: pool, conversation: conversation,
+	}
+}
+
+func (fixture conversationFixture) requestStay(t *testing.T, startsInDays int) uuid.UUID {
+	t.Helper()
+	bookingID := uuid.New()
+	err := db.WithUserTx(fixture.ctx, fixture.pool, fixture.guest.String(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(fixture.ctx,
+			`INSERT INTO app.bookings (id, listing_id, guest_id, status, starts_on, ends_on)
+			 VALUES ($1, $2, $3, 'requested', CURRENT_DATE + $4::integer, CURRENT_DATE + $4::integer + 2)`,
+			bookingID, fixture.listing, fixture.guest, startsInDays)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bookingID
+}
+
+func TestBothSidesSeeTheSoonestOpenStayOnTheConversation(t *testing.T) {
+	fixture := newConversationFixture(t)
+	fixture.requestStay(t, 40)
+	soonest := fixture.requestStay(t, 10)
+	for _, person := range []uuid.UUID{fixture.guest, fixture.host} {
+		summaries, err := fixture.store.List(fixture.ctx, person)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(summaries) != 1 || summaries[0].Stay == nil {
+			t.Fatalf("summaries = %+v, want one conversation with a stay", summaries)
+		}
+		stay := *summaries[0].Stay
+		if stay.BookingID != soonest || stay.Status != "requested" || stay.StartsOn >= stay.EndsOn {
+			t.Fatalf("stay = %+v, want the soonest requested booking %s", stay, soonest)
+		}
+	}
 }
 
 func TestEachSideOfAConversationSeesTheOtherPersonsPhoto(t *testing.T) {
@@ -305,5 +345,8 @@ func TestAConversationWithoutAnyBookingIsNotAnEndedStay(t *testing.T) {
 	}
 	if summary.StayEnded {
 		t.Fatal("an inquiry with no booking was marked as an ended stay")
+	}
+	if summary.Stay != nil {
+		t.Fatalf("an inquiry with no booking carries a stay: %+v", summary.Stay)
 	}
 }

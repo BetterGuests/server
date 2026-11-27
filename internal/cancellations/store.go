@@ -199,18 +199,35 @@ func (store *PostgresCancellationStore) IsAdmin(ctx context.Context, accountID u
 	return admin, nil
 }
 
-func (store *PostgresCancellationStore) OpenReports(ctx context.Context, adminID uuid.UUID, limit int) ([]Report, error) {
-	reports := []Report{}
+func (store *PostgresCancellationStore) TeamReports(ctx context.Context, adminID uuid.UUID, status ReportStatus, limit int) ([]TeamReport, error) {
+	reports := []TeamReport{}
 	err := db.WithUserTx(ctx, store.DB, adminID.String(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
-			`SELECT `+reportColumns+` FROM app.stay_reports WHERE status = 'open' ORDER BY created_at LIMIT $1`, limit)
+			`SELECT r.booking_id, r.guest_id, r.host_id, r.listing_title, r.details, r.amount_cents, r.payment_intent_id,
+			        r.status, r.refund_cents, r.refund_status, COALESCE(r.resolution_note, ''), r.created_at,
+			        COALESCE(NULLIF(guest.display_name, ''), 'Guest'),
+			        COALESCE(NULLIF(l.host_name, ''), NULLIF(host.display_name, ''), 'Host'),
+			        r.guest_id <> $2 AND r.host_id <> $2, r.resolved_at
+			 FROM app.stay_reports r
+			 LEFT JOIN app.bookings b ON b.id = r.booking_id
+			 LEFT JOIN app.listings l ON l.id = b.listing_id
+			 LEFT JOIN app.account_names guest ON guest.account_id = r.guest_id
+			 LEFT JOIN app.account_names host ON host.account_id = r.host_id
+			 WHERE r.status = $1
+			 ORDER BY CASE WHEN $1 = 'open' THEN r.created_at END ASC, r.resolved_at DESC, r.booking_id
+			 LIMIT $3`, string(status), adminID, limit)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
-			report, err := scanReport(rows)
-			if err != nil {
+			var report TeamReport
+			if err := rows.Scan(
+				&report.BookingID, &report.GuestID, &report.HostID, &report.ListingTitle, &report.Details,
+				&report.AmountCents, &report.PaymentIntentID, &report.Status, &report.RefundCents,
+				&report.RefundStatus, &report.Note, &report.CreatedAt,
+				&report.GuestName, &report.HostName, &report.CanDecide, &report.ResolvedAt,
+			); err != nil {
 				return err
 			}
 			reports = append(reports, report)
@@ -221,6 +238,43 @@ func (store *PostgresCancellationStore) OpenReports(ctx context.Context, adminID
 		return nil, fmt.Errorf("list reports: %w", err)
 	}
 	return reports, nil
+}
+
+func (store *PostgresCancellationStore) SuspendedBooking(ctx context.Context, adminID, bookingID uuid.UUID) (Booking, error) {
+	var booking Booking
+	err := db.WithUserTx(ctx, store.DB, adminID.String(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT b.id, b.listing_id, b.guest_id, l.host_id, b.status, b.starts_on,
+			        to_char(l.check_in_time, 'HH24:MI'), l.time_zone,
+			        COALESCE(p.amount_cents, 0), COALESCE(p.status, ''), COALESCE(p.stripe_payment_intent_id, '')
+			 FROM app.bookings b
+			 JOIN app.listings l ON l.id = b.listing_id
+			 LEFT JOIN app.payments p ON p.booking_id = b.id
+			 WHERE b.id = $1 AND b.status IN ('requested', 'pending', 'confirmed')
+			   AND (app.is_banned(b.guest_id) OR app.is_banned(l.host_id))`,
+			bookingID,
+		).Scan(
+			&booking.BookingID, &booking.ListingID, &booking.GuestID, &booking.HostID, &booking.Status,
+			&booking.StartsOn, &booking.CheckInTime, &booking.TimeZone,
+			&booking.AmountCents, &booking.PaymentStatus, &booking.PaymentIntentID,
+		)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Booking{}, ErrBookingNotFound
+	}
+	if err != nil {
+		return Booking{}, fmt.Errorf("load booking for the team: %w", err)
+	}
+	return booking, nil
+}
+
+func (store *PostgresCancellationStore) TeamCancel(ctx context.Context, adminID uuid.UUID, cancellation Cancellation, fromStatus string) error {
+	return db.WithUserTx(ctx, store.DB, adminID.String(), func(tx pgx.Tx) error {
+		if err := insertCancellation(ctx, tx, cancellation); err != nil {
+			return err
+		}
+		return markCancelled(ctx, tx, cancellation.BookingID, fromStatus)
+	})
 }
 
 func (store *PostgresCancellationStore) Resolve(ctx context.Context, adminID, bookingID uuid.UUID, decision Decision, at time.Time) (Report, error) {
@@ -235,6 +289,9 @@ func (store *PostgresCancellationStore) Resolve(ctx context.Context, adminID, bo
 		}
 		if err != nil {
 			return fmt.Errorf("select report: %w", err)
+		}
+		if current.GuestID == adminID || current.HostID == adminID {
+			return ErrPartyToReport
 		}
 		if current.Status != ReportOpen {
 			return ErrAlreadyDecided
@@ -296,7 +353,7 @@ func (store *PostgresCancellationStore) AdminListings(ctx context.Context, admin
 	listings := []AdminListing{}
 	err := db.WithUserTx(ctx, store.DB, adminID.String(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
-			`SELECT l.id, l.title, COALESCE(l.host_name, ''), COALESCE(l.city, ''), l.status,
+			`SELECT l.id, l.host_id, l.title, COALESCE(l.host_name, ''), COALESCE(l.city, ''), l.status,
 			        s.listing_id IS NOT NULL, COALESCE(s.reason, ''), s.created_at,
 			        (SELECT count(*)::integer FROM app.booking_cancellations c
 			         WHERE c.listing_id = l.id AND c.cancelled_by = 'host' AND c.created_at > $1),
@@ -314,7 +371,7 @@ func (store *PostgresCancellationStore) AdminListings(ctx context.Context, admin
 		for rows.Next() {
 			var listing AdminListing
 			if err := rows.Scan(
-				&listing.ListingID, &listing.Title, &listing.HostName, &listing.City, &listing.Status,
+				&listing.ListingID, &listing.HostID, &listing.Title, &listing.HostName, &listing.City, &listing.Status,
 				&listing.Paused, &listing.Reason, &listing.PausedAt, &listing.HostCancellations,
 				&listing.CoverPhotoKey,
 			); err != nil {
@@ -421,6 +478,10 @@ func (store *PostgresCancellationStore) UnpauseListing(ctx context.Context, admi
 			listingID, at, adminID).Scan(&hostID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotPaused
+		}
+		var pgError *pgconn.PgError
+		if errors.As(err, &pgError) && pgError.Code == restrictViolationCode {
+			return ErrHostBanned
 		}
 		if err != nil {
 			return fmt.Errorf("lift pause: %w", err)

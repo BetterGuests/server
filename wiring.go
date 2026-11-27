@@ -13,6 +13,7 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/auth"
 	"github.com/BetterGuests/BetterGuests-Server/internal/automessages"
 	"github.com/BetterGuests/BetterGuests-Server/internal/availability"
+	"github.com/BetterGuests/BetterGuests-Server/internal/bans"
 	"github.com/BetterGuests/BetterGuests-Server/internal/bookings"
 	"github.com/BetterGuests/BetterGuests-Server/internal/cancellations"
 	"github.com/BetterGuests/BetterGuests-Server/internal/cashback"
@@ -62,7 +63,8 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 	if err != nil {
 		return routeDeps{}, fmt.Errorf("clerk configuration: %w", err)
 	}
-	authService := auth.NewAuthService(clerkVerifier, newNamingProvisioner(accountService, nameFetcher, accountStore))
+	banStore := bans.NewPostgresBanStore(pool)
+	authService := auth.NewAuthService(clerkVerifier, newNamingProvisioner(accountService, nameFetcher, accountStore)).WithBans(banStore)
 	authenticator := auth.NewAuthenticator(authService)
 	realtimeService := realtime.NewRealtimeService()
 
@@ -157,7 +159,8 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		WithVerification(currentVerifier).
 		WithDetails(bookingStore).
 		WithPublisher(tripPublisher).
-		WithPayments(paymentService)
+		WithPayments(paymentService).
+		WithBans(banStore)
 
 	objectStore, err := cashback.NewObjectStoreFromEnv()
 	if err != nil {
@@ -225,20 +228,23 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		cashback: cashback.NewHTTPHandler(cashbackService, cashbackService, cashbackService, cashbackService, cashbackService),
 		verification: verification.NewHTTPHandler(verificationService, verificationService).WithStatusReader(verificationStore).WithReconciler(verificationService).WithDeletion(deletionService).
 			WithReviews(verification.NewReviewService(verificationStore).WithInquiries(verificationStore, personaClient)),
-		payments:      payments.NewHTTPHandler(paymentService, paymentService).WithCards(paymentService),
-		payouts:       settlements.NewHTTPHandler(payoutService, payoutService),
-		compliance:    compliance.NewHTTPHandler(complianceService, complianceService, complianceService),
-		profiles:      profiles.NewHTTPHandler(profileService, profileService, profileService, profileService),
-		waitlist:      waitlist.NewHTTPHandler(waitlist.NewWaitlistService(waitlist.NewPostgresWaitlistStore(pool))),
-		availability:  availability.NewHTTPHandler(availability.NewAvailabilityService(availability.NewPostgresAvailabilityStore(pool))),
-		stays:         stays.NewHTTPHandler(stayService, stayService),
-		autoMessages:  automessages.NewHTTPHandler(autoMessageService),
-		inbox:         notifications.NewHTTPHandler(notifications.NewNotificationService(notificationStore)),
-		tripUpdates:   journeyService,
-		cancellations: cancellations.NewHTTPHandler(cancellationService, cancellationService).WithListingDesk(cancellationService),
-		userMap:       usermap.NewHTTPHandler(usermap.NewUserMapService(userDirectory, proofService)),
-		teamEvents:    teamevents.NewHTTPHandler(teamevents.NewTeamEventsService(teamevents.NewPostgresTeamEventsStore(pool), proofService)),
-		reports:       reports.NewHTTPHandler(reportService, reportService),
+		payments:     payments.NewHTTPHandler(paymentService, paymentService).WithCards(paymentService),
+		payouts:      settlements.NewHTTPHandler(payoutService, payoutService),
+		compliance:   compliance.NewHTTPHandler(complianceService, complianceService, complianceService),
+		profiles:     profiles.NewHTTPHandler(profileService, profileService, profileService, profileService),
+		waitlist:     waitlist.NewHTTPHandler(waitlist.NewWaitlistService(waitlist.NewPostgresWaitlistStore(pool))),
+		availability: availability.NewHTTPHandler(availability.NewAvailabilityService(availability.NewPostgresAvailabilityStore(pool))),
+		stays:        stays.NewHTTPHandler(stayService, stayService),
+		autoMessages: automessages.NewHTTPHandler(autoMessageService),
+		inbox:        notifications.NewHTTPHandler(notifications.NewNotificationService(notificationStore)),
+		tripUpdates:  journeyService,
+		cancellations: cancellations.NewHTTPHandler(cancellationService, cancellationService).
+			WithListingDesk(cancellationService).
+			WithTeamCanceller(cancellationService),
+		userMap:    usermap.NewHTTPHandler(usermap.NewUserMapService(userDirectory, proofService)),
+		teamEvents: teamevents.NewHTTPHandler(teamevents.NewTeamEventsService(teamevents.NewPostgresTeamEventsStore(pool), proofService)),
+		reports:    reports.NewHTTPHandler(reportService, reportService),
+		bans:       bans.NewHTTPHandler(bans.NewBanService(banStore, proofService, realtimeService)),
 	}, nil
 }
 

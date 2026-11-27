@@ -50,6 +50,7 @@ const (
 	paymentAuthorized = "authorized"
 	cancelledByGuest  = "guest"
 	cancelledByHost   = "host"
+	cancelledByTeam   = "team"
 	cancelledExpired  = "expired"
 	reportOpen        = "open"
 	reportResolved    = "resolved"

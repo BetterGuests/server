@@ -20,6 +20,7 @@ const (
 	ByGuest   CancelledBy = "guest"
 	ByHost    CancelledBy = "host"
 	ByExpired CancelledBy = "expired"
+	ByTeam    CancelledBy = "team"
 )
 
 type RefundSource string
@@ -70,6 +71,7 @@ const (
 	paymentSucceeded        = "succeeded"
 	suspensionReason        = "Three host cancellations in 12 months"
 	uniqueViolationCode     = "23505"
+	restrictViolationCode   = "23001"
 	maxRequestBodyBytes     = 32 << 10
 	refundMetadataSuffix    = "_booking_id"
 	refundIdempotencyPrefix = "booking-refund-"
@@ -122,6 +124,14 @@ type Report struct {
 	CreatedAt       time.Time    `json:"created_at"`
 }
 
+type TeamReport struct {
+	Report
+	GuestName  string     `json:"guest_name"`
+	HostName   string     `json:"host_name"`
+	CanDecide  bool       `json:"can_decide"`
+	ResolvedAt *time.Time `json:"resolved_at,omitempty"`
+}
+
 type Options struct {
 	BookingID      uuid.UUID     `json:"booking_id"`
 	Role           Role          `json:"role"`
@@ -143,6 +153,7 @@ type Decision struct {
 
 type AdminListing struct {
 	ListingID         uuid.UUID  `json:"listing_id"`
+	HostID            uuid.UUID  `json:"host_id"`
 	Title             string     `json:"title"`
 	HostName          string     `json:"host_name"`
 	City              string     `json:"city"`
@@ -203,7 +214,9 @@ type Store interface {
 	StrandedHolds(ctx context.Context, limit int) ([]StrandedHold, error)
 	CreateReport(ctx context.Context, report Report) error
 	IsAdmin(ctx context.Context, accountID uuid.UUID) (bool, error)
-	OpenReports(ctx context.Context, adminID uuid.UUID, limit int) ([]Report, error)
+	TeamReports(ctx context.Context, adminID uuid.UUID, status ReportStatus, limit int) ([]TeamReport, error)
+	SuspendedBooking(ctx context.Context, adminID, bookingID uuid.UUID) (Booking, error)
+	TeamCancel(ctx context.Context, adminID uuid.UUID, cancellation Cancellation, fromStatus string) error
 	Resolve(ctx context.Context, adminID, bookingID uuid.UUID, decision Decision, at time.Time) (Report, error)
 	PendingRefunds(ctx context.Context, limit int) ([]PendingRefund, error)
 	MarkRefunded(ctx context.Context, refund PendingRefund, refundID string) error
@@ -243,6 +256,10 @@ type ListingDesk interface {
 }
 
 type ReportDesk interface {
-	OpenReports(ctx context.Context, adminID uuid.UUID) ([]Report, error)
+	Reports(ctx context.Context, adminID uuid.UUID, status ReportStatus) ([]TeamReport, error)
 	Resolve(ctx context.Context, adminID, bookingID uuid.UUID, decision Decision) (Report, error)
+}
+
+type TeamCanceller interface {
+	TeamCancel(ctx context.Context, adminID, bookingID uuid.UUID) error
 }

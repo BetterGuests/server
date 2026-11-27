@@ -22,6 +22,9 @@ var (
 	ErrInvalidReport   = errors.New("invalid report")
 	ErrNotAdmin        = errors.New("not found")
 	ErrAlreadyDecided  = errors.New("this report was already decided")
+	ErrPartyToReport   = errors.New("you are the guest or host on this stay, so another admin has to decide it")
+	ErrStayUnderway    = errors.New("this stay has already started, so it cannot be cancelled here")
+	ErrHostBanned      = errors.New("this host is banned; lift the ban to reopen the listing")
 	ErrListingNotFound = errors.New("listing not found")
 	ErrAlreadyPaused   = errors.New("this listing is already paused")
 	ErrNotPaused       = errors.New("this listing is not paused")
@@ -133,11 +136,60 @@ func (service *CancellationService) Report(ctx context.Context, guestID, booking
 	return service.Options(ctx, guestID, bookingID)
 }
 
-func (service *CancellationService) OpenReports(ctx context.Context, adminID uuid.UUID) ([]Report, error) {
+func (service *CancellationService) Reports(ctx context.Context, adminID uuid.UUID, status ReportStatus) ([]TeamReport, error) {
 	if err := service.requireAdmin(ctx, adminID); err != nil {
 		return nil, err
 	}
-	return service.store.OpenReports(ctx, adminID, maxListedReports)
+	return service.store.TeamReports(ctx, adminID, status, maxListedReports)
+}
+
+func (service *CancellationService) TeamCancel(ctx context.Context, adminID, bookingID uuid.UUID) error {
+	if err := service.requireAdmin(ctx, adminID); err != nil {
+		return err
+	}
+	booking, err := service.store.SuspendedBooking(ctx, adminID, bookingID)
+	if err != nil {
+		return err
+	}
+	if booking.Status == statusConfirmed {
+		checkInAt, err := stays.Moment(booking.StartsOn, booking.CheckInTime, booking.TimeZone)
+		if err != nil {
+			return err
+		}
+		if !service.now().UTC().Before(checkInAt) {
+			return ErrStayUnderway
+		}
+	}
+	cancellation := Cancellation{
+		BookingID:    booking.BookingID,
+		GuestID:      booking.GuestID,
+		HostID:       booking.HostID,
+		ListingID:    booking.ListingID,
+		CancelledBy:  ByTeam,
+		RefundStatus: RefundNone,
+	}
+	if booking.PaymentStatus == paymentSucceeded && booking.AmountCents > 0 {
+		cancellation.AmountCents = booking.AmountCents
+		cancellation.RefundCents = booking.AmountCents
+		cancellation.PaymentIntentID = booking.PaymentIntentID
+		cancellation.RefundStatus = RefundPending
+	} else if err := service.holds.Release(ctx, booking.GuestID, bookingID); err != nil {
+		return fmt.Errorf("release hold: %w", err)
+	}
+	if err := service.store.TeamCancel(ctx, adminID, cancellation, booking.Status); err != nil {
+		return err
+	}
+	slog.Info("Booking cancelled by the team", "booking_id", bookingID, "admin_id", adminID)
+	if cancellation.RefundCents > 0 {
+		service.refund(ctx, PendingRefund{
+			BookingID: booking.BookingID, GuestID: booking.GuestID, Source: SourceCancellation,
+			PaymentIntentID: booking.PaymentIntentID, AmountCents: cancellation.RefundCents,
+		})
+	}
+	for _, account := range []uuid.UUID{booking.GuestID, booking.HostID} {
+		service.publisher.Publish(account, bookingEventKind, BookingEvent{BookingID: bookingID, Status: statusCancelled})
+	}
+	return nil
 }
 
 func (service *CancellationService) Resolve(ctx context.Context, adminID, bookingID uuid.UUID, decision Decision) (Report, error) {
