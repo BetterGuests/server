@@ -26,7 +26,8 @@ const detailColumns = `b.id, b.listing_id, b.guest_id, l.host_id, b.status, b.st
 	COALESCE(gn.display_name, ''), l.title, COALESCE(l.city, ''), COALESCE(l.region, ''),
 	COALESCE(l.host_name, ''), COALESCE(l.host_avatar_url, ''),
 	(b.ends_on - b.starts_on), COALESCE(l.nightly_price_cents, 0), l.currency, COALESCE(p.status, ''),
-	COALESCE(p.amount_cents, 0)`
+	COALESCE(p.amount_cents, 0),
+	EXISTS (SELECT 1 FROM app.listing_suspensions s WHERE s.listing_id = b.listing_id AND s.lifted_at IS NULL)`
 
 const detailFrom = `FROM app.bookings b
 	JOIN app.listings l ON l.id = b.listing_id
@@ -142,6 +143,10 @@ func (store *PostgresBookingStore) Decide(ctx context.Context, hostID, bookingID
 			 FROM app.listings l
 			 WHERE b.id = $1 AND l.id = b.listing_id AND l.host_id = $2 AND b.status = 'requested'`,
 			bookingID, hostID, string(next), decidedAt)
+		var pgError *pgconn.PgError
+		if errors.As(err, &pgError) && pgError.Code == restrictViolationCode {
+			return ErrListingPaused
+		}
 		if err != nil {
 			return fmt.Errorf("decide booking: %w", err)
 		}
@@ -195,6 +200,7 @@ func scanDetail(row pgx.Row) (Detail, error) {
 		&detail.GuestName, &detail.ListingTitle, &detail.ListingCity, &detail.ListingRegion,
 		&detail.HostName, &detail.HostAvatarURL,
 		&detail.Nights, &detail.NightlyPriceCents, &detail.Currency, &detail.PaymentStatus, &chargedCents,
+		&detail.ListingPaused,
 	)
 	if err != nil {
 		return Detail{}, err

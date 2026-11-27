@@ -204,6 +204,9 @@ func (service *BookingService) Approve(ctx context.Context, hostID, bookingID uu
 		}
 		return Detail{}, ErrPaymentNotAuthorized
 	}
+	if detail.ListingPaused {
+		return Detail{}, ErrListingPaused
+	}
 	if detail.StartsOn.Before(truncateToDate(service.now().UTC().Add(-westmostUSOffset))) {
 		return Detail{}, ErrStayAlreadyStarted
 	}

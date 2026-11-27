@@ -125,7 +125,8 @@ func resolveTarget(ctx context.Context, tx pgx.Tx, actorID uuid.UUID, target Ope
 		participants.GuestID = actorID
 		listingID = target.ListingID
 		err = tx.QueryRow(ctx,
-			`SELECT host_id FROM app.listings WHERE id = $1 AND status = 'published'`,
+			`SELECT host_id FROM app.listings
+			 WHERE id = $1 AND status = 'published' AND NOT app.listing_taken_down(id)`,
 			target.ListingID).Scan(&participants.HostID)
 	}
 	if errors.Is(err, pgx.ErrNoRows) {

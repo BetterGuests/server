@@ -60,6 +60,7 @@ type Detail struct {
 	TotalCents        int       `json:"total_cents"`
 	Currency          string    `json:"currency"`
 	PaymentStatus     string    `json:"payment_status,omitempty"`
+	ListingPaused     bool      `json:"-"`
 }
 
 type BookingEvent struct {

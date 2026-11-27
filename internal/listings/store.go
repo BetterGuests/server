@@ -300,7 +300,7 @@ func (s *PostgresListingStore) ListPublished(ctx context.Context) ([]PublicListi
 		rows, err := tx.Query(ctx, `
 			SELECT `+publicListingColumns+`
 			FROM app.listings l
-			WHERE l.status = 'published'
+			WHERE l.status = 'published' AND NOT app.listing_taken_down(l.id)
 			ORDER BY l.created_at, l.id
 			LIMIT 200`)
 		if err != nil {
@@ -331,7 +331,7 @@ func (s *PostgresListingStore) GetPublished(ctx context.Context, id uuid.UUID) (
 		rows, err := tx.Query(ctx, `
 			SELECT `+publicListingColumns+`
 			FROM app.listings l
-			WHERE l.id = $1 AND l.status = 'published'`, id)
+			WHERE l.id = $1 AND l.status = 'published' AND NOT app.listing_taken_down(l.id)`, id)
 		if err != nil {
 			return fmt.Errorf("query published listing: %w", err)
 		}

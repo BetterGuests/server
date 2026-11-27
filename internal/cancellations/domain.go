@@ -159,6 +159,7 @@ type AdminListing struct {
 	City              string     `json:"city"`
 	Status            string     `json:"status"`
 	Paused            bool       `json:"paused"`
+	TakenDown         bool       `json:"taken_down"`
 	Reason            string     `json:"reason,omitempty"`
 	PausedAt          *time.Time `json:"paused_at,omitempty"`
 	HostCancellations int        `json:"host_cancellations"`

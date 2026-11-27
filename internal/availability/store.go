@@ -22,7 +22,9 @@ func (store *PostgresAvailabilityStore) BookedRanges(ctx context.Context, listin
 	err := db.WithPublicTx(ctx, store.DB, func(tx pgx.Tx) error {
 		var published bool
 		if err := tx.QueryRow(ctx,
-			`SELECT EXISTS (SELECT 1 FROM app.listings WHERE id = $1 AND status = 'published')`,
+			`SELECT EXISTS (
+				SELECT 1 FROM app.listings
+				WHERE id = $1 AND status = 'published' AND NOT app.listing_taken_down(id))`,
 			listingID,
 		).Scan(&published); err != nil {
 			return fmt.Errorf("look up listing: %w", err)

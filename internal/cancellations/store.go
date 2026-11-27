@@ -354,7 +354,7 @@ func (store *PostgresCancellationStore) AdminListings(ctx context.Context, admin
 	err := db.WithUserTx(ctx, store.DB, adminID.String(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
 			`SELECT l.id, l.host_id, l.title, COALESCE(l.host_name, ''), COALESCE(l.city, ''), l.status,
-			        s.listing_id IS NOT NULL, COALESCE(s.reason, ''), s.created_at,
+			        s.listing_id IS NOT NULL, COALESCE(s.paused_by = 'team', false), COALESCE(s.reason, ''), s.created_at,
 			        (SELECT count(*)::integer FROM app.booking_cancellations c
 			         WHERE c.listing_id = l.id AND c.cancelled_by = 'host' AND c.created_at > $1),
 			        COALESCE((SELECT p.object_key FROM app.listing_photos p
@@ -372,7 +372,7 @@ func (store *PostgresCancellationStore) AdminListings(ctx context.Context, admin
 			var listing AdminListing
 			if err := rows.Scan(
 				&listing.ListingID, &listing.HostID, &listing.Title, &listing.HostName, &listing.City, &listing.Status,
-				&listing.Paused, &listing.Reason, &listing.PausedAt, &listing.HostCancellations,
+				&listing.Paused, &listing.TakenDown, &listing.Reason, &listing.PausedAt, &listing.HostCancellations,
 				&listing.CoverPhotoKey,
 			); err != nil {
 				return err
@@ -449,7 +449,7 @@ func (store *PostgresCancellationStore) PauseListing(ctx context.Context, adminI
 			 VALUES ($1, $2, $3, 'team')
 			 ON CONFLICT (listing_id) DO UPDATE
 			 SET reason = EXCLUDED.reason, paused_by = 'team', created_at = now(), lifted_at = NULL, lifted_by = NULL
-			 WHERE app.listing_suspensions.lifted_at IS NOT NULL OR app.listing_suspensions.paused_by = 'verification'`,
+			 WHERE app.listing_suspensions.lifted_at IS NOT NULL OR app.listing_suspensions.paused_by <> 'team'`,
 			listingID, hostID, reason)
 		if err != nil {
 			return fmt.Errorf("pause listing: %w", err)

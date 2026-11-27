@@ -226,6 +226,11 @@ equally deep. A few are worth reading before you trust them blindly:
 - Paused listings live in `app.listing_suspensions`. Rows are never removed; an
   admin lifts a pause from `/admin/listings`, and a database trigger stops
   anyone else doing it.
+- Any active pause refuses new bookings and approvals. A team pause is a take
+  down: the listing also leaves search, its page, its booked dates and new
+  enquiries. The team can take down a listing that is already paused for another
+  reason. Automatic pauses leave the listing visible. Guests who already booked
+  keep their trip page and conversation.
 - Email carries the notification title, body and a link, never entry codes or
   report details. Provider errors are logged without the address.
 
@@ -267,7 +272,8 @@ equally deep. A few are worth reading before you trust them blindly:
 - A banned host's share of a settlement waits as `awaiting_host`; the guest is
   still refunded their cash back. Money already transferred to the host's Stripe
   account is not affected.
-- A banned account's listings and reviews stay visible.
+- A banned account's listings and reviews stay visible unless the team takes a
+  listing down.
 
 ## Identity standing
 
