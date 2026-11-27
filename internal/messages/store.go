@@ -20,12 +20,17 @@ const summaryColumns = `c.id, c.listing_id, COALESCE(l.title, ''), c.guest_id, c
 	(SELECT count(*) FROM app.messages m
 	 WHERE m.conversation_id = c.id AND m.sender_id <> $1
 	   AND m.created_at > COALESCE(CASE WHEN c.host_id = $1 THEN c.host_read_at ELSE c.guest_read_at END, 'epoch'::timestamptz)),
-	NOT EXISTS (SELECT 1 FROM app.bookings b WHERE ` + stayStillOpen + `)`
+	NOT EXISTS (SELECT 1 FROM app.bookings b WHERE ` + stayStillOpen + `),
+	` + pinnedAtFor + ` IS NOT NULL,
+	EXISTS (SELECT 1 FROM app.bookings b WHERE b.listing_id = c.listing_id AND b.guest_id = c.guest_id)
+	  AND NOT EXISTS (SELECT 1 FROM app.bookings b WHERE ` + stayStillOpen + `)`
 
 const stayStillOpen = `b.listing_id = c.listing_id AND b.guest_id = c.guest_id
 	AND (b.status IN ('requested', 'pending') OR (b.status = 'confirmed' AND b.ends_on >= current_date))`
 
 const hiddenAtFor = `CASE WHEN c.host_id = $1 THEN c.host_hidden_at ELSE c.guest_hidden_at END`
+
+const pinnedAtFor = `CASE WHEN c.host_id = $1 THEN c.host_pinned_at ELSE c.guest_pinned_at END`
 
 const summaryFrom = `FROM app.conversations c
 	LEFT JOIN app.listings l ON l.id = c.listing_id
@@ -155,7 +160,7 @@ func (store *PostgresMessageStore) List(ctx context.Context, actorID uuid.UUID) 
 			`SELECT `+summaryColumns+` `+summaryFrom+`
 			 WHERE (c.guest_id = $1 OR c.host_id = $1)
 			   AND (`+hiddenAtFor+` IS NULL OR COALESCE(c.last_message_at, c.created_at) > `+hiddenAtFor+`)
-			 ORDER BY COALESCE(c.last_message_at, c.created_at) DESC
+			 ORDER BY `+pinnedAtFor+` DESC NULLS LAST, COALESCE(c.last_message_at, c.created_at) DESC
 			 LIMIT $2`, actorID, maxListedThreads)
 		if err != nil {
 			return err
@@ -477,6 +482,29 @@ func (store *PostgresMessageStore) Hide(ctx context.Context, actorID, conversati
 	})
 }
 
+func (store *PostgresMessageStore) SetPinned(ctx context.Context, actorID, conversationID uuid.UUID, pinned bool, now time.Time) error {
+	return db.WithUserTx(ctx, store.DB, actorID.String(), func(tx pgx.Tx) error {
+		participants, err := lockParticipants(ctx, tx, actorID, conversationID)
+		if err != nil {
+			return err
+		}
+		pinnedColumn := "guest_pinned_at"
+		if participants.HostID == actorID {
+			pinnedColumn = "host_pinned_at"
+		}
+		var pinnedAt *time.Time
+		if pinned {
+			pinnedAt = &now
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE app.conversations SET `+pinnedColumn+` = $2 WHERE id = $1`,
+			conversationID, pinnedAt); err != nil {
+			return fmt.Errorf("pin conversation: %w", err)
+		}
+		return nil
+	})
+}
+
 func (store *PostgresMessageStore) MarkRead(ctx context.Context, actorID, conversationID uuid.UUID, now time.Time) error {
 	return db.WithUserTx(ctx, store.DB, actorID.String(), func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx,
@@ -514,6 +542,7 @@ func scanSummary(row pgx.Row) (Summary, error) {
 		&summary.ID, &summary.ListingID, &summary.ListingTitle, &summary.GuestID, &summary.HostID,
 		&summary.Role, &summary.CounterpartyName, &summary.CounterpartyAvatarURL,
 		&summary.LastMessageAt, &summary.LastMessagePreview, &summary.UnreadCount, &summary.CanDelete,
+		&summary.Pinned, &summary.StayEnded,
 	)
 	return summary, err
 }

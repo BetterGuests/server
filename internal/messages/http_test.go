@@ -3,6 +3,7 @@ package messages
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,6 +23,7 @@ type inboxStub struct {
 	askedLimit  int
 	markedRead  bool
 	hidden      bool
+	pinned      *bool
 }
 
 func (stub *inboxStub) List(context.Context, uuid.UUID) ([]Summary, error) {
@@ -45,6 +47,11 @@ func (stub *inboxStub) MarkRead(context.Context, uuid.UUID, uuid.UUID) error {
 
 func (stub *inboxStub) Hide(context.Context, uuid.UUID, uuid.UUID) error {
 	stub.hidden = stub.err == nil
+	return stub.err
+}
+
+func (stub *inboxStub) SetPinned(_ context.Context, _, _ uuid.UUID, pinned bool) error {
+	stub.pinned = &pinned
 	return stub.err
 }
 
@@ -121,6 +128,7 @@ func TestEveryRouteRequiresAnAuthenticatedUser(t *testing.T) {
 		"react":    handler.ReactToMessage,
 		"typing":   handler.Typing,
 		"hide":     handler.DeleteConversation,
+		"pin":      handler.PinConversation,
 	}
 	for name, serve := range routes {
 		response := httptest.NewRecorder()
@@ -444,5 +452,19 @@ func TestDeleteConversationDuringAnOpenStayIsAConflict(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), "once the stay is over") {
 		t.Fatalf("body = %s", response.Body.String())
+	}
+}
+
+func TestPinConversationPinsAndUnpinsForTheCaller(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		inbox := &inboxStub{}
+		handler := newHandler(inbox, &openerStub{}, &senderStub{})
+		response := httptest.NewRecorder()
+
+		handler.PinConversation(response, request(http.MethodPut, "/", fmt.Sprintf(`{"pinned":%t}`, want), true))
+
+		if response.Code != http.StatusNoContent || inbox.pinned == nil || *inbox.pinned != want {
+			t.Fatalf("status = %d, pinned = %v, want %v", response.Code, inbox.pinned, want)
+		}
 	}
 }

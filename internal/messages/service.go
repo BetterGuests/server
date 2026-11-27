@@ -252,6 +252,10 @@ func (service *MessageService) Hide(ctx context.Context, actorID, conversationID
 	return service.store.Hide(ctx, actorID, conversationID, service.now().UTC())
 }
 
+func (service *MessageService) SetPinned(ctx context.Context, actorID, conversationID uuid.UUID, pinned bool) error {
+	return service.store.SetPinned(ctx, actorID, conversationID, pinned, service.now().UTC())
+}
+
 func cleanDraft(draft string) (string, error) {
 	if !utf8.ValidString(draft) {
 		return "", fmt.Errorf("%w: a draft must be valid text", ErrInvalidMessage)

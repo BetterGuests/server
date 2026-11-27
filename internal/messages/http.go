@@ -23,6 +23,7 @@ type Inbox interface {
 	Messages(ctx context.Context, actorID, conversationID uuid.UUID, before *time.Time, limit int) (MessagePage, error)
 	MarkRead(ctx context.Context, actorID, conversationID uuid.UUID) error
 	Hide(ctx context.Context, actorID, conversationID uuid.UUID) error
+	SetPinned(ctx context.Context, actorID, conversationID uuid.UUID, pinned bool) error
 }
 
 type Opener interface {
@@ -55,6 +56,10 @@ type SendRequest struct {
 	ID        uuid.UUID `json:"id"`
 	Body      string    `json:"body"`
 	ReplyToID uuid.UUID `json:"reply_to_id"`
+}
+
+type PinRequest struct {
+	Pinned bool `json:"pinned"`
 }
 
 type TypingFrame struct {
@@ -225,6 +230,22 @@ func (handler *HTTPHandler) DeleteConversation(w http.ResponseWriter, r *http.Re
 	}
 	if err := handler.inbox.Hide(r.Context(), actorID, conversationID); err != nil {
 		writeServiceError(w, "Delete conversation", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (handler *HTTPHandler) PinConversation(w http.ResponseWriter, r *http.Request) {
+	actorID, conversationID, ok := actorAndConversation(w, r)
+	if !ok {
+		return
+	}
+	var body PinRequest
+	if !decode(w, r, &body) {
+		return
+	}
+	if err := handler.inbox.SetPinned(r.Context(), actorID, conversationID, body.Pinned); err != nil {
+		writeServiceError(w, "Pin conversation", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

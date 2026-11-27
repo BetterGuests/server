@@ -89,6 +89,8 @@ type Summary struct {
 	UnreadCount           int        `json:"unread_count"`
 	CounterpartyReplyMins *int       `json:"counterparty_reply_minutes,omitempty"`
 	CanDelete             bool       `json:"can_delete"`
+	Pinned                bool       `json:"pinned"`
+	StayEnded             bool       `json:"stay_ended"`
 	Participants          `json:"-"`
 }
 
@@ -158,6 +160,7 @@ type Store interface {
 	Participants(ctx context.Context, actorID, conversationID uuid.UUID) (Participants, error)
 	MarkRead(ctx context.Context, actorID, conversationID uuid.UUID, now time.Time) error
 	Hide(ctx context.Context, actorID, conversationID uuid.UUID, now time.Time) error
+	SetPinned(ctx context.Context, actorID, conversationID uuid.UUID, pinned bool, now time.Time) error
 }
 
 type Publisher interface {

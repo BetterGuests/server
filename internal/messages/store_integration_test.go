@@ -270,3 +270,40 @@ func TestDeletingAConversationHidesItOnlyForThatPersonUntilSomeoneWritesAgain(t 
 		t.Fatal("a new message should bring the conversation back with only the new message")
 	}
 }
+
+func TestPinningAConversationIsOnlyForThePersonWhoPinnedIt(t *testing.T) {
+	fixture := newConversationFixture(t)
+	ctx, store, host, guest, conversation := fixture.ctx, fixture.store, fixture.host, fixture.guest, fixture.conversation
+	pinnedFor := func(viewer uuid.UUID) bool {
+		t.Helper()
+		summary, err := store.Get(ctx, viewer, conversation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return summary.Pinned
+	}
+
+	if err := store.SetPinned(ctx, guest, conversation, true, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if !pinnedFor(guest) || pinnedFor(host) {
+		t.Fatalf("guest pinned = %v, host pinned = %v", pinnedFor(guest), pinnedFor(host))
+	}
+	if err := store.SetPinned(ctx, guest, conversation, false, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if pinnedFor(guest) {
+		t.Fatal("the conversation is still pinned after unpinning")
+	}
+}
+
+func TestAConversationWithoutAnyBookingIsNotAnEndedStay(t *testing.T) {
+	fixture := newConversationFixture(t)
+	summary, err := fixture.store.Get(fixture.ctx, fixture.guest, fixture.conversation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.StayEnded {
+		t.Fatal("an inquiry with no booking was marked as an ended stay")
+	}
+}

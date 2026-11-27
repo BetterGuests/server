@@ -96,6 +96,10 @@ func (stub *storeStub) Hide(_ context.Context, _, _ uuid.UUID, now time.Time) er
 	return stub.hideErr
 }
 
+func (stub *storeStub) SetPinned(context.Context, uuid.UUID, uuid.UUID, bool, time.Time) error {
+	return nil
+}
+
 type publishedEvent struct {
 	userID  uuid.UUID
 	kind    string
