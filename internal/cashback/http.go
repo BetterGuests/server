@@ -12,6 +12,7 @@ import (
 
 type HTTPHandler struct {
 	uploads   UploadRequester
+	plans     PlanEditor
 	host      HostReader
 	trips     TripReader
 	submitter PhotoSubmitter
@@ -20,6 +21,58 @@ type HTTPHandler struct {
 
 func NewHTTPHandler(trips TripReader, submitter PhotoSubmitter, reviewer Reviewer, host HostReader, uploads UploadRequester) *HTTPHandler {
 	return &HTTPHandler{uploads: uploads, host: host, trips: trips, submitter: submitter, reviewer: reviewer}
+}
+
+func (handler *HTTPHandler) WithPlans(plans PlanEditor) *HTTPHandler {
+	handler.plans = plans
+	return handler
+}
+
+func (handler *HTTPHandler) GetPlan(w http.ResponseWriter, r *http.Request) {
+	hostID, listingID, ok := actorAndPathID(w, r, "listing_id")
+	if !ok {
+		return
+	}
+	plan, err := handler.plans.ListingPlan(r.Context(), hostID, listingID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, plan)
+}
+
+func (handler *HTTPHandler) SavePlan(w http.ResponseWriter, r *http.Request) {
+	hostID, listingID, ok := actorAndPathID(w, r, "listing_id")
+	if !ok {
+		return
+	}
+	var request PlanView
+	if !decodeBody(w, r, &request) {
+		return
+	}
+	plan, err := handler.plans.SaveListingPlan(r.Context(), hostID, listingID, request.Groups)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, plan)
+}
+
+func (handler *HTTPHandler) RequestExampleUpload(w http.ResponseWriter, r *http.Request) {
+	hostID, listingID, ok := actorAndPathID(w, r, "listing_id")
+	if !ok {
+		return
+	}
+	var request UploadRequest
+	if !decodeBody(w, r, &request) {
+		return
+	}
+	ticket, err := handler.plans.RequestExampleUpload(r.Context(), hostID, listingID, request.ContentType, request.SizeBytes)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, ticket)
 }
 
 type SubmitPhotoRequest struct {
@@ -163,11 +216,11 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, ErrNotHost):
 		writeError(w, http.StatusForbidden, err.Error())
-	case errors.Is(err, ErrBookingNotFound), errors.Is(err, ErrSubmissionNotFound):
+	case errors.Is(err, ErrBookingNotFound), errors.Is(err, ErrSubmissionNotFound), errors.Is(err, ErrListingNotFound):
 		writeError(w, http.StatusNotFound, "not found")
 	case errors.Is(err, ErrBookingNotEarning), errors.Is(err, ErrSubmissionLocked), errors.Is(err, ErrNotAwaitingReview), errors.Is(err, ErrPhotoWindowClosed), errors.Is(err, ErrReviewClosed):
 		writeError(w, http.StatusConflict, err.Error())
-	case errors.Is(err, ErrUnknownTask), errors.Is(err, ErrInvalidPhotoKey), errors.Is(err, ErrPhotoRejected), errors.Is(err, ErrPhotoNotUploaded), errors.Is(err, ErrInvalidDecision), errors.Is(err, ErrRejectNeedsNote):
+	case errors.Is(err, ErrInvalidPlan), errors.Is(err, ErrUnknownTask), errors.Is(err, ErrInvalidPhotoKey), errors.Is(err, ErrPhotoRejected), errors.Is(err, ErrPhotoNotUploaded), errors.Is(err, ErrInvalidDecision), errors.Is(err, ErrRejectNeedsNote):
 		writeError(w, http.StatusBadRequest, err.Error())
 	default:
 		slog.Error("Cashback request", "error", err)

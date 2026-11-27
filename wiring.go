@@ -225,7 +225,8 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		messages: messages.NewHTTPHandler(messageService, messageService, messageService),
 		realtime: realtime.NewHTTPHandler(realtimeService, authService, origins).
 			WithReceiver(messages.TypingEventKind, messages.NewTypingReceiver(messageService)),
-		cashback: cashback.NewHTTPHandler(cashbackService, cashbackService, cashbackService, cashbackService, cashbackService),
+		cashback: cashback.NewHTTPHandler(cashbackService, cashbackService, cashbackService, cashbackService, cashbackService).
+			WithPlans(cashbackService),
 		verification: verification.NewHTTPHandler(verificationService, verificationService).WithStatusReader(verificationStore).WithReconciler(verificationService).WithDeletion(deletionService).
 			WithReviews(verification.NewReviewService(verificationStore).WithInquiries(verificationStore, personaClient)),
 		payments:     payments.NewHTTPHandler(paymentService, paymentService).WithCards(paymentService),

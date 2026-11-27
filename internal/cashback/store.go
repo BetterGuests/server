@@ -41,6 +41,56 @@ func (store *PostgresCashbackStore) BookingState(ctx context.Context, actingID, 
 	return state, nil
 }
 
+func (store *PostgresCashbackStore) BookingPlan(ctx context.Context, actingID, bookingID uuid.UUID) ([]byte, error) {
+	var plan []byte
+	err := db.WithUserTx(ctx, store.DB, actingID.String(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT b.chore_plan FROM app.bookings b
+			 JOIN app.listings l ON l.id = b.listing_id
+			 WHERE b.id = $1 AND (b.guest_id = $2 OR l.host_id = $2)`,
+			bookingID, actingID,
+		).Scan(&plan)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrBookingNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load booking chores: %w", err)
+	}
+	return plan, nil
+}
+
+func (store *PostgresCashbackStore) ListingPlan(ctx context.Context, hostID, listingID uuid.UUID) ([]byte, error) {
+	var plan []byte
+	err := db.WithUserTx(ctx, store.DB, hostID.String(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx,
+			`SELECT chore_plan FROM app.listings WHERE id = $1 AND host_id = $2`, listingID, hostID,
+		).Scan(&plan)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrListingNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load listing chores: %w", err)
+	}
+	return plan, nil
+}
+
+func (store *PostgresCashbackStore) SaveListingPlan(ctx context.Context, hostID, listingID uuid.UUID, plan []byte) error {
+	return db.WithUserTx(ctx, store.DB, hostID.String(), func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx,
+			`UPDATE app.listings SET chore_plan = $3, updated_at = now() WHERE id = $1 AND host_id = $2`,
+			listingID, hostID, string(plan))
+		if err != nil {
+			return fmt.Errorf("save listing chores: %w", err)
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrListingNotFound
+		}
+		return nil
+	})
+}
+
 func (store *PostgresCashbackStore) SaveSubmission(ctx context.Context, submission Submission) (Submission, error) {
 	var saved Submission
 	err := db.WithUserTx(ctx, store.DB, submission.GuestID.String(), func(tx pgx.Tx) error {

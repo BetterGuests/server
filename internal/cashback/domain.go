@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/BetterGuests/BetterGuests-Server/internal/chores"
 	"github.com/google/uuid"
 )
 
@@ -33,23 +34,25 @@ const (
 )
 
 const (
-	BundleRefundCents = 5000
-	CapPercent        = 25
-	CheckoutHourUTC   = 18
-	PhotoWindow       = 24 * time.Hour
-	SettlementDelay   = 72 * time.Hour
+	CapPercent      = 25
+	CheckoutHourUTC = 18
+	PhotoWindow     = 24 * time.Hour
+	SettlementDelay = 72 * time.Hour
 )
 
-type Task struct {
-	Key   string
-	Label string
-	Hint  string
+type PlanView struct {
+	Groups chores.Plan `json:"groups"`
 }
 
-type Bundle struct {
-	Key   string
-	Label string
-	Tasks []Task
+type PlanStore interface {
+	ListingPlan(ctx context.Context, hostID, listingID uuid.UUID) ([]byte, error)
+	SaveListingPlan(ctx context.Context, hostID, listingID uuid.UUID, plan []byte) error
+}
+
+type PlanEditor interface {
+	ListingPlan(ctx context.Context, hostID, listingID uuid.UUID) (PlanView, error)
+	SaveListingPlan(ctx context.Context, hostID, listingID uuid.UUID, plan chores.Plan) (PlanView, error)
+	RequestExampleUpload(ctx context.Context, hostID, listingID uuid.UUID, contentType string, sizeBytes int64) (UploadTicket, error)
 }
 
 type Submission struct {
@@ -104,6 +107,8 @@ type Schedule struct {
 }
 
 type TaskView struct {
+	Instructions string     `json:"instructions,omitempty"`
+	ExampleURL   string     `json:"example_url,omitempty"`
 	SubmissionID *uuid.UUID `json:"submission_id,omitempty"`
 	Key          string     `json:"key"`
 	Label        string     `json:"label"`
@@ -200,6 +205,8 @@ type Store interface {
 	LoadReviewTarget(ctx context.Context, actingID, submissionID uuid.UUID) (ReviewTarget, error)
 	ApplyReview(ctx context.Context, actingID, submissionID uuid.UUID, status TaskStatus, note string, reviewedAt time.Time) error
 	Settlement(ctx context.Context, actingID, bookingID uuid.UUID) (SettlementState, error)
+	BookingPlan(ctx context.Context, actingID, bookingID uuid.UUID) ([]byte, error)
+	PlanStore
 }
 
 type HostBooking struct {

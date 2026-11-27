@@ -50,6 +50,7 @@ type Due struct {
 	GuestFeeCents      int
 	Currency           string
 	AcceptedTaskKeys   []string
+	ChorePlan          []byte
 	EarlierRefundCents int
 	AdjustmentCents    int
 	HostAccountID      string

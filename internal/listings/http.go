@@ -31,6 +31,7 @@ type MediaManager interface {
 	RemovePhoto(ctx context.Context, hostID, listingID, photoID uuid.UUID) (Setup, error)
 	ReorderPhotos(ctx context.Context, hostID, listingID uuid.UUID, photoIDs []uuid.UUID) (Setup, error)
 	SetPrice(ctx context.Context, hostID, listingID uuid.UUID, nightlyCents int) (Setup, error)
+	SetRules(ctx context.Context, hostID, listingID uuid.UUID, rules []HouseRule) (Setup, error)
 }
 
 type HTTPHandler struct {
@@ -314,6 +315,21 @@ func (handler *HTTPHandler) SetPrice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setup, err := handler.manager.SetPrice(r.Context(), hostID, listingID, request.NightlyCents)
+	writeMediaResult(w, http.StatusOK, setup, err)
+}
+
+func (handler *HTTPHandler) SetRules(w http.ResponseWriter, r *http.Request) {
+	hostID, listingID, ok := hostAndListing(w, r)
+	if !ok {
+		return
+	}
+	var request struct {
+		Rules []HouseRule `json:"rules"`
+	}
+	if !decodeMediaBody(w, r, &request) {
+		return
+	}
+	setup, err := handler.manager.SetRules(r.Context(), hostID, listingID, request.Rules)
 	writeMediaResult(w, http.StatusOK, setup, err)
 }
 

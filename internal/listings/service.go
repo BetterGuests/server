@@ -100,6 +100,8 @@ func (service *ListingService) CreateListing(
 	return listing, nil
 }
 
+const maxRules = 50
+
 var ErrInvalidListing = errors.New("invalid listing")
 
 func validateCreateInput(input CreateListingInput) (CreateListingInput, error) {
@@ -182,7 +184,7 @@ func validateCapacity(input CreateListingInput) error {
 }
 
 func validateCollectionSizes(input CreateListingInput) error {
-	if len(input.Amenities) > 100 || len(input.Rules) > 50 {
+	if len(input.Amenities) > 100 || len(input.Rules) > maxRules {
 		return invalidListing("too many amenities or rules")
 	}
 	return nil
@@ -787,6 +789,19 @@ func (service *ListingService) SetPrice(ctx context.Context, hostID, listingID u
 		return Setup{}, ErrInvalidPrice
 	}
 	if err := service.media.SetPrice(ctx, hostID.String(), listingID, nightlyCents); err != nil {
+		return Setup{}, err
+	}
+	return service.Setup(ctx, hostID, listingID)
+}
+
+func (service *ListingService) SetRules(ctx context.Context, hostID, listingID uuid.UUID, rules []HouseRule) (Setup, error) {
+	if len(rules) > maxRules {
+		return Setup{}, invalidListing("keep to %d house rules", maxRules)
+	}
+	if err := validateRules(rules); err != nil {
+		return Setup{}, err
+	}
+	if err := service.media.SetRules(ctx, hostID.String(), listingID, rules); err != nil {
 		return Setup{}, err
 	}
 	return service.Setup(ctx, hostID, listingID)

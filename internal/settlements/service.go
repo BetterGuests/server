@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/BetterGuests/BetterGuests-Server/internal/cashback"
+	"github.com/BetterGuests/BetterGuests-Server/internal/chores"
 	"github.com/BetterGuests/BetterGuests-Server/internal/fees"
 	"github.com/google/uuid"
 )
@@ -143,13 +144,17 @@ func (service *SettlementService) SettleDue(ctx context.Context) (Report, error)
 	return report, nil
 }
 
-func (service *SettlementService) plan(due Due) Settlement {
+func (service *SettlementService) plan(due Due) (Settlement, error) {
 	if due.Saved != nil {
-		return *due.Saved
+		return *due.Saved, nil
+	}
+	chores, err := chores.PlanFromJSON(due.ChorePlan)
+	if err != nil {
+		return Settlement{}, err
 	}
 	stay := due.AmountCents - due.GuestFeeCents
 	kept := max(stay-due.AdjustmentCents, 0)
-	earned := cashback.EarnableCents(due.AcceptedTaskKeys, kept)
+	earned := cashback.EarnableCents(chores, due.AcceptedTaskKeys, kept)
 	total := max(earned, due.EarlierRefundCents)
 	fee := fees.HostShare(kept)
 	return Settlement{
@@ -161,7 +166,7 @@ func (service *SettlementService) plan(due Due) Settlement {
 		CashbackCents:  total,
 		RefundDueCents: total - due.EarlierRefundCents,
 		PayoutCents:    max(kept-fee-total, 0),
-	}
+	}, nil
 }
 
 func blockReason(due Due, settlement Settlement, charge Charge) string {
@@ -185,7 +190,10 @@ func (service *SettlementService) settle(ctx context.Context, due Due) (Status, 
 	if err != nil {
 		return "", fmt.Errorf("read charge: %w", err)
 	}
-	settlement := service.plan(due)
+	settlement, err := service.plan(due)
+	if err != nil {
+		return "", err
+	}
 	if reason := blockReason(due, settlement, charge); reason != "" {
 		return service.record(ctx, settlement, StatusBlocked, reason)
 	}

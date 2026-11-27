@@ -22,7 +22,8 @@ func (store *PostgresSettlementStore) ListDue(ctx context.Context, earliestEndsO
 	rows, err := store.DB.Query(ctx,
 		`SELECT booking_id, guest_id, host_id, payment_intent_id, amount_cents, currency, accepted_task_keys,
 		        earlier_refund_cents, host_stripe_account_id, settlement_id, fee_cents, cashback_cents,
-		        refund_due_cents, payout_cents, stripe_refund_id, stripe_transfer_id, adjustment_cents, guest_fee_cents
+		        refund_due_cents, payout_cents, stripe_refund_id, stripe_transfer_id, adjustment_cents, guest_fee_cents,
+		        app.settlement_chore_plan(booking_id)
 		 FROM app.bookings_due_for_settlement($1, $2, $3)`,
 		earliestEndsOn, latestEndsOn, batchSize)
 	if err != nil {
@@ -37,7 +38,7 @@ func (store *PostgresSettlementStore) ListDue(ctx context.Context, earliestEndsO
 		var refundID, transferID *string
 		if err := rows.Scan(&booking.BookingID, &booking.GuestID, &booking.HostID, &booking.PaymentIntentID,
 			&booking.AmountCents, &booking.Currency, &booking.AcceptedTaskKeys, &booking.EarlierRefundCents,
-			&booking.HostAccountID, &settlementID, &fee, &total, &refundDue, &payout, &refundID, &transferID, &booking.AdjustmentCents, &booking.GuestFeeCents); err != nil {
+			&booking.HostAccountID, &settlementID, &fee, &total, &refundDue, &payout, &refundID, &transferID, &booking.AdjustmentCents, &booking.GuestFeeCents, &booking.ChorePlan); err != nil {
 			return nil, fmt.Errorf("scan due settlement: %w", err)
 		}
 		if settlementID != nil {

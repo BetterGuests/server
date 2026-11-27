@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -68,6 +69,47 @@ func TestMoneyBackWorkflowAgainstPostgres(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+
+	t.Run("a booking keeps the chores it was made with", func(t *testing.T) {
+		store := NewPostgresCashbackStore(pool)
+		own := []byte(`[{"key":"kitchen","amount_cents":900,"chores":[{"key":"custom_plants","label":"Water the plants"}]}]`)
+		if err := store.SaveListingPlan(ctx, strangerID, listing.ID, own); !errors.Is(err, ErrListingNotFound) {
+			t.Fatalf("stranger save error = %v", err)
+		}
+		if err := store.SaveListingPlan(ctx, hostID, listing.ID, own); err != nil {
+			t.Fatal(err)
+		}
+		earlier, err := store.BookingPlan(ctx, guestID, bookingID)
+		if err != nil || earlier != nil {
+			t.Fatalf("earlier booking plan = %s, err = %v", earlier, err)
+		}
+		if _, err := store.BookingPlan(ctx, strangerID, bookingID); !errors.Is(err, ErrBookingNotFound) {
+			t.Fatalf("stranger plan error = %v", err)
+		}
+		later := uuid.New()
+		err = db.WithUserTx(ctx, pool, guestID.String(), func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `INSERT INTO app.bookings (id, listing_id, guest_id, status, starts_on, ends_on, chore_plan) VALUES ($1,$2,$3,'requested',CURRENT_DATE + 20,CURRENT_DATE + 22,'[]')`, later, listing.ID, guestID)
+			return err
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		agreed, err := store.BookingPlan(ctx, guestID, later)
+		if err != nil || !strings.Contains(string(agreed), "custom_plants") {
+			t.Fatalf("later booking plan = %s, err = %v", agreed, err)
+		}
+		err = db.WithUserTx(ctx, pool, hostID.String(), func(tx pgx.Tx) error {
+			_, err := tx.Exec(ctx, `UPDATE app.bookings SET chore_plan = '[]' WHERE id = $1`, later)
+			return err
+		})
+		if err == nil {
+			t.Fatal("the chores on a booking were changed")
+		}
+		var settling []byte
+		if err := pool.QueryRow(ctx, `SELECT app.settlement_chore_plan($1)`, later).Scan(&settling); err != nil || !strings.Contains(string(settling), "custom_plants") {
+			t.Fatalf("settlement plan = %s, err = %v", settling, err)
+		}
+	})
 
 	intentID := "pi_integration_" + uuid.NewString()
 	paymentStore := payments.NewPostgresPaymentStore(pool)

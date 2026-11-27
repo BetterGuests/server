@@ -395,3 +395,22 @@ func TestReorderingPhotosRewritesEveryPositionAndRefusesAPartialOrder(t *testing
 		t.Fatalf("partial order error = %v", err)
 	}
 }
+
+func TestSavedHouseRulesReplaceTheOldOnesAndShowInSetup(t *testing.T) {
+	ctx, service := publishFixture(t)
+	hostID := signedUpHost(t, ctx, service)
+	listing := draftAt(t, ctx, service, hostID, "9 Rules Road "+uuid.NewString(), "", "85001")
+	service.WithMedia(service.store.(MediaStore), nil)
+
+	if _, err := service.SetRules(ctx, hostID, listing.ID, []HouseRule{{Title: "No parties"}, {Title: "No smoking"}}); err != nil {
+		t.Fatal(err)
+	}
+	setup, err := service.SetRules(ctx, hostID, listing.ID, []HouseRule{{Title: "Shoes off"}})
+
+	if err != nil || !setup.RulesSet || len(setup.Rules) != 1 || setup.Rules[0].Title != "Shoes off" || setup.Title == "" {
+		t.Fatalf("setup = %+v, err = %v", setup, err)
+	}
+	if _, err := service.SetRules(ctx, signedUpHost(t, ctx, service), listing.ID, nil); !errors.Is(err, ErrNotListingOwner) && !errors.Is(err, ErrListingNotFound) {
+		t.Fatalf("stranger error = %v", err)
+	}
+}

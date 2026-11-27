@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/BetterGuests/BetterGuests-Server/db"
+	"github.com/BetterGuests/BetterGuests-Server/internal/chores"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -290,7 +291,8 @@ const publicListingColumns = `
 	l.bedrooms, l.beds, l.bathrooms::float8, l.minimum_nights,
 	l.nightly_price_cents, l.cleaning_fee_cents, l.currency,
 	l.rating_avg::float8, l.rating_count, l.created_at, l.published_at,
-	to_char(l.check_in_time, 'HH24:MI'), to_char(l.check_out_time, 'HH24:MI')`
+	to_char(l.check_in_time, 'HH24:MI'), to_char(l.check_out_time, 'HH24:MI'),
+	l.house_rules_set, l.chore_plan`
 
 func (s *PostgresListingStore) ListPublished(ctx context.Context) ([]PublicListing, error) {
 	var listings []PublicListing
@@ -363,6 +365,7 @@ func scanPublicListing(rows pgx.Rows) (PublicListing, error) {
 		currency      string
 		ratingAverage *float64
 		ratingCount   int
+		chorePlan     []byte
 	)
 	if err := rows.Scan(
 		&listing.ID, &listing.Slug, &listing.Title, &listing.Summary, &listing.Description,
@@ -372,9 +375,15 @@ func scanPublicListing(rows pgx.Rows) (PublicListing, error) {
 		&nightly, &cleaning, &currency,
 		&ratingAverage, &ratingCount, &listing.CreatedAt, &listing.PublishedAt,
 		&listing.CheckInTime, &listing.CheckOutTime,
+		&listing.RulesSet, &chorePlan,
 	); err != nil {
 		return PublicListing{}, fmt.Errorf("scan published listing: %w", err)
 	}
+	cashBack, err := offeredCashBack(chorePlan)
+	if err != nil {
+		return PublicListing{}, err
+	}
+	listing.CashBack = cashBack
 	if nightly != nil && *nightly > 0 {
 		listing.Price = &ListingPrice{NightlyCents: *nightly, CleaningFeeCents: cleaning, Currency: currency}
 	}
@@ -385,6 +394,22 @@ func scanPublicListing(rows pgx.Rows) (PublicListing, error) {
 	listing.Photos = []ListingPhoto{}
 	listing.Rules = []HouseRule{}
 	return listing, nil
+}
+
+func offeredCashBack(raw []byte) ([]CashBack, error) {
+	plan, err := chores.PlanFromJSON(raw)
+	if err != nil {
+		return nil, err
+	}
+	offered := []CashBack{}
+	for _, group := range plan.Offered() {
+		item := CashBack{Key: group.Key, Label: group.Label, AmountCents: group.AmountCents, Chores: []string{}}
+		for _, chore := range group.Chores {
+			item.Chores = append(item.Chores, chore.Label)
+		}
+		offered = append(offered, item)
+	}
+	return offered, nil
 }
 
 func attachChildren(ctx context.Context, tx pgx.Tx, listings []PublicListing) error {
@@ -540,13 +565,63 @@ func (s *PostgresListingStore) Setup(ctx context.Context, userID string, listing
 			photo.Fingerprint = PhotoFingerprint(fingerprint)
 			found.Photos = append(found.Photos, photo)
 		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("read listing photos: %w", err)
+		}
+		rows.Close()
+		if err := describeSetup(ctx, tx, listingID, &found); err != nil {
+			return err
+		}
 		setup = found
-		return rows.Err()
+		return nil
 	})
 	if err != nil {
 		return Setup{}, err
 	}
 	return setup, nil
+}
+
+func describeSetup(ctx context.Context, tx pgx.Tx, listingID uuid.UUID, setup *Setup) error {
+	if err := tx.QueryRow(ctx, `
+		SELECT title, city, property_type, max_guests, bedrooms, beds, bathrooms::float8,
+		       to_char(check_in_time, 'HH24:MI'), to_char(check_out_time, 'HH24:MI'), house_rules_set
+		FROM app.listings WHERE id = $1`, listingID,
+	).Scan(&setup.Title, &setup.City, &setup.PropertyType, &setup.MaxGuests, &setup.Bedrooms, &setup.Beds,
+		&setup.Bathrooms, &setup.CheckInTime, &setup.CheckOutTime, &setup.RulesSet); err != nil {
+		return fmt.Errorf("describe listing: %w", err)
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT title, coalesce(description, '') FROM app.listing_rules WHERE listing_id = $1 ORDER BY position`, listingID)
+	if err != nil {
+		return fmt.Errorf("query listing rules: %w", err)
+	}
+	defer rows.Close()
+	setup.Rules = []HouseRule{}
+	for rows.Next() {
+		var rule HouseRule
+		if err := rows.Scan(&rule.Title, &rule.Description); err != nil {
+			return fmt.Errorf("scan listing rule: %w", err)
+		}
+		setup.Rules = append(setup.Rules, rule)
+	}
+	return rows.Err()
+}
+
+func (s *PostgresListingStore) SetRules(ctx context.Context, userID string, listingID uuid.UUID, rules []HouseRule) error {
+	return db.WithUserTx(ctx, s.DB, userID, func(tx pgx.Tx) error {
+		if _, err := lockOwnedListing(ctx, tx, userID, listingID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM app.listing_rules WHERE listing_id = $1`, listingID); err != nil {
+			return fmt.Errorf("clear listing rules: %w", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE app.listings SET house_rules_set = true, updated_at = now() WHERE id = $1`, listingID,
+		); err != nil {
+			return fmt.Errorf("mark listing rules: %w", err)
+		}
+		return insertListingRules(ctx, tx, listingID, rules)
+	})
 }
 
 func (s *PostgresListingStore) AddPhoto(ctx context.Context, userID string, listingID uuid.UUID, photo ListingPhoto) error {

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/BetterGuests/BetterGuests-Server/internal/chores"
 	"github.com/google/uuid"
 )
 
@@ -18,6 +19,24 @@ type memoryStore struct {
 	settlement  SettlementState
 	hostID      uuid.UUID
 	guestID     uuid.UUID
+	bookingPlan []byte
+	listingPlan []byte
+}
+
+func (store *memoryStore) BookingPlan(context.Context, uuid.UUID, uuid.UUID) ([]byte, error) {
+	return store.bookingPlan, nil
+}
+
+func (store *memoryStore) ListingPlan(_ context.Context, hostID, _ uuid.UUID) ([]byte, error) {
+	if hostID != store.hostID {
+		return nil, ErrListingNotFound
+	}
+	return store.listingPlan, nil
+}
+
+func (store *memoryStore) SaveListingPlan(_ context.Context, _, _ uuid.UUID, plan []byte) error {
+	store.listingPlan = plan
+	return nil
 }
 
 func newMemoryStore(hostID uuid.UUID) *memoryStore {
@@ -227,7 +246,7 @@ func TestVerifiedGuestWithUnpaidBookingCannotSubmit(t *testing.T) {
 
 func TestSubmitPhotoRejectsBadInput(t *testing.T) {
 	h := newHarness(true)
-	if _, err := h.service.SubmitPhoto(context.Background(), h.guestID, h.booking, "not_a_task", h.key("run_dishwasher")); !errors.Is(err, ErrUnknownTask) {
+	if _, err := h.service.SubmitPhoto(context.Background(), h.guestID, h.booking, "not_a_task", h.key("not_a_task")); !errors.Is(err, ErrUnknownTask) {
 		t.Fatalf("unknown task error = %v", err)
 	}
 	otherBooking := photoKeyPrefix(uuid.New(), "run_dishwasher") + uuid.NewString() + ".jpg"
@@ -438,7 +457,7 @@ func TestEarnableCashbackCountsOnlyFullBundlesAndIsCapped(t *testing.T) {
 	}
 	for name, test := range cases {
 		t.Run(name, func(t *testing.T) {
-			if got := EarnableCents(test.keys, test.paid); got != test.want {
+			if got := EarnableCents(chores.DefaultPlan(), test.keys, test.paid); got != test.want {
 				t.Fatalf("cents = %d, want %d", got, test.want)
 			}
 		})

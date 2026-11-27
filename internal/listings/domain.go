@@ -266,8 +266,17 @@ type PublicListing struct {
 	Amenities     []Amenity      `json:"amenities"`
 	Photos        []ListingPhoto `json:"photos"`
 	Rules         []HouseRule    `json:"rules"`
+	RulesSet      bool           `json:"rules_set"`
+	CashBack      []CashBack     `json:"cash_back"`
 	CreatedAt     time.Time      `json:"created_at"`
 	PublishedAt   *time.Time     `json:"published_at,omitempty"`
+}
+
+type CashBack struct {
+	Key         string   `json:"key"`
+	Label       string   `json:"label"`
+	AmountCents int      `json:"amount_cents"`
+	Chores      []string `json:"chores"`
 }
 
 type PublishedListingReader interface {
@@ -339,6 +348,17 @@ type HostListingReader interface {
 }
 
 type Setup struct {
+	Title             string         `json:"title"`
+	City              string         `json:"city"`
+	PropertyType      PropertyType   `json:"property_type"`
+	MaxGuests         int            `json:"max_guests"`
+	Bedrooms          int            `json:"bedrooms"`
+	Beds              int            `json:"beds"`
+	Bathrooms         float64        `json:"bathrooms"`
+	CheckInTime       string         `json:"check_in_time"`
+	CheckOutTime      string         `json:"check_out_time"`
+	Rules             []HouseRule    `json:"rules"`
+	RulesSet          bool           `json:"rules_set"`
 	Status            ListingStatus  `json:"status"`
 	NightlyPriceCents int            `json:"nightly_price_cents"`
 	Photos            []ListingPhoto `json:"photos"`
@@ -397,6 +417,7 @@ type MediaStore interface {
 	ReorderPhotos(ctx context.Context, userID string, listingID uuid.UUID, photoIDs []uuid.UUID) error
 	RecordScreening(ctx context.Context, userID string, listingID uuid.UUID, verdict ScreeningVerdict) (bool, error)
 	SetPrice(ctx context.Context, userID string, listingID uuid.UUID, nightlyCents int) error
+	SetRules(ctx context.Context, userID string, listingID uuid.UUID, rules []HouseRule) error
 }
 
 type ListingDeleteStore interface {

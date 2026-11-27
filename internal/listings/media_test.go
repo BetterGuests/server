@@ -74,6 +74,11 @@ func (stub *mediaStoreStub) ReorderPhotos(_ context.Context, _ string, _ uuid.UU
 	return nil
 }
 
+func (stub *mediaStoreStub) SetRules(_ context.Context, _ string, _ uuid.UUID, rules []HouseRule) error {
+	stub.setup.Rules = rules
+	return nil
+}
+
 func (stub *mediaStoreStub) SetPrice(_ context.Context, _ string, _ uuid.UUID, nightlyCents int) error {
 	stub.price = nightlyCents
 	return nil
