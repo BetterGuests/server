@@ -233,7 +233,6 @@ var (
 	ErrDuplicateListing     = errors.New("a published listing already exists at this address")
 	ErrNotListingOwner      = errors.New("only the host can publish this listing")
 	ErrVerificationRequired = errors.New("a current ID verification is required to publish a listing")
-	ErrProofRequired        = errors.New("approved proof of property control is required to publish a listing")
 	ErrPriceRequired        = errors.New("set a nightly price before publishing")
 	ErrPhotoRequired        = errors.New("add at least 5 photos before publishing")
 	ErrUploadsDisabled      = errors.New("photo uploads are not available")

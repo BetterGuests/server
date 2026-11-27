@@ -98,9 +98,6 @@ func (s *PostgresListingStore) Publish(ctx context.Context, userID string, listi
 		if hostID.String() != userID {
 			return ErrNotListingOwner
 		}
-		if err := requireApprovedProof(ctx, tx, listingID); err != nil {
-			return err
-		}
 		if err := requirePriceAndPhoto(ctx, tx, listingID); err != nil {
 			return err
 		}
@@ -114,27 +111,6 @@ func (s *PostgresListingStore) Publish(ctx context.Context, userID string, listi
 		}
 		return nil
 	})
-}
-
-func requireApprovedProof(ctx context.Context, tx pgx.Tx, listingID uuid.UUID) error {
-	var approved bool
-	err := tx.QueryRow(ctx, `
-		SELECT EXISTS (
-			SELECT 1
-			FROM app.property_proofs p
-			JOIN app.listings l ON l.id = p.listing_id
-			WHERE p.listing_id = $1
-			  AND p.status = 'approved'
-			  AND p.address_key IS NOT DISTINCT FROM l.address_key
-			  AND p.unit_key IS NOT DISTINCT FROM l.unit_key
-		)`, listingID).Scan(&approved)
-	if err != nil {
-		return fmt.Errorf("check property proof: %w", err)
-	}
-	if !approved {
-		return ErrProofRequired
-	}
-	return nil
 }
 
 func ensureHostAccount(ctx context.Context, tx pgx.Tx, hostID uuid.UUID) error {

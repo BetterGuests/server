@@ -91,7 +91,6 @@ func TestPublishListingHTTPStatusMapping(t *testing.T) {
 		{"missing listing", ErrListingNotFound, http.StatusNotFound},
 		{"not the owner", ErrNotListingOwner, http.StatusForbidden},
 		{"host not verified", ErrVerificationRequired, http.StatusForbidden},
-		{"proof missing", ErrProofRequired, http.StatusForbidden},
 		{"duplicate address", ErrDuplicateListing, http.StatusConflict},
 		{"unexpected failure", errors.New("boom"), http.StatusInternalServerError},
 	}

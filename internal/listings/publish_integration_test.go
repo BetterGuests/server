@@ -96,7 +96,6 @@ func draftAt(t *testing.T, ctx context.Context, service *ListingService, hostID 
 		t.Fatal(err)
 	}
 	priceAndPicture(t, ctx, service, listing)
-	approveProof(t, ctx, listing)
 	return listing
 }
 
@@ -186,17 +185,12 @@ func TestPublishMissingListingIsNotFound(t *testing.T) {
 	}
 }
 
-func TestPublishRequiresApprovedProof(t *testing.T) {
+func TestPublishNeedsNoProofOfProperty(t *testing.T) {
 	ctx, service := publishFixture(t)
-	input := validCreateInput()
-	input.Address = Address{Line1: "2" + uuid.NewString()[:6] + " Proofless Rd", City: "Phoenix", CountryCode: "US", Latitude: 33.4, Longitude: -112.1}
-	listing, err := service.CreateListing(ctx, signedUpHost(t, ctx, service), input)
-	if err != nil {
-		t.Fatal(err)
-	}
+	listing := draftAt(t, ctx, service, uuid.New(), "2"+uuid.NewString()[:6]+" Proofless Rd", "", "85001")
 
-	if err := service.PublishListing(ctx, listing.HostID, listing.ID); !errors.Is(err, ErrProofRequired) {
-		t.Fatalf("expected ErrProofRequired, got %v", err)
+	if err := service.PublishListing(ctx, listing.HostID, listing.ID); err != nil {
+		t.Fatalf("a verified host with price and photos must publish without a proof: %v", err)
 	}
 }
 
@@ -243,7 +237,6 @@ func TestPublishRequiresAPriceThenFivePhotos(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	approveProof(t, ctx, listing)
 	host := listing.HostID.String()
 
 	if err := service.PublishListing(ctx, listing.HostID, listing.ID); !errors.Is(err, ErrPriceRequired) {

@@ -65,7 +65,7 @@ func (handler *HTTPHandler) PublishListing(w http.ResponseWriter, r *http.Reques
 	switch {
 	case errors.Is(err, ErrListingNotFound):
 		writeListingError(w, http.StatusNotFound, "listing not found")
-	case errors.Is(err, ErrNotListingOwner), errors.Is(err, ErrVerificationRequired), errors.Is(err, ErrProofRequired),
+	case errors.Is(err, ErrNotListingOwner), errors.Is(err, ErrVerificationRequired),
 		errors.Is(err, ErrPriceRequired), errors.Is(err, ErrPhotoRequired):
 		writeListingError(w, http.StatusForbidden, err.Error())
 	case errors.Is(err, ErrDuplicateListing):

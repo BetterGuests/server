@@ -116,27 +116,7 @@ func (f fixture) submit(t *testing.T, listing listings.Listing) Proof {
 	return proof
 }
 
-func TestApprovedProofUnlocksPublishing(t *testing.T) {
-	f := newFixture(t)
-	listing := f.draft(t, uuid.New())
-	adminID := f.makeAdmin(t)
-
-	if err := f.listings.PublishListing(f.ctx, listing.HostID, listing.ID); !errors.Is(err, listings.ErrProofRequired) {
-		t.Fatalf("publishing without a proof must be refused, got %v", err)
-	}
-	proof := f.submit(t, listing)
-	if err := f.listings.PublishListing(f.ctx, listing.HostID, listing.ID); !errors.Is(err, listings.ErrProofRequired) {
-		t.Fatalf("a proof still waiting for review must not unlock publishing, got %v", err)
-	}
-	if err := f.proofs.Decide(f.ctx, adminID, proof.ID, Approve, ""); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.listings.PublishListing(f.ctx, listing.HostID, listing.ID); err != nil {
-		t.Fatalf("approved proof must unlock publishing: %v", err)
-	}
-}
-
-func TestRejectedProofKeepsPublishingLockedAndAllowsResubmission(t *testing.T) {
+func TestRejectedProofShowsTheReasonAndAllowsResubmission(t *testing.T) {
 	f := newFixture(t)
 	listing := f.draft(t, uuid.New())
 	adminID := f.makeAdmin(t)
@@ -144,9 +124,6 @@ func TestRejectedProofKeepsPublishingLockedAndAllowsResubmission(t *testing.T) {
 
 	if err := f.proofs.Decide(f.ctx, adminID, first.ID, Reject, "Name does not match"); err != nil {
 		t.Fatal(err)
-	}
-	if err := f.listings.PublishListing(f.ctx, listing.HostID, listing.ID); !errors.Is(err, listings.ErrProofRequired) {
-		t.Fatalf("rejected proof must not unlock publishing, got %v", err)
 	}
 	latest, found, err := f.proofs.Status(f.ctx, listing.HostID, listing.ID)
 	if err != nil || !found || latest.Status != Rejected || latest.RejectionReason != "Name does not match" {
@@ -599,9 +576,6 @@ func TestManagerPermissionIsReviewedWithItsPapersAndEnds(t *testing.T) {
 	latest, _, err := store.Latest(f.ctx, listing.HostID, listing.ID)
 	if err != nil || latest.Status != Rejected {
 		t.Fatalf("ended permission must be withdrawn: %+v %v", latest, err)
-	}
-	if err := f.listings.PublishListing(f.ctx, listing.HostID, listing.ID); !errors.Is(err, listings.ErrProofRequired) {
-		t.Fatalf("ended permission must not allow publishing: %v", err)
 	}
 	if _, err := f.super.Exec(f.ctx,
 		`UPDATE app.property_proofs SET revoked_at = now() - interval '91 days' WHERE id = $1`, proof.ID); err != nil {
