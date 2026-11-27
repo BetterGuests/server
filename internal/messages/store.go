@@ -45,7 +45,8 @@ const messageColumns = `m.id, m.conversation_id, COALESCE(m.sender_id, '00000000
 	left(r.body, ` + replyPreviewRunesSQL + `),
 	ARRAY(SELECT x.emoji FROM app.message_reactions x WHERE x.message_id = m.id ORDER BY x.created_at, x.id),
 	ARRAY(SELECT CASE WHEN x.account_id = c.host_id THEN 'host' ELSE 'guest' END
-	      FROM app.message_reactions x WHERE x.message_id = m.id ORDER BY x.created_at, x.id)`
+	      FROM app.message_reactions x WHERE x.message_id = m.id ORDER BY x.created_at, x.id),
+	m.automatic, m.private`
 
 const messageFrom = `FROM app.messages m
 	JOIN app.conversations c ON c.id = m.conversation_id
@@ -439,6 +440,7 @@ func scanMessage(row pgx.Row) (Message, error) {
 		&message.ID, &message.ConversationID, &message.SenderID, &message.SenderRole,
 		&message.Body, &message.CreatedAt, &message.BookingID,
 		&replyID, &replyRole, &replyBody, &emoji, &roles,
+		&message.Automatic, &message.Private,
 	); err != nil {
 		return Message{}, err
 	}

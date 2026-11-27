@@ -28,6 +28,7 @@ type MessageService struct {
 	store     Store
 	publisher Publisher
 	focus     FocusTracker
+	private   PrivateBodies
 	now       func() time.Time
 	newID     func() uuid.UUID
 
@@ -46,6 +47,11 @@ func (service *MessageService) WithPublisher(publisher Publisher) *MessageServic
 
 func (service *MessageService) WithFocus(focus FocusTracker) *MessageService {
 	service.focus = focus
+	return service
+}
+
+func (service *MessageService) WithPrivateBodies(private PrivateBodies) *MessageService {
+	service.private = private
 	return service
 }
 
@@ -123,7 +129,33 @@ func (service *MessageService) Messages(
 	if hasMore {
 		fetched = fetched[:limit]
 	}
+	if err := service.unseal(ctx, actorID, fetched); err != nil {
+		return MessagePage{}, err
+	}
 	return MessagePage{Messages: oldestFirst(fetched), HasMore: hasMore}, nil
+}
+
+func (service *MessageService) unseal(ctx context.Context, actorID uuid.UUID, fetched []Message) error {
+	if service.private == nil {
+		return nil
+	}
+	var sealed []uuid.UUID
+	for _, message := range fetched {
+		if message.Private {
+			sealed = append(sealed, message.ID)
+		}
+	}
+	if len(sealed) == 0 {
+		return nil
+	}
+	details, err := service.private.Unseal(ctx, actorID, sealed)
+	if err != nil {
+		return fmt.Errorf("open private messages: %w", err)
+	}
+	for index := range fetched {
+		fetched[index].Details = details[fetched[index].ID]
+	}
+	return nil
 }
 
 func (service *MessageService) Send(ctx context.Context, actorID, conversationID uuid.UUID, draft Draft) (Message, error) {
@@ -260,8 +292,8 @@ func cleanDraft(draft string) (string, error) {
 	if !utf8.ValidString(draft) {
 		return "", fmt.Errorf("%w: a draft must be valid text", ErrInvalidMessage)
 	}
-	if utf8.RuneCountInString(draft) > maxBodyRunes {
-		return string([]rune(draft)[:maxBodyRunes]), nil
+	if utf8.RuneCountInString(draft) > MaxBodyRunes {
+		return string([]rune(draft)[:MaxBodyRunes]), nil
 	}
 	return draft, nil
 }
@@ -282,8 +314,8 @@ func cleanBody(body string) (string, error) {
 	if !utf8.ValidString(body) {
 		return "", fmt.Errorf("%w: a message must be valid text", ErrInvalidMessage)
 	}
-	if utf8.RuneCountInString(body) > maxBodyRunes {
-		return "", fmt.Errorf("%w: a message cannot exceed %d characters", ErrInvalidMessage, maxBodyRunes)
+	if utf8.RuneCountInString(body) > MaxBodyRunes {
+		return "", fmt.Errorf("%w: a message cannot exceed %d characters", ErrInvalidMessage, MaxBodyRunes)
 	}
 	return body, nil
 }

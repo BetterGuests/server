@@ -7,7 +7,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestHostCanDeleteOnlyAnUntouchedDraft(t *testing.T) {
+func TestHostCanDeleteOnlyAnUntouchedListing(t *testing.T) {
 	ctx, service := publishFixture(t)
 	draft := func() Listing {
 		t.Helper()
@@ -54,15 +54,18 @@ func TestHostCanDeleteOnlyAnUntouchedDraft(t *testing.T) {
 		}
 	})
 
-	t.Run("a published listing is kept", func(t *testing.T) {
+	t.Run("a published listing nobody has touched is removed for good", func(t *testing.T) {
 		listing := draft()
 		priceAndPicture(t, ctx, service, listing)
 		approveProof(t, ctx, listing)
 		if err := service.PublishListing(ctx, listing.HostID, listing.ID); err != nil {
 			t.Fatal(err)
 		}
-		if err := service.DeleteListing(ctx, listing.HostID, listing.ID); !errors.Is(err, ErrListingInUse) {
+		if err := service.DeleteListing(ctx, listing.HostID, listing.ID); err != nil {
 			t.Fatalf("delete published = %v", err)
+		}
+		if err := service.DeleteListing(ctx, listing.HostID, listing.ID); !errors.Is(err, ErrListingNotFound) {
+			t.Fatalf("second delete = %v", err)
 		}
 	})
 }

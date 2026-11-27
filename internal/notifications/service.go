@@ -45,6 +45,7 @@ type JourneyService struct {
 	upkeep    BookingUpkeep
 	team      TeamAlertQueue
 	mail      OutboundMail
+	automatic AutomaticMessages
 	nudges    chan struct{}
 	now       func() time.Time
 	newID     func() uuid.UUID
@@ -78,6 +79,11 @@ func (service *JourneyService) WithTeamAlerts(team TeamAlertQueue) *JourneyServi
 
 func (service *JourneyService) WithMail(mail OutboundMail) *JourneyService {
 	service.mail = mail
+	return service
+}
+
+func (service *JourneyService) WithAutomaticMessages(automatic AutomaticMessages) *JourneyService {
+	service.automatic = automatic
 	return service
 }
 
@@ -149,6 +155,11 @@ func (service *JourneyService) Sweep(ctx context.Context) error {
 
 func (service *JourneyService) announce(ctx context.Context) []error {
 	var failures []error
+	if service.automatic != nil {
+		if _, err := service.automatic.SendDue(ctx); err != nil {
+			failures = append(failures, err)
+		}
+	}
 	if service.team != nil {
 		alerts, err := service.team.QueueTeamAlerts(ctx)
 		if err != nil {
@@ -226,6 +237,8 @@ func emailPath(item PendingEmail) string {
 	switch item.Kind {
 	case kindReportFiled:
 		return reportsPath
+	case kindUserReportFiled:
+		return userReportsPath
 	case kindListingPaused, kindListingUnpaused:
 		if item.ForTeam {
 			return adminListingsPath

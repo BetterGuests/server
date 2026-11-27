@@ -143,6 +143,10 @@ func (s *PostgresProofStore) ListApproved(ctx context.Context, adminID uuid.UUID
 	return s.listForReview(ctx, adminID, Approved)
 }
 
+func (s *PostgresProofStore) ListRejected(ctx context.Context, adminID uuid.UUID) ([]ReviewItem, error) {
+	return s.listForReview(ctx, adminID, Rejected)
+}
+
 func (s *PostgresProofStore) listForReview(ctx context.Context, adminID uuid.UUID, status Status) ([]ReviewItem, error) {
 	var items []ReviewItem
 	err := db.WithUserTx(ctx, s.DB, adminID.String(), func(tx pgx.Tx) error {
@@ -155,7 +159,8 @@ func (s *PostgresProofStore) listForReview(ctx context.Context, adminID uuid.UUI
 				coalesce((SELECT ph.object_key FROM app.listing_photos ph
 				          WHERE ph.listing_id = l.id AND ph.screening = 'passed' ORDER BY ph.position LIMIT 1), ''),
 				sc.scanned_at, coalesce(sc.found_name, ''), coalesce(sc.name_verdict, ''),
-				coalesce(sc.address_matched, false), coalesce(sc.scan_error, '')
+				coalesce(sc.address_matched, false), coalesce(sc.scan_error, ''),
+				p.revoked_at IS NOT NULL, p.file_erase_requested_at IS NOT NULL, coalesce(p.overturn_note, '')
 			FROM app.property_proofs p
 			JOIN app.listings l ON l.id = p.listing_id
 			LEFT JOIN app.property_proof_scans sc ON sc.proof_id = p.id
@@ -182,7 +187,8 @@ func (s *PostgresProofStore) listForReview(ctx context.Context, adminID uuid.UUI
 				&item.Region, &item.PostalCode, &item.CountryCode,
 				&item.IDFirstName, &item.IDMiddleName, &item.IDLastName, &item.IDNameSuffix,
 				&item.HostName, &item.CoverKey,
-				&scannedAt, &scan.FoundName, &scan.NameVerdict, &scan.AddressMatched, &scan.Error)
+				&scannedAt, &scan.FoundName, &scan.NameVerdict, &scan.AddressMatched, &scan.Error,
+				&item.Withdrawn, &item.Erasing, &item.OverturnNote)
 			if err != nil {
 				return fmt.Errorf("scan proof for review: %w", err)
 			}
@@ -191,6 +197,9 @@ func (s *PostgresProofStore) listForReview(ctx context.Context, adminID uuid.UUI
 				item.Scan = &scan
 			}
 			item.Proof = proof
+			if item.Erasing {
+				item.ObjectKey = ""
+			}
 			items = append(items, item)
 		}
 		if err := rows.Err(); err != nil {
@@ -251,6 +260,36 @@ func (s *PostgresProofStore) Revoke(ctx context.Context, adminID, proofID uuid.U
 		mapped, known := revokeOutcomes[outcome]
 		if !known {
 			return fmt.Errorf("revoke property proof: unknown outcome %q", outcome)
+		}
+		return mapped
+	})
+}
+
+var rejectedOutcomes = map[string]error{
+	"done": nil, "forbidden": ErrNotAdmin, "not_found": ErrProofNotFound, "wrong_state": ErrNotRejected,
+	"erased": ErrDocumentErased, "expired": ErrAuthorityExpired, "superseded": ErrSuperseded,
+}
+
+func (s *PostgresProofStore) Overturn(ctx context.Context, adminID, proofID uuid.UUID, note string, at time.Time) error {
+	return s.rejectedOutcome(ctx, adminID, "approve rejected proof", `SELECT app.overturn_property_proof($1, $2, $3)`, proofID, note, at)
+}
+
+func (s *PostgresProofStore) Erase(ctx context.Context, adminID, proofID uuid.UUID, at time.Time) error {
+	return s.rejectedOutcome(ctx, adminID, "erase rejected proof", `SELECT app.erase_rejected_property_proof($1, $2)`, proofID, at)
+}
+
+func (s *PostgresProofStore) rejectedOutcome(ctx context.Context, adminID uuid.UUID, action, query string, args ...any) error {
+	return db.WithUserTx(ctx, s.DB, adminID.String(), func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO app.accounts (id) VALUES ($1) ON CONFLICT (id) DO NOTHING`, adminID); err != nil {
+			return fmt.Errorf("ensure account: %w", err)
+		}
+		var outcome string
+		if err := tx.QueryRow(ctx, query, args...).Scan(&outcome); err != nil {
+			return fmt.Errorf("%s: %w", action, err)
+		}
+		mapped, known := rejectedOutcomes[outcome]
+		if !known {
+			return fmt.Errorf("%s: unknown outcome %q", action, outcome)
 		}
 		return mapped
 	})

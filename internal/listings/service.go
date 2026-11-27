@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -229,7 +230,7 @@ func validPropertyType(value PropertyType) bool {
 
 var (
 	ErrListingNotFound      = errors.New("listing not found")
-	ErrListingInUse         = errors.New("only a draft with no bookings and no recently withdrawn proof can be deleted")
+	ErrListingInUse         = errors.New("this listing cannot be deleted")
 	ErrDuplicateListing     = errors.New("a published listing already exists at this address")
 	ErrNotListingOwner      = errors.New("only the host can publish this listing")
 	ErrVerificationRequired = errors.New("a current ID verification is required to publish a listing")
@@ -283,6 +284,48 @@ func (service *ListingService) PublishListing(ctx context.Context, hostID, listi
 	return service.publishStore.Publish(ctx, hostID.String(), listingID)
 }
 
+type ReusedPhotoSigner struct {
+	signer PhotoSigner
+	mu     sync.Mutex
+	links  map[reusedPhotoKey]reusedPhotoLink
+	now    func() time.Time
+}
+
+func NewReusedPhotoSigner(signer PhotoSigner) *ReusedPhotoSigner {
+	return &ReusedPhotoSigner{signer: signer, links: make(map[reusedPhotoKey]reusedPhotoLink), now: time.Now}
+}
+
+func (reused *ReusedPhotoSigner) PresignDownload(ctx context.Context, key string, lifetime time.Duration) (string, error) {
+	reused.mu.Lock()
+	defer reused.mu.Unlock()
+
+	wanted := reusedPhotoKey{objectKey: key, lifetime: lifetime}
+	now := reused.now()
+	if link, found := reused.links[wanted]; found && now.Before(link.reuseUntil) {
+		return link.url, nil
+	}
+	url, err := reused.signer.PresignDownload(ctx, key, lifetime)
+	if err != nil {
+		return "", err
+	}
+	if len(reused.links) >= maxReusedPhotoLinks {
+		reused.makeRoom(now)
+	}
+	reused.links[wanted] = reusedPhotoLink{url: url, reuseUntil: now.Add(lifetime / 2)}
+	return url, nil
+}
+
+func (reused *ReusedPhotoSigner) makeRoom(now time.Time) {
+	for key, link := range reused.links {
+		if !now.Before(link.reuseUntil) {
+			delete(reused.links, key)
+		}
+	}
+	if len(reused.links) >= maxReusedPhotoLinks {
+		clear(reused.links)
+	}
+}
+
 const (
 	photoURLLifetime      = time.Hour
 	publicCoordinateScale = 100.0
@@ -333,6 +376,15 @@ func (service *PublicListingService) prepare(ctx context.Context, listing *Publi
 			return fmt.Errorf("sign photo for listing %s: %w", listing.ID, err)
 		}
 		listing.Photos[index].URL = url
+		cardKey, sized := cardKeyOf(listing.Photos[index].ObjectKey)
+		if !sized {
+			continue
+		}
+		cardURL, err := service.signer.PresignDownload(ctx, cardKey, photoURLLifetime)
+		if err != nil {
+			return fmt.Errorf("sign card photo for listing %s: %w", listing.ID, err)
+		}
+		listing.Photos[index].CardURL = cardURL
 	}
 	return nil
 }
@@ -359,7 +411,11 @@ var allowedPhotoTypes = map[string]string{
 	"image/webp": ".webp",
 }
 
-var photoNamePattern = regexp.MustCompile(`^[0-9a-f-]{36}\.(jpg|png|webp)$`)
+var (
+	uploadNamePattern = regexp.MustCompile(`^[0-9a-f-]{36}\.(jpg|png|webp)$`)
+	storedNamePattern = regexp.MustCompile(`^[0-9a-f-]{36}(\.sized\.jpg|\.(jpg|png|webp))$`)
+	resizeSlots       = make(chan struct{}, maxParallelResizes)
+)
 
 func photoKeyPrefix(listingID uuid.UUID) string {
 	return "listings/" + listingID.String() + "/"
@@ -367,7 +423,62 @@ func photoKeyPrefix(listingID uuid.UUID) string {
 
 func validPhotoKey(key string, listingID uuid.UUID) bool {
 	name, owned := strings.CutPrefix(key, photoKeyPrefix(listingID))
-	return owned && photoNamePattern.MatchString(name)
+	return owned && storedNamePattern.MatchString(name)
+}
+
+func validUploadKey(key string, listingID uuid.UUID) bool {
+	name, owned := strings.CutPrefix(key, photoKeyPrefix(listingID))
+	return owned && uploadNamePattern.MatchString(name)
+}
+
+func serverPhotoBase(listingID uuid.UUID, uploadKey string) string {
+	return photoKeyPrefix(listingID) + uuid.NewSHA1(listingID, []byte(uploadKey)).String()
+}
+
+func cardKeyOf(storedKey string) (string, bool) {
+	base, sized := strings.CutSuffix(storedKey, sizedPhotoSuffix)
+	if !sized {
+		return "", false
+	}
+	return base + cardPhotoSuffix, true
+}
+
+func (service *ListingService) storeResized(ctx context.Context, listingID uuid.UUID, uploadKey string, data []byte) (string, error) {
+	card := boundedCardVersionOf(data)
+	if card == nil {
+		return "", nil
+	}
+	sizedKey := serverPhotoBase(listingID, uploadKey) + sizedPhotoSuffix
+	if err := writeSizedPhoto(ctx, service.objects, sizedKey, data, card); err != nil {
+		return "", err
+	}
+	return sizedKey, nil
+}
+
+func boundedCardVersionOf(data []byte) []byte {
+	resizeSlots <- struct{}{}
+	defer func() { <-resizeSlots }()
+	return cardVersionOf(data)
+}
+
+func writeSizedPhoto(ctx context.Context, files PhotoFileWriter, sizedKey string, original, card []byte) error {
+	cardKey, _ := cardKeyOf(sizedKey)
+	if err := files.Write(ctx, cardKey, "image/jpeg", card); err != nil {
+		return fmt.Errorf("store card photo: %w", err)
+	}
+	if err := files.Write(ctx, sizedKey, "image/jpeg", original); err != nil {
+		removePhotoFiles(ctx, files, cardKey)
+		return fmt.Errorf("store sized photo: %w", err)
+	}
+	return nil
+}
+
+func removePhotoFiles(ctx context.Context, files PhotoFileWriter, keys ...string) {
+	for _, key := range keys {
+		if err := files.Remove(ctx, key); err != nil {
+			slog.Warn("Remove listing photo", "error", err)
+		}
+	}
 }
 
 func (service *ListingService) WithScreening(screener PhotoScreener) *ListingService {
@@ -432,7 +543,7 @@ func (service *ListingService) AddPhoto(ctx context.Context, hostID, listingID u
 	if service.objects == nil {
 		return Setup{}, ErrUploadsDisabled
 	}
-	if !validPhotoKey(key, listingID) {
+	if !validUploadKey(key, listingID) {
 		return Setup{}, ErrInvalidPhotoKey
 	}
 	altText = strings.TrimSpace(altText)
@@ -443,7 +554,10 @@ func (service *ListingService) AddPhoto(ctx context.Context, hostID, listingID u
 	if err != nil {
 		return Setup{}, err
 	}
-	if slices.ContainsFunc(current.Photos, func(photo ListingPhoto) bool { return photo.ObjectKey == key }) {
+	resizedKey := serverPhotoBase(listingID, key) + sizedPhotoSuffix
+	if slices.ContainsFunc(current.Photos, func(photo ListingPhoto) bool {
+		return photo.ObjectKey == key || photo.ObjectKey == resizedKey
+	}) {
 		return Setup{}, ErrPhotoAlreadyAdded
 	}
 	if len(current.Photos) >= maxPhotos {
@@ -473,12 +587,22 @@ func (service *ListingService) AddPhoto(ctx context.Context, hostID, listingID u
 	photo := ListingPhoto{ID: service.newID(), ObjectKey: key, AltText: altText, Screening: ScreeningPassed, Fingerprint: fingerprint}
 	if service.screener != nil {
 		photo.Screening = ScreeningPending
+	} else if sizedKey, err := service.storeResized(ctx, listingID, key, data); err != nil {
+		slog.Warn("Resize listing photo", "error", err)
+	} else if sizedKey != "" {
+		photo.ObjectKey = sizedKey
 	}
 	if err := service.media.AddPhoto(ctx, hostID.String(), listingID, photo); err != nil {
+		if photo.ObjectKey != key {
+			service.discardUnlessListed(ctx, hostID, listingID, photo.ObjectKey)
+		}
 		if errors.Is(err, ErrDuplicatePhoto) {
 			service.discard(ctx, key)
 		}
 		return Setup{}, err
+	}
+	if photo.ObjectKey != key {
+		service.discard(ctx, key)
 	}
 	if photo.Screening == ScreeningPending {
 		service.inBackground(func() {
@@ -617,7 +741,14 @@ func (service *ListingService) screenedCopy(ctx context.Context, listingID uuid.
 	if refusal != "" {
 		return "", photoNotAllowed{refusal}
 	}
-	screenedKey := photoKeyPrefix(listingID) + uuid.NewSHA1(listingID, []byte(key)).String() + extension
+	sizedKey, err := service.storeResized(ctx, listingID, key, data)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrPhotoCheckFailed, err)
+	}
+	if sizedKey != "" {
+		return sizedKey, nil
+	}
+	screenedKey := serverPhotoBase(listingID, key) + extension
 	if err := service.objects.Write(ctx, screenedKey, contentType, data); err != nil {
 		return "", fmt.Errorf("%w: store checked photo: %w", ErrPhotoCheckFailed, err)
 	}
@@ -665,9 +796,11 @@ func (service *ListingService) discard(ctx context.Context, key string) {
 	if service.objects == nil {
 		return
 	}
-	if err := service.objects.Remove(ctx, key); err != nil {
-		slog.Warn("Remove listing photo", "error", err)
+	keys := []string{key}
+	if cardKey, sized := cardKeyOf(key); sized {
+		keys = append(keys, cardKey)
 	}
+	removePhotoFiles(ctx, service.objects, keys...)
 }
 
 func (service *ListingService) DeleteListing(ctx context.Context, hostID, listingID uuid.UUID) error {
@@ -675,7 +808,7 @@ func (service *ListingService) DeleteListing(ctx context.Context, hostID, listin
 	if !ok {
 		return errors.New("listing store cannot delete")
 	}
-	keys, err := remover.DeleteDraft(ctx, hostID.String(), listingID)
+	keys, err := remover.DeleteUntouched(ctx, hostID.String(), listingID)
 	if err != nil {
 		return err
 	}

@@ -45,6 +45,19 @@ func (store *storeStub) ListApproved(context.Context, uuid.UUID) ([]ReviewItem, 
 	return store.items, nil
 }
 
+func (store *storeStub) ListRejected(context.Context, uuid.UUID) ([]ReviewItem, error) {
+	return store.items, nil
+}
+
+func (store *storeStub) Overturn(_ context.Context, _, _ uuid.UUID, note string, _ time.Time) error {
+	store.reason = note
+	return store.decideErr
+}
+
+func (store *storeStub) Erase(context.Context, uuid.UUID, uuid.UUID, time.Time) error {
+	return store.decideErr
+}
+
 func (store *storeStub) Revoke(_ context.Context, _, _ uuid.UUID, reason string, _ time.Time) error {
 	store.reason = reason
 	return store.decideErr

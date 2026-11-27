@@ -157,15 +157,52 @@ equally deep. A few are worth reading before you trust them blindly:
   host can read their own guide. A guest can read it only with a confirmed
   booking near its dates, and the API narrows that to 48 hours before
   check-in until checkout. Notifications and thread notes never contain them.
+  Guests can also read arrival details through private automatic messages, under
+  the same window (see Automatic messages).
 - Reviews are double-blind. A review has no `published_at` until both sides
   wrote one or 14 days passed, only `app.publish_due_reviews()` sets it, and
   the API role cannot update or delete reviews.
-- Five `SECURITY DEFINER` functions let the background job act without a
+- Seven `SECURITY DEFINER` functions let the background job act without a
   signed-in user: `complete_finished_stays`, `publish_due_reviews`,
-  `stay_journey`, `deliver_stay_notification` and `post_stay_message`. The
-  first two take their clock from the database. The last two only address the
-  guest or host of the named booking. None is reachable from a request without
-  going through a service that checks the caller.
+  `stay_journey`, `deliver_stay_notification`, `post_stay_message`,
+  `auto_message_candidates` and `post_auto_message`. The first two take their
+  clock from the database. The posting functions only address the guest or host
+  of the named booking. None is reachable from a request without going through a
+  service that checks the caller.
+
+## Automatic messages
+
+- Only a listing's host can read or change its automatic messages
+  (`app.listing_auto_messages`, forced row-level security). A listing holds at
+  most 10.
+- A message goes out only for a confirmed booking with a succeeded payment, no
+  recorded checkout, and before checkout time. `post_auto_message` rechecks
+  this, that the template is still enabled and unchanged, and posts it as the
+  host.
+- `app.booking_auto_messages` has one row per booking and template, written in
+  the same transaction as the message, so retries and parallel runs cannot send
+  twice. The API role cannot write it. Deleting a sent message does not resend it.
+- A new, re-enabled or re-timed message is not sent for moments that had already
+  passed.
+- A message is private when the host marks it so, when it uses an arrival
+  fill-in, or when its text contains the saved entry code or Wi-Fi password
+  (3 characters or longer). Private messages are not posted earlier than 48 hours
+  before check-in, and ones with arrival fill-ins wait until a guide is saved.
+- A private message stores only a fixed notice in `app.messages.body`, so
+  conversation previews, reply quotes, realtime events, notifications and email
+  never carry its details. The text is in `app.message_private_bodies` with its
+  fill-ins unresolved. Listing messages opens it: always for the host, and for
+  the guest only while the booking is confirmed and paid, from 48 hours before
+  check-in until checkout time or the recorded checkout. Row-level security
+  backs this with a wider date check. Arrival fill-ins show the guide as it is
+  when read.
+- The web app leaves those opened details out of its offline copy.
+- Limit: text a host types by hand (for example where a key is) in a message not
+  marked private, or after changing the saved code, is an ordinary message. It
+  stays readable and appears in the conversation preview. The editor says to turn
+  privacy on for such text.
+- Only the background job can create a message marked automatic or private; a
+  restrictive policy stops the API role from doing so.
 
 ## Guards on bookings and listings
 
@@ -191,6 +228,28 @@ equally deep. A few are worth reading before you trust them blindly:
   anyone else doing it.
 - Email carries the notification title, body and a link, never entry codes or
   report details. Provider errors are logged without the address.
+
+## Reports about listings, hosts and guests
+
+- The reporter is the signed-in account. The reported account is looked up on
+  the server from the listing, booking or conversation named in the request, so
+  a request never carries another person's account ID. Row-level security
+  repeats that relationship check on insert.
+- A listing can be reported by anyone signed in. A host can also be reported
+  from a published listing. A guest can only be reported by a host who has a
+  booking or conversation with them.
+- A report is readable by its author and by admins. The reported account cannot
+  read or close it, even if it is an admin.
+- Only an admin closes a report, and only once. Closing records an outcome and a
+  note; it changes nothing about the account or listing.
+- One open report per author and listing, and per author and reported person.
+  Filing is limited to 10 an hour.
+- A new report puts a notification and an email in front of every admin except
+  the reported one. Both name only the kind of target and the listing title,
+  never the reason, the details or anyone's name.
+- Names and the listing title are copied into the report so it stays readable if
+  they later change. Message contents are not copied, and admins gain no access
+  to conversations.
 
 ## Identity standing
 

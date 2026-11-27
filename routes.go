@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/BetterGuests/BetterGuests-Server/internal/automessages"
 	"github.com/BetterGuests/BetterGuests-Server/internal/availability"
 	"github.com/BetterGuests/BetterGuests-Server/internal/bookings"
 	"github.com/BetterGuests/BetterGuests-Server/internal/cancellations"
@@ -18,6 +19,7 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/profiles"
 	"github.com/BetterGuests/BetterGuests-Server/internal/proofs"
 	"github.com/BetterGuests/BetterGuests-Server/internal/realtime"
+	"github.com/BetterGuests/BetterGuests-Server/internal/reports"
 	"github.com/BetterGuests/BetterGuests-Server/internal/reviews"
 	"github.com/BetterGuests/BetterGuests-Server/internal/settlements"
 	"github.com/BetterGuests/BetterGuests-Server/internal/stays"
@@ -48,11 +50,13 @@ type routeDeps struct {
 	waitlist      *waitlist.HTTPHandler
 	availability  *availability.HTTPHandler
 	stays         *stays.HTTPHandler
+	autoMessages  *automessages.HTTPHandler
 	inbox         *notifications.HTTPHandler
 	tripUpdates   backgroundJob
 	cancellations *cancellations.HTTPHandler
 	userMap       *usermap.HTTPHandler
 	teamEvents    *teamevents.HTTPHandler
+	reports       *reports.HTTPHandler
 }
 
 type backgroundJob interface {
@@ -168,9 +172,13 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.HandleFunc("GET /api/v1/admin/events", deps.teamEvents.Feed)
 	api.HandleFunc("GET /api/v1/admin/property-proofs", deps.proofs.ListForReview)
 	api.HandleFunc("POST /api/v1/admin/property-proofs/{proof_id}/revoke", deps.proofs.Revoke)
+	api.HandleFunc("POST /api/v1/admin/property-proofs/{proof_id}/overturn", deps.proofs.Overturn)
+	api.HandleFunc("POST /api/v1/admin/property-proofs/{proof_id}/erase", deps.proofs.Erase)
 	api.HandleFunc("GET /api/v1/admin/identity-reviews", deps.verification.ListReviews)
 	api.HandleFunc("GET /api/v1/admin/identity-reviews/{verification_id}/preview", deps.verification.PreviewReview)
 	api.HandleFunc("POST /api/v1/admin/identity-reviews/{verification_id}/decision", deps.verification.DecideReview)
+	api.HandleFunc("POST /api/v1/admin/identity-reviews/{verification_id}/overturn", deps.verification.OverturnReview)
+	api.HandleFunc("POST /api/v1/admin/identity-reviews/{verification_id}/erase", deps.verification.EraseReview)
 	api.HandleFunc("POST /api/v1/admin/property-proofs/{proof_id}/decision", deps.proofs.Decide)
 	api.Handle("POST /api/v1/reviews", perAccountFunc(reviewBudget, deps.reviews.CreateReview))
 	api.HandleFunc("GET /api/v1/reviews/pending", deps.reviews.PendingReviews)
@@ -183,6 +191,10 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.HandleFunc("POST /api/v1/bookings/{booking_id}/check-out", deps.stays.CheckOut)
 	api.HandleFunc("GET /api/v1/listings/{listing_id}/arrival-guide", deps.stays.GetGuide)
 	api.Handle("PUT /api/v1/listings/{listing_id}/arrival-guide", deps.compliance.RequireAdult(http.HandlerFunc(deps.stays.SaveGuide)))
+	api.HandleFunc("GET /api/v1/listings/{listing_id}/auto-messages", deps.autoMessages.List)
+	api.Handle("POST /api/v1/listings/{listing_id}/auto-messages", deps.compliance.RequireAdult(http.HandlerFunc(deps.autoMessages.Create)))
+	api.Handle("PUT /api/v1/listings/{listing_id}/auto-messages/{auto_message_id}", deps.compliance.RequireAdult(http.HandlerFunc(deps.autoMessages.Update)))
+	api.Handle("DELETE /api/v1/listings/{listing_id}/auto-messages/{auto_message_id}", deps.compliance.RequireAdult(http.HandlerFunc(deps.autoMessages.Delete)))
 	api.HandleFunc("GET /api/v1/bookings/{booking_id}/cancellation", deps.cancellations.Options)
 	api.HandleFunc("POST /api/v1/bookings/{booking_id}/cancellation", deps.cancellations.Cancel)
 	api.Handle("POST /api/v1/bookings/{booking_id}/report", perAccountFunc(stayReportBudget, deps.cancellations.Report))
@@ -192,6 +204,9 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.HandleFunc("POST /api/v1/admin/listings/{listing_id}/pause", deps.cancellations.PauseListing)
 	api.HandleFunc("DELETE /api/v1/admin/listings/{listing_id}/pause", deps.cancellations.UnpauseListing)
 	api.HandleFunc("POST /api/v1/admin/stay-reports/{booking_id}/decision", deps.cancellations.Resolve)
+	api.Handle("POST /api/v1/reports", perAccountFunc(userReportBudget, deps.reports.File))
+	api.HandleFunc("GET /api/v1/admin/user-reports", deps.reports.List)
+	api.HandleFunc("POST /api/v1/admin/user-reports/{report_id}/decision", deps.reports.Resolve)
 	api.HandleFunc("GET /api/v1/notifications", deps.inbox.List)
 	api.HandleFunc("POST /api/v1/notifications/read", deps.inbox.MarkAllRead)
 	api.HandleFunc("POST /api/v1/notifications/{notification_id}/read", deps.inbox.MarkRead)
@@ -249,7 +264,7 @@ func withMiddleware(next http.Handler, origins []string) http.Handler {
 
 	return middleware.Recover(
 		middleware.SecurityHeaders(
-			middleware.RequireHTTPS(corsHandler),
+			middleware.RequireHTTPS(middleware.Compress(corsHandler)),
 		),
 	)
 }

@@ -158,7 +158,7 @@ func TestSendRejectsBadBodiesWithoutTouchingTheStore(t *testing.T) {
 	tests := map[string]string{
 		"empty":           "",
 		"whitespace only": " \n\t ",
-		"too long":        strings.Repeat("a", maxBodyRunes+1),
+		"too long":        strings.Repeat("a", MaxBodyRunes+1),
 		"invalid utf-8":   "hello \xff",
 	}
 	for name, body := range tests {
@@ -182,8 +182,8 @@ func TestSendRejectsBadBodiesWithoutTouchingTheStore(t *testing.T) {
 func TestSendAllowsAMessageOfExactlyTheLimit(t *testing.T) {
 	service := NewMessageService(&storeStub{})
 
-	if _, err := service.Send(context.Background(), uuid.New(), uuid.New(), Draft{Body: strings.Repeat("é", maxBodyRunes)}); err != nil {
-		t.Fatalf("a body of %d characters must be accepted: %v", maxBodyRunes, err)
+	if _, err := service.Send(context.Background(), uuid.New(), uuid.New(), Draft{Body: strings.Repeat("é", MaxBodyRunes)}); err != nil {
+		t.Fatalf("a body of %d characters must be accepted: %v", MaxBodyRunes, err)
 	}
 }
 
@@ -542,10 +542,10 @@ func TestLongDraftsAreCutToTheMessageLimit(t *testing.T) {
 	publisher := &publisherStub{}
 	service := NewMessageService(store).WithPublisher(publisher).WithFocus(publisher)
 
-	_ = service.Typing(context.Background(), store.participants.GuestID, uuid.New(), TypingUpdate{Draft: strings.Repeat("a", maxBodyRunes+50)})
+	_ = service.Typing(context.Background(), store.participants.GuestID, uuid.New(), TypingUpdate{Draft: strings.Repeat("a", MaxBodyRunes+50)})
 
 	payload, _ := publisher.events[0].payload.(TypingEvent)
-	if len([]rune(payload.Draft)) != maxBodyRunes {
+	if len([]rune(payload.Draft)) != MaxBodyRunes {
 		t.Fatalf("draft length = %d", len([]rune(payload.Draft)))
 	}
 }

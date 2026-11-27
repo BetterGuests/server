@@ -21,6 +21,7 @@ var (
 	messageBudget        = middleware.RateLimiterConfig{RequestsPerWindow: 30, Window: time.Minute}
 	reviewBudget         = middleware.RateLimiterConfig{RequestsPerWindow: 20, Window: time.Hour}
 	stayReportBudget     = middleware.RateLimiterConfig{RequestsPerWindow: 10, Window: time.Hour}
+	userReportBudget     = middleware.RateLimiterConfig{RequestsPerWindow: 10, Window: time.Hour}
 	idCheckBudget        = middleware.RateLimiterConfig{RequestsPerWindow: 5, Window: day}
 	checkoutBudget       = middleware.RateLimiterConfig{RequestsPerWindow: 20, Window: time.Hour}
 	cardArtBudget        = middleware.RateLimiterConfig{RequestsPerWindow: 10, Window: time.Hour}

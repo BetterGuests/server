@@ -63,6 +63,7 @@ const (
 	maxListed            = 50
 	emailBatchSize       = 50
 	reportsPath          = "/admin/stay-reports"
+	userReportsPath      = "/admin/user-reports"
 	adminListingsPath    = "/admin/listings"
 	hostingPath          = "/hosting"
 	verifyPath           = "/verify"
@@ -72,6 +73,7 @@ const (
 	kindIdentityReview   = "identity_review"
 	tripPathPrefix       = "/trips/"
 	kindReportFiled      = "report_filed"
+	kindUserReportFiled  = "user_report_filed"
 	kindListingPaused    = "listing_paused"
 	kindListingUnpaused  = "listing_unpaused"
 	missingGuestName     = "Your guest"
@@ -239,6 +241,10 @@ type EmailAddresses interface {
 }
 
 type OutboundMail interface {
+	SendDue(ctx context.Context) (int, error)
+}
+
+type AutomaticMessages interface {
 	SendDue(ctx context.Context) (int, error)
 }
 

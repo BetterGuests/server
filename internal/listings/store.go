@@ -13,7 +13,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const foreignKeyViolationCode = "23503"
+const (
+	foreignKeyViolationCode = "23503"
+	restrictViolationCode   = "23001"
+	conversationsTable      = "conversations"
+)
 
 type ListingStore interface {
 	Create(
@@ -697,15 +701,15 @@ func (s *PostgresListingStore) SetPrice(ctx context.Context, userID string, list
 	})
 }
 
-func (s *PostgresListingStore) DeleteDraft(ctx context.Context, userID string, listingID uuid.UUID) ([]string, error) {
+func (s *PostgresListingStore) DeleteUntouched(ctx context.Context, userID string, listingID uuid.UUID) ([]string, error) {
 	var keys []string
 	err := db.WithUserTx(ctx, s.DB, userID, func(tx pgx.Tx) error {
 		status, err := lockOwnedListing(ctx, tx, userID, listingID)
 		if err != nil {
 			return err
 		}
-		if status != Draft {
-			return ErrListingInUse
+		if err := returnToDraft(ctx, tx, listingID, status); err != nil {
+			return err
 		}
 		rows, err := tx.Query(ctx, `SELECT object_key FROM app.listing_photos WHERE listing_id = $1`, listingID)
 		if err != nil {
@@ -720,12 +724,15 @@ func (s *PostgresListingStore) DeleteDraft(ctx context.Context, userID string, l
 			return fmt.Errorf("release listing documents: %w", err)
 		}
 		if !released {
-			return ErrListingInUse
+			return ErrDeleteProofHeld
 		}
 		_, err = tx.Exec(ctx, `DELETE FROM app.listings WHERE id = $1`, listingID)
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == foreignKeyViolationCode {
-			return ErrListingInUse
+			if pgErr.TableName == conversationsTable {
+				return ErrDeleteHasMessages
+			}
+			return ErrDeleteHasBookings
 		}
 		if err != nil {
 			return fmt.Errorf("delete listing: %w", err)
@@ -736,4 +743,69 @@ func (s *PostgresListingStore) DeleteDraft(ctx context.Context, userID string, l
 		return nil, err
 	}
 	return keys, nil
+}
+
+func returnToDraft(ctx context.Context, tx pgx.Tx, listingID uuid.UUID, status ListingStatus) error {
+	var suspended bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM app.listing_suspensions WHERE listing_id = $1)`, listingID,
+	).Scan(&suspended); err != nil {
+		return fmt.Errorf("check listing suspension: %w", err)
+	}
+	if suspended || status == Paused {
+		return ErrDeletePaused
+	}
+	if status == Draft {
+		return nil
+	}
+	_, err := tx.Exec(ctx, `UPDATE app.listings SET status = 'draft', updated_at = now() WHERE id = $1`, listingID)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == restrictViolationCode {
+		return ErrDeleteHasBookings
+	}
+	if err != nil {
+		return fmt.Errorf("unpublish listing: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresListingStore) PublishedPhotos(ctx context.Context) ([]PhotoToResize, error) {
+	var photos []PhotoToResize
+	err := db.WithPublicTx(ctx, s.DB, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+			SELECT l.host_id, l.id, p.id, p.object_key
+			FROM app.listing_photos p
+			JOIN app.listings l ON l.id = p.listing_id
+			WHERE l.status = 'published' AND p.screening = 'passed'
+			ORDER BY l.id, p.position`)
+		if err != nil {
+			return fmt.Errorf("query published photos: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var photo PhotoToResize
+			if err := rows.Scan(&photo.HostID, &photo.ListingID, &photo.PhotoID, &photo.ObjectKey); err != nil {
+				return fmt.Errorf("scan published photo: %w", err)
+			}
+			photos = append(photos, photo)
+		}
+		return rows.Err()
+	})
+	return photos, err
+}
+
+func (s *PostgresListingStore) ReplacePhotoKey(ctx context.Context, photo PhotoToResize, newKey string) (bool, error) {
+	var replaced bool
+	err := db.WithUserTx(ctx, s.DB, photo.HostID.String(), func(tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			UPDATE app.listing_photos SET object_key = $4
+			WHERE id = $1 AND listing_id = $2 AND object_key = $3 AND screening = 'passed'`,
+			photo.PhotoID, photo.ListingID, photo.ObjectKey, newKey)
+		if err != nil {
+			return fmt.Errorf("replace listing photo key: %w", err)
+		}
+		replaced = tag.RowsAffected() == 1
+		return nil
+	})
+	return replaced, err
 }

@@ -34,6 +34,10 @@ type revokeRequest struct {
 	Reason string `json:"reason"`
 }
 
+type overturnRequest struct {
+	Note string `json:"note"`
+}
+
 type decisionRequest struct {
 	Decision Decision `json:"decision"`
 	Reason   string   `json:"reason"`
@@ -111,8 +115,11 @@ func (handler *HTTPHandler) ListForReview(w http.ResponseWriter, r *http.Request
 		return
 	}
 	list := handler.queue.ListSubmitted
-	if Status(r.URL.Query().Get("status")) == Approved {
+	switch Status(r.URL.Query().Get("status")) {
+	case Approved:
 		list = handler.queue.ListApproved
+	case Rejected:
+		list = handler.queue.ListRejected
 	}
 	items, err := list(r.Context(), adminID)
 	if err != nil {
@@ -169,6 +176,48 @@ func (handler *HTTPHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"id": proofID.String()})
 }
 
+func (handler *HTTPHandler) Overturn(w http.ResponseWriter, r *http.Request) {
+	adminID, proofID, ok := adminAndProof(w, r)
+	if !ok {
+		return
+	}
+	var request overturnRequest
+	if !decodeBody(w, r, &request) {
+		return
+	}
+	if err := handler.queue.Overturn(r.Context(), adminID, proofID, request.Note); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"id": proofID.String()})
+}
+
+func (handler *HTTPHandler) Erase(w http.ResponseWriter, r *http.Request) {
+	adminID, proofID, ok := adminAndProof(w, r)
+	if !ok {
+		return
+	}
+	if err := handler.queue.Erase(r.Context(), adminID, proofID); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"id": proofID.String()})
+}
+
+func adminAndProof(w http.ResponseWriter, r *http.Request) (uuid.UUID, uuid.UUID, bool) {
+	adminID, ok := accounts.UserID(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return uuid.Nil, uuid.Nil, false
+	}
+	proofID, err := uuid.Parse(r.PathValue("proof_id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "proof not found")
+		return uuid.Nil, uuid.Nil, false
+	}
+	return adminID, proofID, true
+}
+
 func hostAndListing(w http.ResponseWriter, r *http.Request) (uuid.UUID, uuid.UUID, bool) {
 	hostID, ok := accounts.UserID(r.Context())
 	if !ok {
@@ -213,6 +262,10 @@ var statusByError = []struct {
 	{ErrNotUploaded, http.StatusBadRequest},
 	{ErrInvalidDecision, http.StatusBadRequest},
 	{ErrReasonRequired, http.StatusBadRequest},
+	{ErrNoteRequired, http.StatusBadRequest},
+	{ErrNotRejected, http.StatusConflict},
+	{ErrDocumentErased, http.StatusConflict},
+	{ErrSuperseded, http.StatusConflict},
 	{ErrListingNotFound, http.StatusNotFound},
 	{ErrProofNotFound, http.StatusNotFound},
 	{ErrNotListingOwner, http.StatusForbidden},

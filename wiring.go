@@ -11,6 +11,7 @@ import (
 
 	"github.com/BetterGuests/BetterGuests-Server/internal/accounts"
 	"github.com/BetterGuests/BetterGuests-Server/internal/auth"
+	"github.com/BetterGuests/BetterGuests-Server/internal/automessages"
 	"github.com/BetterGuests/BetterGuests-Server/internal/availability"
 	"github.com/BetterGuests/BetterGuests-Server/internal/bookings"
 	"github.com/BetterGuests/BetterGuests-Server/internal/cancellations"
@@ -27,6 +28,7 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/proofs"
 	"github.com/BetterGuests/BetterGuests-Server/internal/proofscan"
 	"github.com/BetterGuests/BetterGuests-Server/internal/realtime"
+	"github.com/BetterGuests/BetterGuests-Server/internal/reports"
 	"github.com/BetterGuests/BetterGuests-Server/internal/reviewdigest"
 	"github.com/BetterGuests/BetterGuests-Server/internal/reviews"
 	"github.com/BetterGuests/BetterGuests-Server/internal/screening"
@@ -98,8 +100,15 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		slog.Warn("one person on several accounts is not detected: ID_FINGERPRINT_KEY is not set")
 	}
 
+	autoMessageStore := automessages.NewPostgresAutoMessageStore(pool)
+	autoMessageService := automessages.NewAutoMessageService(autoMessageStore, autoMessageStore, autoMessageStore).
+		WithPublisher(realtimeService).
+		WithNudger(journeyService)
+	journeyService.WithAutomaticMessages(autoMessageService)
+
 	messageService := messages.NewMessageService(messages.NewPostgresMessageStore(pool)).
 		WithPublisher(realtimeService).
+		WithPrivateBodies(autoMessageService).
 		WithFocus(realtimeService)
 	realtimeService.WithFocusListener(messageService)
 
@@ -154,8 +163,9 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 	if err != nil {
 		return routeDeps{}, fmt.Errorf("photo storage configuration: %w", err)
 	}
-	if photos := listingObjectsFrom(objectStore); photos != nil {
-		cancellationService.WithListingPhotos(photos)
+	listingPhotos := listingObjectsFrom(objectStore)
+	if listingPhotos != nil {
+		cancellationService.WithListingPhotos(listingPhotos)
 	}
 	cashbackService := cashback.NewCashbackService(
 		cashback.NewPostgresCashbackStore(pool),
@@ -177,7 +187,7 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 	listingStore := listings.NewPostgresListingStore(pool)
 	listingService := listings.NewListingService(listingStore).
 		WithPublishing(listingStore, currentVerifier).
-		WithMedia(listingStore, listingObjectsFrom(objectStore))
+		WithMedia(listingStore, listingPhotos)
 	if config, enabled := screening.ConfigFromLookup(os.Getenv); enabled {
 		listingService.WithScreening(screening.NewScreeningService(config))
 	} else {
@@ -192,6 +202,8 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 	}
 	proofHandler := proofs.NewHTTPHandler(proofService, proofService, proofService, proofService, proofService)
 
+	reportService := reports.NewReportService(reports.NewPostgresReportStore(pool), proofService)
+
 	profileService := profiles.NewProfileService(profiles.NewPostgresProfileStore(pool), bannerObjectsFrom(objectStore))
 
 	return routeDeps{
@@ -202,7 +214,7 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 			WithPublisher(listingService).
 			WithMedia(listingService).
 			WithHostReader(listingStore).
-			WithPublicReader(listings.NewPublicListingService(listingStore, objectStore)),
+			WithPublicReader(listings.NewPublicListingService(listingStore, listingPhotos)),
 		proofs:   proofHandler,
 		nearby:   buildNearbyHandler(listingStore),
 		reviews:  reviews.NewHTTPHandler(reviewService, reviewService).WithSummaries(reviewService),
@@ -220,11 +232,13 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		waitlist:      waitlist.NewHTTPHandler(waitlist.NewWaitlistService(waitlist.NewPostgresWaitlistStore(pool))),
 		availability:  availability.NewHTTPHandler(availability.NewAvailabilityService(availability.NewPostgresAvailabilityStore(pool))),
 		stays:         stays.NewHTTPHandler(stayService, stayService),
+		autoMessages:  automessages.NewHTTPHandler(autoMessageService),
 		inbox:         notifications.NewHTTPHandler(notifications.NewNotificationService(notificationStore)),
 		tripUpdates:   journeyService,
 		cancellations: cancellations.NewHTTPHandler(cancellationService, cancellationService).WithListingDesk(cancellationService),
 		userMap:       usermap.NewHTTPHandler(usermap.NewUserMapService(userDirectory, proofService)),
 		teamEvents:    teamevents.NewHTTPHandler(teamevents.NewTeamEventsService(teamevents.NewPostgresTeamEventsStore(pool), proofService)),
+		reports:       reports.NewHTTPHandler(reportService, reportService),
 	}, nil
 }
 
@@ -378,13 +392,29 @@ type objectContent interface {
 	Write(ctx context.Context, key, contentType string, data []byte) error
 }
 
-type listingObjects struct{ store cashback.ObjectStore }
+type cacheableDownloader interface {
+	PresignCacheableDownload(ctx context.Context, key string, expires time.Duration) (string, error)
+}
+
+type cacheableDownloads struct{ store cashback.ObjectStore }
+
+func (downloads cacheableDownloads) PresignDownload(ctx context.Context, key string, expires time.Duration) (string, error) {
+	if cacheable, ok := downloads.store.(cacheableDownloader); ok {
+		return cacheable.PresignCacheableDownload(ctx, key, expires)
+	}
+	return downloads.store.PresignDownload(ctx, key, expires)
+}
+
+type listingObjects struct {
+	store     cashback.ObjectStore
+	downloads *listings.ReusedPhotoSigner
+}
 
 func listingObjectsFrom(store cashback.ObjectStore) listings.PhotoObjects {
 	if store == nil {
 		return nil
 	}
-	return listingObjects{store: store}
+	return listingObjects{store: store, downloads: listings.NewReusedPhotoSigner(cacheableDownloads{store: store})}
 }
 
 func (objects listingObjects) PresignUpload(ctx context.Context, key, contentType string, expires time.Duration) (string, error) {
@@ -392,7 +422,7 @@ func (objects listingObjects) PresignUpload(ctx context.Context, key, contentTyp
 }
 
 func (objects listingObjects) PresignDownload(ctx context.Context, key string, expires time.Duration) (string, error) {
-	return objects.store.PresignDownload(ctx, key, expires)
+	return objects.downloads.PresignDownload(ctx, key, expires)
 }
 
 func (objects listingObjects) Stat(ctx context.Context, key string) (listings.ObjectInfo, error) {

@@ -452,8 +452,16 @@ func TestUploadedDocumentsAreDueOnlyWhenNoLongerNeeded(t *testing.T) {
 	waiting := f.submit(t, f.draft(t, uuid.New()))
 	rejected := decided(Reject)
 	approved := decided(Approve)
-	if due(waiting) || !due(rejected) || due(approved) {
-		t.Fatal("only the rejected document is due at first")
+	if due(waiting) || due(rejected) || due(approved) {
+		t.Fatal("nothing is due at first")
+	}
+	age(rejected, "reviewed_at", 29)
+	if due(rejected) {
+		t.Fatal("a rejected document must be kept for 30 days")
+	}
+	age(rejected, "reviewed_at", 31)
+	if !due(rejected) {
+		t.Fatal("a rejected document older than 30 days must be due")
 	}
 	if err := store.MarkFileDeleted(f.ctx, approved.ID); err != nil {
 		t.Fatal(err)
@@ -500,10 +508,10 @@ func TestDeletingADraftQueuesItsDocumentsForDeletion(t *testing.T) {
 	listing := f.draft(t, uuid.New())
 	proof := f.submit(t, listing)
 
-	if _, err := listingStore.DeleteDraft(f.ctx, uuid.NewString(), listing.ID); err == nil {
+	if _, err := listingStore.DeleteUntouched(f.ctx, uuid.NewString(), listing.ID); err == nil {
 		t.Fatal("a stranger must not delete the draft")
 	}
-	if _, err := listingStore.DeleteDraft(f.ctx, listing.HostID.String(), listing.ID); err != nil {
+	if _, err := listingStore.DeleteUntouched(f.ctx, listing.HostID.String(), listing.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -603,7 +611,7 @@ func TestManagerPermissionIsReviewedWithItsPapersAndEnds(t *testing.T) {
 	if latest, _, _ = store.Latest(f.ctx, listing.HostID, listing.ID); latest.OwnerName != "" || latest.OwnerContact != "" {
 		t.Fatalf("owner details must be erased with the file: %+v", latest)
 	}
-	if _, err := listings.NewPostgresListingStore(f.pool).DeleteDraft(f.ctx, listing.HostID.String(), listing.ID); !errors.Is(err, nil) {
+	if _, err := listings.NewPostgresListingStore(f.pool).DeleteUntouched(f.ctx, listing.HostID.String(), listing.ID); !errors.Is(err, nil) {
 		t.Fatal(err)
 	}
 }

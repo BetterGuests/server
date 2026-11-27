@@ -33,7 +33,7 @@ const (
 const maxTrackedTypists = 10_000
 
 const (
-	maxBodyRunes         = 4000
+	MaxBodyRunes         = 4000
 	defaultPageSize      = 50
 	maxPageSize          = 100
 	previewRunes         = 200
@@ -53,6 +53,9 @@ type Message struct {
 	BookingID      *uuid.UUID `json:"booking_id,omitempty"`
 	ReplyTo        *Reply     `json:"reply_to,omitempty"`
 	Reactions      []Reaction `json:"reactions"`
+	Automatic      bool       `json:"automatic,omitempty"`
+	Private        bool       `json:"private,omitempty"`
+	Details        string     `json:"details,omitempty"`
 }
 
 type Reply struct {
@@ -165,6 +168,10 @@ type Store interface {
 
 type Publisher interface {
 	Publish(userID uuid.UUID, kind string, payload any)
+}
+
+type PrivateBodies interface {
+	Unseal(ctx context.Context, viewerID uuid.UUID, messageIDs []uuid.UUID) (map[uuid.UUID]string, error)
 }
 
 type FocusTracker interface {

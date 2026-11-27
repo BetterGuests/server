@@ -99,6 +99,16 @@ func (store *S3ObjectStore) PresignDownload(ctx context.Context, key string, exp
 	return signed.String(), nil
 }
 
+func (store *S3ObjectStore) PresignCacheableDownload(ctx context.Context, key string, expires time.Duration) (string, error) {
+	overrides := url.Values{}
+	overrides.Set("response-cache-control", fmt.Sprintf("private, max-age=%d", int(expires.Seconds())))
+	signed, err := store.client.PresignedGetObject(ctx, store.bucket, key, expires, overrides)
+	if err != nil {
+		return "", fmt.Errorf("presign cacheable get: %w", err)
+	}
+	return signed.String(), nil
+}
+
 func (store *S3ObjectStore) Stat(ctx context.Context, key string) (ObjectInfo, error) {
 	info, err := store.client.StatObject(ctx, store.bucket, key, minio.StatObjectOptions{})
 	if err != nil {

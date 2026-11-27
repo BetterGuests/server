@@ -22,6 +22,18 @@ func (queue failingQueue) ListApproved(context.Context, uuid.UUID) ([]ReviewItem
 	return nil, queue.err
 }
 
+func (queue failingQueue) ListRejected(context.Context, uuid.UUID) ([]ReviewItem, error) {
+	return nil, queue.err
+}
+
+func (queue failingQueue) Overturn(context.Context, uuid.UUID, uuid.UUID, string) error {
+	return queue.err
+}
+
+func (queue failingQueue) Erase(context.Context, uuid.UUID, uuid.UUID) error {
+	return queue.err
+}
+
 func (queue failingQueue) Revoke(context.Context, uuid.UUID, uuid.UUID, string) error {
 	return queue.err
 }

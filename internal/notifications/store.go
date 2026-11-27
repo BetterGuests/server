@@ -146,7 +146,11 @@ func (store *PostgresNotificationStore) PostNote(ctx context.Context, bookingID,
 func (store *PostgresNotificationStore) QueueTeamAlerts(ctx context.Context) ([]TeamAlert, error) {
 	rows, err := store.DB.Query(ctx,
 		`SELECT account_id, COALESCE(booking_id, '00000000-0000-0000-0000-000000000000'::uuid), kind, title, body, for_team
-		 FROM app.queue_team_alerts()`)
+		 FROM (
+		     SELECT * FROM app.queue_team_alerts()
+		     UNION ALL
+		     SELECT * FROM app.queue_user_report_alerts()
+		 ) alerts`)
 	if err != nil {
 		return nil, fmt.Errorf("queue team alerts: %w", err)
 	}

@@ -49,6 +49,7 @@ type ListingPhoto struct {
 	ID        uuid.UUID      `json:"id"`
 	ObjectKey string         `json:"-"`
 	URL       string         `json:"url,omitempty"`
+	CardURL   string         `json:"card_url,omitempty"`
 	AltText   string         `json:"alt_text,omitempty"`
 	Position  int            `json:"position"`
 	Screening PhotoScreening `json:"screening"`
@@ -278,6 +279,29 @@ type PhotoSigner interface {
 	PresignDownload(ctx context.Context, key string, expires time.Duration) (string, error)
 }
 
+type reusedPhotoKey struct {
+	objectKey string
+	lifetime  time.Duration
+}
+
+type reusedPhotoLink struct {
+	url        string
+	reuseUntil time.Time
+}
+
+const maxReusedPhotoLinks = 10_000
+
+const (
+	cardPhotoEdge      = 960
+	cardPhotoQuality   = 80
+	maxResizedPixels   = 40_000_000
+	maxParallelResizes = 2
+	sizedPhotoSuffix   = ".sized.jpg"
+	cardPhotoSuffix    = ".card.jpg"
+)
+
+var exifMarker = []byte("Exif\x00\x00")
+
 type PublicListingReader interface {
 	ListPublished(ctx context.Context) ([]PublicListing, error)
 	GetPublished(ctx context.Context, id uuid.UUID) (PublicListing, error)
@@ -356,9 +380,53 @@ type MediaStore interface {
 }
 
 type ListingDeleteStore interface {
-	DeleteDraft(ctx context.Context, userID string, listingID uuid.UUID) ([]string, error)
+	DeleteUntouched(ctx context.Context, userID string, listingID uuid.UUID) ([]string, error)
 }
 
 type ListingDeleter interface {
 	DeleteListing(ctx context.Context, hostID, listingID uuid.UUID) error
+}
+
+type PhotoToResize struct {
+	HostID    uuid.UUID
+	ListingID uuid.UUID
+	PhotoID   uuid.UUID
+	ObjectKey string
+}
+
+type PhotoKeyChange struct {
+	PhotoID uuid.UUID
+	From    string
+	To      string
+}
+
+type BackfillReport struct {
+	Photos        int
+	AlreadySized  int
+	KeptOriginal  int
+	Resizable     int
+	Resized       int
+	Failed        int
+	OriginalBytes int
+	CardBytes     int
+	Changes       []PhotoKeyChange
+}
+
+type CardBackfillStore interface {
+	PublishedPhotos(ctx context.Context) ([]PhotoToResize, error)
+	ReplacePhotoKey(ctx context.Context, photo PhotoToResize, newKey string) (bool, error)
+}
+
+type PhotoFileReader interface {
+	Read(ctx context.Context, key string, maxBytes int64) ([]byte, error)
+}
+
+type PhotoFileWriter interface {
+	Write(ctx context.Context, key, contentType string, data []byte) error
+	Remove(ctx context.Context, key string) error
+}
+
+type CardBackfillFiles interface {
+	PhotoFileReader
+	PhotoFileWriter
 }

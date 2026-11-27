@@ -58,3 +58,15 @@ func TestTeamMailGoesToTheAdminAddressAndOneFailureDoesNotStopTheRest(t *testing
 		t.Fatalf("mail = %+v", mail)
 	}
 }
+
+func TestASafetyReportEmailLinksTheTeamToTheSafetyQueue(t *testing.T) {
+	report := PendingEmail{NotificationID: uuid.New(), Kind: kindUserReportFiled, Title: "A new safety report", Body: "Review it.", ForTeam: true, TeamEmail: "team@example.com"}
+	queue := &mailQueueStub{pending: []PendingEmail{report}, attempts: map[uuid.UUID]bool{}}
+	sender := &senderStub{}
+	if _, err := NewMailService(queue, sender, addressStub{}, "https://app.example.com").SendDue(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(sender.sent[0].Text, "https://app.example.com/admin/user-reports") {
+		t.Fatalf("mail = %+v", sender.sent[0])
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -27,11 +28,16 @@ var (
 	ErrInvalidDecision   = errors.New("decision must be approve or reject")
 	ErrReasonRequired    = errors.New("a rejection needs a reason of 500 characters or fewer")
 	ErrNotApproved       = errors.New("proof is not approved")
+	ErrNotRejected       = errors.New("proof is not rejected")
+	ErrNoteRequired      = errors.New("write why you are approving it, in up to 1000 characters")
+	ErrDocumentErased    = errors.New("this document was erased, so it cannot be approved")
+	ErrSuperseded        = errors.New("this listing has a newer document")
 )
 
 const (
 	maxDocumentBytes    = 15 << 20
 	maxReasonLength     = 500
+	maxOverturnNote     = 1000
 	uploadURLLifetime   = 5 * time.Minute
 	downloadURLLifetime = 5 * time.Minute
 )
@@ -214,6 +220,40 @@ func (service *ProofService) ListApproved(ctx context.Context, adminID uuid.UUID
 	}
 	items, err := service.store.ListApproved(ctx, adminID)
 	return service.withDocumentLinks(ctx, markOwnListings(items, adminID), err)
+}
+
+func (service *ProofService) ListRejected(ctx context.Context, adminID uuid.UUID) ([]ReviewItem, error) {
+	if err := service.requireAdmin(ctx, adminID); err != nil {
+		return nil, err
+	}
+	items, err := service.store.ListRejected(ctx, adminID)
+	return service.withDocumentLinks(ctx, markOwnListings(items, adminID), err)
+}
+
+func (service *ProofService) Overturn(ctx context.Context, adminID, proofID uuid.UUID, note string) error {
+	if err := service.requireAdmin(ctx, adminID); err != nil {
+		return err
+	}
+	note = strings.TrimSpace(note)
+	if note == "" || utf8.RuneCountInString(note) > maxOverturnNote {
+		return ErrNoteRequired
+	}
+	if err := service.store.Overturn(ctx, adminID, proofID, note, service.now().UTC()); err != nil {
+		return err
+	}
+	slog.Info("rejected property proof approved", "proof_id", proofID, "admin_id", adminID)
+	return nil
+}
+
+func (service *ProofService) Erase(ctx context.Context, adminID, proofID uuid.UUID) error {
+	if err := service.requireAdmin(ctx, adminID); err != nil {
+		return err
+	}
+	if err := service.store.Erase(ctx, adminID, proofID, service.now().UTC()); err != nil {
+		return err
+	}
+	slog.Info("rejected property proof erased", "proof_id", proofID, "admin_id", adminID)
+	return nil
 }
 
 func (service *ProofService) Revoke(ctx context.Context, adminID, proofID uuid.UUID, reason string) error {

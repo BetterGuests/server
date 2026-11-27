@@ -447,7 +447,223 @@ func TestAdminsGetTheInquiriesToCompareAgainst(t *testing.T) {
 	if err := store.DecideReview(f.ctx, adminID, pending[index].VerificationID, false, now); err != nil {
 		t.Fatal(err)
 	}
+	if rejected, err := store.ReviewInquiries(f.ctx, adminID, pending[index].VerificationID); err != nil || !slices.Equal(rejected, want) {
+		t.Fatalf("a rejected check stays reviewable: %+v %v", rejected, err)
+	}
+	if err := store.OverturnReview(f.ctx, adminID, pending[index].VerificationID, "Same person, checked by phone.", now); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.ReviewInquiries(f.ctx, adminID, pending[index].VerificationID); !errors.Is(err, verification.ErrReviewNotFound) {
-		t.Fatalf("a decided check has nothing to preview, got %v", err)
+		t.Fatalf("an approved check has nothing to preview, got %v", err)
+	}
+}
+
+func (f fixture) heldDuplicate(t *testing.T, adminID uuid.UUID, at time.Time) (uuid.UUID, uuid.UUID) {
+	t.Helper()
+	mark := []byte(uuid.NewString()[:32])
+	name := verification.IDName{First: "John", Last: "Smith"}
+	first, second := uuid.New(), uuid.New()
+	f.pass(t, first, name, mark, at.Add(-time.Hour))
+	copied, held := f.pass(t, second, name, mark, at)
+	if len(held) == 0 {
+		t.Fatal("the copied identity must be held")
+	}
+	pending, err := verification.NewPostgresVerificationStore(f.pool).PendingReviews(f.ctx, adminID, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := slices.IndexFunc(pending, func(review verification.PendingReview) bool { return review.InquiryID == copied })
+	if index < 0 {
+		t.Fatalf("review missing: %+v", pending)
+	}
+	return second, pending[index].VerificationID
+}
+
+func rejectedIndex(t *testing.T, f fixture, adminID, verificationID uuid.UUID) (verification.RejectedReview, bool) {
+	t.Helper()
+	rejected, err := verification.NewPostgresVerificationStore(f.pool).RejectedReviews(f.ctx, adminID, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := slices.IndexFunc(rejected, func(review verification.RejectedReview) bool { return review.VerificationID == verificationID })
+	if index < 0 {
+		return verification.RejectedReview{}, false
+	}
+	return rejected[index], true
+}
+
+func TestARejectedIDCanBeApprovedLaterWithANote(t *testing.T) {
+	f := newFixture(t)
+	adminID := f.makeAdmin(t)
+	store := verification.NewPostgresVerificationStore(f.pool)
+	now := time.Now().UTC().Truncate(time.Second)
+	accountID, verificationID := f.heldDuplicate(t, adminID, now)
+
+	if err := store.DecideReview(f.ctx, adminID, verificationID, false, now); err != nil {
+		t.Fatal(err)
+	}
+	review, found := rejectedIndex(t, f, adminID, verificationID)
+	if !found || review.Automatic || review.Erased || review.AccountID != accountID {
+		t.Fatalf("rejected = %+v, found = %v", review, found)
+	}
+	if _, err := store.RejectedReviews(f.ctx, accountID, 200); !errors.Is(err, verification.ErrNotAdmin) {
+		t.Fatalf("only admins may list rejections, got %v", err)
+	}
+	if err := store.OverturnReview(f.ctx, accountID, verificationID, "mine", now); !errors.Is(err, verification.ErrNotAdmin) {
+		t.Fatalf("a person must not approve their own check, got %v", err)
+	}
+	if err := store.OverturnReview(f.ctx, adminID, verificationID, "Called them, same person on a new phone.", now); err != nil {
+		t.Fatal(err)
+	}
+	if !f.verified(t, accountID) {
+		t.Fatal("approving the rejected check must verify the person")
+	}
+	var note string
+	if err := f.super.QueryRow(f.ctx, `SELECT overturn_note FROM app.identity_verifications WHERE id = $1`, verificationID).Scan(&note); err != nil || note == "" {
+		t.Fatalf("the note must be kept: %q %v", note, err)
+	}
+	if _, found := rejectedIndex(t, f, adminID, verificationID); found {
+		t.Fatal("an approved check must leave the Rejected tab")
+	}
+	if err := store.OverturnReview(f.ctx, adminID, verificationID, "again", now); !errors.Is(err, verification.ErrNotAwaitingReview) {
+		t.Fatalf("approving twice must fail, got %v", err)
+	}
+}
+
+func TestErasingARejectedIDKeepsTheRejectionAndBlocksApproval(t *testing.T) {
+	f := newFixture(t)
+	adminID := f.makeAdmin(t)
+	store := verification.NewPostgresVerificationStore(f.pool)
+	now := time.Now().UTC().Truncate(time.Second)
+	accountID, verificationID := f.heldDuplicate(t, adminID, now)
+
+	if err := store.DecideReview(f.ctx, adminID, verificationID, false, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EraseRejected(f.ctx, adminID, verificationID, now); err != nil {
+		t.Fatal(err)
+	}
+	review, found := rejectedIndex(t, f, adminID, verificationID)
+	if !found || !review.Erased || review.NewName != "" {
+		t.Fatalf("an erased check stays listed without its data: %+v", review)
+	}
+	var names, prints int
+	if err := f.super.QueryRow(f.ctx, `SELECT (SELECT count(*) FROM app.identity_names WHERE verification_id = $1), (SELECT count(*) FROM app.identity_fingerprints WHERE verification_id = $1)`, verificationID).Scan(&names, &prints); err != nil || names != 0 || prints != 0 {
+		t.Fatalf("names = %d, fingerprints = %d, err = %v", names, prints, err)
+	}
+	if err := store.OverturnReview(f.ctx, adminID, verificationID, "too late", now); !errors.Is(err, verification.ErrIDErased) {
+		t.Fatalf("an erased check cannot be approved, got %v", err)
+	}
+	if f.verified(t, accountID) {
+		t.Fatal("erasing must not verify anyone")
+	}
+	if _, err := store.ReviewInquiries(f.ctx, adminID, verificationID); !errors.Is(err, verification.ErrReviewNotFound) {
+		t.Fatalf("an erased check has nothing to preview, got %v", err)
+	}
+	due, err := store.ListDueForRedaction(f.ctx, 30, 1095, 500)
+	if err != nil || !slices.ContainsFunc(due, func(item verification.DueVerification) bool { return item.ID == verificationID }) {
+		t.Fatalf("Persona must be asked to delete it: %v", err)
+	}
+}
+
+func TestAnOldRejectionCannotBeApprovedAfterANewerCheck(t *testing.T) {
+	f := newFixture(t)
+	adminID := f.makeAdmin(t)
+	store := verification.NewPostgresVerificationStore(f.pool)
+	now := time.Now().UTC().Truncate(time.Second)
+	accountID, verificationID := f.heldDuplicate(t, adminID, now.Add(-time.Hour))
+
+	if err := store.DecideReview(f.ctx, adminID, verificationID, false, now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	f.passJudged(t, accountID, verification.IDName{First: "John", Last: "Smith"}, nil, now)
+	if err := store.OverturnReview(f.ctx, adminID, verificationID, "late", now); !errors.Is(err, verification.ErrSuperseded) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func (f fixture) rejected(t *testing.T) (listings.Listing, Proof, uuid.UUID) {
+	t.Helper()
+	listing := f.draft(t, uuid.New())
+	adminID := f.makeAdmin(t)
+	proof := f.submit(t, listing)
+	if err := f.proofs.Decide(f.ctx, adminID, proof.ID, Reject, "The address does not match the listing."); err != nil {
+		t.Fatal(err)
+	}
+	return listing, proof, adminID
+}
+
+func dueFile(t *testing.T, f fixture, proofID uuid.UUID) bool {
+	t.Helper()
+	due, err := NewPostgresProofStore(f.pool).FilesDueForDeletion(f.ctx, 500)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return slices.ContainsFunc(due, func(file DueFile) bool { return file.ProofID == proofID })
+}
+
+func TestARejectedDocumentIsKeptThirtyDaysUnlessErased(t *testing.T) {
+	f := newFixture(t)
+	_, proof, adminID := f.rejected(t)
+
+	if dueFile(t, f, proof.ID) {
+		t.Fatal("a fresh rejection must keep its document")
+	}
+	items, err := f.proofs.ListRejected(f.ctx, adminID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := slices.IndexFunc(items, func(item ReviewItem) bool { return item.ID == proof.ID })
+	if index < 0 || items[index].DocumentURL == "" || items[index].Erasing || items[index].Withdrawn {
+		t.Fatalf("rejected list = %+v", items)
+	}
+	if err := f.proofs.Erase(f.ctx, adminID, proof.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !dueFile(t, f, proof.ID) {
+		t.Fatal("erasing must queue the document for deletion")
+	}
+	if err := f.proofs.Overturn(f.ctx, adminID, proof.ID, "Looked again"); !errors.Is(err, ErrDocumentErased) {
+		t.Fatalf("an erased document cannot be approved, got %v", err)
+	}
+	if _, err := f.super.Exec(f.ctx, `UPDATE app.property_proofs SET file_erase_requested_at = NULL, reviewed_at = now() - interval '31 days' WHERE id = $1`, proof.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !dueFile(t, f, proof.ID) {
+		t.Fatal("a rejection older than 30 days must lose its document")
+	}
+}
+
+func TestARejectedDocumentCanBeApprovedLaterWithANote(t *testing.T) {
+	f := newFixture(t)
+	listing, proof, adminID := f.rejected(t)
+
+	if err := f.proofs.Overturn(f.ctx, adminID, proof.ID, "  "); !errors.Is(err, ErrNoteRequired) {
+		t.Fatalf("a note is required, got %v", err)
+	}
+	if err := f.proofs.Overturn(f.ctx, adminID, proof.ID, "The unit number was on page two."); err != nil {
+		t.Fatal(err)
+	}
+	latest, _, err := NewPostgresProofStore(f.pool).Latest(f.ctx, listing.HostID, listing.ID)
+	if err != nil || latest.Status != Approved || latest.RejectionReason != "" {
+		t.Fatalf("latest = %+v, err = %v", latest, err)
+	}
+	approved, err := f.proofs.ListApproved(f.ctx, adminID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := slices.IndexFunc(approved, func(item ReviewItem) bool { return item.ID == proof.ID })
+	if index < 0 || approved[index].OverturnNote != "The unit number was on page two." {
+		t.Fatalf("approved = %+v", approved)
+	}
+}
+
+func TestAnOldRejectedDocumentCannotBeApprovedOverANewerOne(t *testing.T) {
+	f := newFixture(t)
+	listing, proof, adminID := f.rejected(t)
+
+	f.submit(t, listing)
+	if err := f.proofs.Overturn(f.ctx, adminID, proof.ID, "late"); !errors.Is(err, ErrSuperseded) {
+		t.Fatalf("got %v", err)
 	}
 }

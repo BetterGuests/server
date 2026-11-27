@@ -74,6 +74,9 @@ type ReviewItem struct {
 	CoverURL     string        `json:"cover_photo_url,omitempty"`
 	OwnListing   bool          `json:"own_listing"`
 	Scan         *DocumentScan `json:"scan,omitempty"`
+	Withdrawn    bool          `json:"withdrawn"`
+	Erasing      bool          `json:"erasing"`
+	OverturnNote string        `json:"overturn_note,omitempty"`
 }
 
 type DocumentScan struct {
@@ -112,7 +115,10 @@ type Store interface {
 	ListSubmitted(ctx context.Context, adminID uuid.UUID) ([]ReviewItem, error)
 	Decide(ctx context.Context, adminID, proofID uuid.UUID, status Status, reason string, at time.Time) error
 	ListApproved(ctx context.Context, adminID uuid.UUID) ([]ReviewItem, error)
+	ListRejected(ctx context.Context, adminID uuid.UUID) ([]ReviewItem, error)
 	Revoke(ctx context.Context, adminID, proofID uuid.UUID, reason string, at time.Time) error
+	Overturn(ctx context.Context, adminID, proofID uuid.UUID, note string, at time.Time) error
+	Erase(ctx context.Context, adminID, proofID uuid.UUID, at time.Time) error
 }
 
 type UploadRequester interface {
@@ -135,7 +141,10 @@ type ReviewQueue interface {
 	ListSubmitted(ctx context.Context, adminID uuid.UUID) ([]ReviewItem, error)
 	Decide(ctx context.Context, adminID, proofID uuid.UUID, decision Decision, reason string) error
 	ListApproved(ctx context.Context, adminID uuid.UUID) ([]ReviewItem, error)
+	ListRejected(ctx context.Context, adminID uuid.UUID) ([]ReviewItem, error)
 	Revoke(ctx context.Context, adminID, proofID uuid.UUID, reason string) error
+	Overturn(ctx context.Context, adminID, proofID uuid.UUID, note string) error
+	Erase(ctx context.Context, adminID, proofID uuid.UUID) error
 }
 
 type DueFile struct {
