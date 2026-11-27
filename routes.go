@@ -17,6 +17,7 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/nearby"
 	"github.com/BetterGuests/BetterGuests-Server/internal/notifications"
 	"github.com/BetterGuests/BetterGuests-Server/internal/payments"
+	"github.com/BetterGuests/BetterGuests-Server/internal/pms"
 	"github.com/BetterGuests/BetterGuests-Server/internal/profiles"
 	"github.com/BetterGuests/BetterGuests-Server/internal/proofs"
 	"github.com/BetterGuests/BetterGuests-Server/internal/realtime"
@@ -59,6 +60,7 @@ type routeDeps struct {
 	teamEvents    *teamevents.HTTPHandler
 	reports       *reports.HTTPHandler
 	bans          *bans.HTTPHandler
+	pms           *pms.HTTPHandler
 }
 
 type backgroundJob interface {
@@ -158,6 +160,10 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.HandleFunc("POST /api/v1/compliance/age", deps.compliance.ConfirmAge)
 	api.HandleFunc("POST /api/v1/compliance/consents", deps.compliance.GrantConsent)
 	api.Handle("POST /api/v1/listings", perAccount(listingCreateBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.CreateListing))))
+	if deps.pms != nil {
+		api.Handle("POST /api/v1/hosting/pms/preview", perAccount(pmsPreviewBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.pms.Preview))))
+		api.Handle("POST /api/v1/hosting/pms/import", perAccount(pmsImportBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.pms.Import))))
+	}
 	api.Handle("POST /api/v1/listings/{listing_id}/publish", perAccount(listingPublishBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.PublishListing))))
 	api.Handle("POST /api/v1/listings/{listing_id}/proof/uploads", perAccount(proofUploadBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.proofs.RequestUpload))))
 	api.Handle("POST /api/v1/listings/{listing_id}/proof", perAccount(proofUploadBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.proofs.Submit))))

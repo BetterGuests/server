@@ -223,6 +223,8 @@ func invalidListing(format string, values ...any) error {
 func validListingType(value ListingType) bool {
 	return value == EntirePlace || value == PrivateRoom || value == SharedRoom
 }
+func IsPropertyType(value PropertyType) bool { return validPropertyType(value) }
+
 func validPropertyType(value PropertyType) bool {
 	return slices.Contains(
 		[]PropertyType{House, Apartment, Condo, Townhouse, Villa, Cabin, Cottage, Unique},
@@ -616,6 +618,28 @@ func (service *ListingService) AddPhoto(ctx context.Context, hostID, listingID u
 		})
 	}
 	return service.Setup(ctx, hostID, listingID)
+}
+
+func (service *ListingService) ImportPhoto(ctx context.Context, hostID, listingID uuid.UUID, contentType string, data []byte) error {
+	if service.objects == nil {
+		return ErrUploadsDisabled
+	}
+	extension, allowed := allowedPhotoTypes[contentType]
+	if !allowed || len(data) == 0 || len(data) > maxPhotoBytes {
+		return ErrPhotoRejected
+	}
+	if _, err := service.media.Setup(ctx, hostID.String(), listingID); err != nil {
+		return err
+	}
+	key := photoKeyPrefix(listingID) + service.newID().String() + extension
+	if err := service.objects.Write(ctx, key, contentType, data); err != nil {
+		return fmt.Errorf("store imported photo: %w", err)
+	}
+	if _, err := service.AddPhoto(ctx, hostID, listingID, key, ""); err != nil {
+		service.discard(ctx, key)
+		return err
+	}
+	return nil
 }
 
 func (service *ListingService) ReorderPhotos(ctx context.Context, hostID, listingID uuid.UUID, photoIDs []uuid.UUID) (Setup, error) {

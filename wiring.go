@@ -25,6 +25,7 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/nearby"
 	"github.com/BetterGuests/BetterGuests-Server/internal/notifications"
 	"github.com/BetterGuests/BetterGuests-Server/internal/payments"
+	"github.com/BetterGuests/BetterGuests-Server/internal/pms"
 	"github.com/BetterGuests/BetterGuests-Server/internal/profiles"
 	"github.com/BetterGuests/BetterGuests-Server/internal/proofs"
 	"github.com/BetterGuests/BetterGuests-Server/internal/proofscan"
@@ -197,6 +198,12 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		slog.Warn("listing photos are not screened: ANTHROPIC_API_KEY is not set")
 	}
 
+	importService := pms.NewImportService(map[pms.ProviderName]pms.Source{
+		pms.Lodgify:  pms.NewLodgifySource(),
+		pms.Guesty:   pms.NewGuestySource(),
+		pms.Hostaway: pms.NewHostawaySource(),
+	}, listingStore, listingService, pms.NewWebPhotoFetcher())
+
 	proofStore := proofs.NewPostgresProofStore(pool)
 	proofService := proofs.NewProofService(proofStore, proofObjectsFrom(objectStore))
 	userDirectory, err := usermap.NewClerkDirectory(clerkConfig.SecretKey)
@@ -245,6 +252,7 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		userMap:    usermap.NewHTTPHandler(usermap.NewUserMapService(userDirectory, proofService)),
 		teamEvents: teamevents.NewHTTPHandler(teamevents.NewTeamEventsService(teamevents.NewPostgresTeamEventsStore(pool), proofService)),
 		reports:    reports.NewHTTPHandler(reportService, reportService),
+		pms:        pms.NewHTTPHandler(importService),
 		bans:       bans.NewHTTPHandler(bans.NewBanService(banStore, proofService, realtimeService)),
 	}, nil
 }
