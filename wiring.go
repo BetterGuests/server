@@ -238,7 +238,10 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 			WithReviews(verification.NewReviewService(verificationStore).WithInquiries(verificationStore, personaClient)),
 		payments: payments.NewHTTPHandler(paymentService, paymentService).WithCards(paymentService),
 		payouts: settlements.NewHTTPHandler(payoutService, payoutService).
-			WithBlockedReviewer(settlements.NewSettlementReviewService(settlements.NewPostgresSettlementStore(pool))),
+			WithBlockedReviewer(settlements.NewSettlementReviewService(
+				settlements.NewPostgresSettlementStore(pool),
+				settlements.NewStripeGateway(paymentConfig.SecretKey),
+			)),
 		compliance:   compliance.NewHTTPHandler(complianceService, complianceService, complianceService),
 		profiles:     profiles.NewHTTPHandler(profileService, profileService, profileService, profileService),
 		waitlist:     waitlist.NewHTTPHandler(waitlist.NewWaitlistService(waitlist.NewPostgresWaitlistStore(pool))),

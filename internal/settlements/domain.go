@@ -111,13 +111,42 @@ type BlockedSettlement struct {
 	CanRetry      bool      `json:"can_retry"`
 }
 
+type PaymentDispute struct {
+	ID              string `json:"id"`
+	ListingTitle    string `json:"listing_title"`
+	HostName        string `json:"host_name"`
+	Status          string `json:"status"`
+	Reason          string `json:"reason"`
+	AmountCents     int    `json:"amount_cents"`
+	Currency        string `json:"currency"`
+	TransferID      string `json:"-"`
+	PaidOutCents    int    `json:"paid_out_cents"`
+	ReversibleCents int    `json:"reversible_cents"`
+	ReversedCents   int    `json:"reversed_cents"`
+	CanReverse      bool   `json:"can_reverse"`
+}
+
+type ReversalRequest struct {
+	DisputeID   string
+	TransferID  string
+	AmountCents int
+}
+
+type Reverser interface {
+	Reverse(ctx context.Context, request ReversalRequest) (string, error)
+}
+
 type ReviewStore interface {
+	ListDisputes(ctx context.Context, adminID uuid.UUID, onlyDispute string, limit int) ([]PaymentDispute, error)
+	RecordReversal(ctx context.Context, adminID uuid.UUID, disputeID, reversalID string, cents int) (bool, error)
 	IsAdmin(ctx context.Context, accountID uuid.UUID) (bool, error)
 	ListBlocked(ctx context.Context, adminID uuid.UUID, limit int) ([]BlockedSettlement, error)
 	Retry(ctx context.Context, adminID, bookingID uuid.UUID) (bool, error)
 }
 
 type BlockedReviewer interface {
+	Disputes(ctx context.Context, adminID uuid.UUID) ([]PaymentDispute, error)
+	Reverse(ctx context.Context, adminID uuid.UUID, disputeID string) error
 	Blocked(ctx context.Context, adminID uuid.UUID) ([]BlockedSettlement, error)
 	Retry(ctx context.Context, adminID, bookingID uuid.UUID) error
 }

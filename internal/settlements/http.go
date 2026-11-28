@@ -57,6 +57,33 @@ func (handler *HTTPHandler) RetryBlocked(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]string{"status": string(StatusProcessing)})
 }
 
+func (handler *HTTPHandler) ListDisputes(w http.ResponseWriter, r *http.Request) {
+	adminID, ok := accounts.UserID(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
+		return
+	}
+	disputes, err := handler.blocked.Disputes(r.Context(), adminID)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string][]PaymentDispute{"disputes": disputes})
+}
+
+func (handler *HTTPHandler) ReversePayout(w http.ResponseWriter, r *http.Request) {
+	adminID, ok := accounts.UserID(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
+		return
+	}
+	if err := handler.blocked.Reverse(r.Context(), adminID, r.PathValue("dispute_id")); err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "reversed"})
+}
+
 func (handler *HTTPHandler) GetPayouts(w http.ResponseWriter, r *http.Request) {
 	hostID, ok := accounts.UserID(r.Context())
 	if !ok {
@@ -94,7 +121,7 @@ func writeServiceError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrNotAdmin):
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
-	case errors.Is(err, ErrNotBlocked), errors.Is(err, ErrOwnBooking):
+	case errors.Is(err, ErrNotBlocked), errors.Is(err, ErrOwnBooking), errors.Is(err, ErrCannotReverse):
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 		return
 	}

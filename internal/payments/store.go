@@ -79,6 +79,18 @@ func (store *PostgresPaymentStore) CreatePayment(ctx context.Context, payment Pa
 	})
 }
 
+func (store *PostgresPaymentStore) RecordDispute(ctx context.Context, dispute Dispute, occurredAt time.Time) (bool, error) {
+	var matched bool
+	err := store.DB.QueryRow(ctx,
+		`SELECT app.record_payment_dispute($1, $2, $3, $4, $5, $6)`,
+		dispute.ID, dispute.IntentID, dispute.Status, dispute.AmountCents, dispute.Reason, occurredAt,
+	).Scan(&matched)
+	if err != nil {
+		return false, fmt.Errorf("record dispute: %w", err)
+	}
+	return matched, nil
+}
+
 func (store *PostgresPaymentStore) ApplyOutcome(ctx context.Context, guestID uuid.UUID, intentID string, status Status, occurredAt time.Time) error {
 	return db.WithUserTx(ctx, store.DB, guestID.String(), func(tx pgx.Tx) error {
 		var bookingID uuid.UUID

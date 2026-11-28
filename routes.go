@@ -220,6 +220,8 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.Handle("POST /api/v1/reports", perAccountFunc(userReportBudget, deps.reports.File))
 	api.HandleFunc("GET /api/v1/admin/settlements/blocked", deps.payouts.ListBlocked)
 	api.HandleFunc("POST /api/v1/admin/settlements/{booking_id}/retry", deps.payouts.RetryBlocked)
+	api.HandleFunc("GET /api/v1/admin/payment-disputes", deps.payouts.ListDisputes)
+	api.HandleFunc("POST /api/v1/admin/payment-disputes/{dispute_id}/reversal", deps.payouts.ReversePayout)
 	api.HandleFunc("GET /api/v1/admin/user-reports", deps.reports.List)
 	api.HandleFunc("POST /api/v1/admin/user-reports/{report_id}/decision", deps.reports.Resolve)
 	api.HandleFunc("GET /api/v1/notifications", deps.inbox.List)

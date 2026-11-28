@@ -14,12 +14,14 @@ import (
 	"github.com/stripe/stripe-go/v82/rawrequest"
 	"github.com/stripe/stripe-go/v82/refund"
 	"github.com/stripe/stripe-go/v82/transfer"
+	"github.com/stripe/stripe-go/v82/transferreversal"
 )
 
 const (
 	accountsAPIVersion = "2026-09-30.endive"
 	accountsPath       = "/v2/core/accounts"
 	accountLinksPath   = "/v2/core/account_links"
+	metadataDisputeID  = "dispute_id"
 	capabilityActive   = "active"
 	hostCountry        = "us"
 	platformWebsite    = "https://better-guests.com"
@@ -168,6 +170,38 @@ func (gateway *StripeGateway) Transfer(ctx context.Context, request TransferRequ
 		return "", fmt.Errorf("stripe transfer: %w", err)
 	}
 	return created.ID, nil
+}
+
+func (gateway *StripeGateway) Reverse(ctx context.Context, request ReversalRequest) (string, error) {
+	client := transferreversal.Client{B: stripe.GetBackend(stripe.APIBackend), Key: gateway.secretKey}
+	list := &stripe.TransferReversalListParams{ID: stripe.String(request.TransferID)}
+	list.Context = ctx
+	found := client.List(list)
+	for found.Next() {
+		if item := found.TransferReversal(); item.Metadata[metadataDisputeID] == request.DisputeID {
+			return item.ID, nil
+		}
+	}
+	if err := found.Err(); err != nil {
+		return "", fmt.Errorf("stripe list reversals: %w", err)
+	}
+	params := reversalParams(request)
+	params.Context = ctx
+	created, err := client.New(params)
+	if err != nil {
+		return "", fmt.Errorf("stripe reverse transfer: %w", err)
+	}
+	return created.ID, nil
+}
+
+func reversalParams(request ReversalRequest) *stripe.TransferReversalParams {
+	params := &stripe.TransferReversalParams{
+		ID:     stripe.String(request.TransferID),
+		Amount: stripe.Int64(int64(request.AmountCents)),
+	}
+	params.AddMetadata(metadataDisputeID, request.DisputeID)
+	params.SetIdempotencyKey("settlement-reversal-" + request.DisputeID)
+	return params
 }
 
 func recipientAccountBody(hostID uuid.UUID, contactEmail string) map[string]any {

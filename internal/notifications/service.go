@@ -239,6 +239,8 @@ func emailPath(item PendingEmail) string {
 		return reportsPath
 	case kindUserReportFiled:
 		return userReportsPath
+	case kindPaymentDisputed:
+		return payoutsPath
 	case kindListingPaused, kindListingUnpaused:
 		if item.ForTeam {
 			return adminListingsPath

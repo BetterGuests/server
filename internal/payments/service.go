@@ -258,6 +258,9 @@ func (service *PaymentService) HandleWebhook(ctx context.Context, signature stri
 	if err != nil {
 		return err
 	}
+	if isDisputeEvent(event.Type) {
+		return service.recordDispute(ctx, event)
+	}
 	status, relevant := statusForEvent(event.Type)
 	if !relevant {
 		return nil
@@ -279,6 +282,28 @@ func (service *PaymentService) HandleWebhook(ctx context.Context, signature stri
 	}
 	service.announce(ctx, event, status)
 	return nil
+}
+
+func (service *PaymentService) recordDispute(ctx context.Context, event Event) error {
+	if event.Dispute == nil || event.Dispute.ID == "" {
+		return ErrInvalidPayload
+	}
+	if event.Dispute.IntentID == "" {
+		slog.Warn("Ignoring a Stripe dispute without a payment intent", "event_id", event.ID, "dispute_id", event.Dispute.ID)
+		return nil
+	}
+	matched, err := service.store.RecordDispute(ctx, *event.Dispute, event.OccurredAt)
+	if err != nil {
+		return err
+	}
+	if !matched {
+		slog.Error("Stripe dispute matches no recorded payment", "event_id", event.ID, "dispute_id", event.Dispute.ID, "intent_id", event.Dispute.IntentID)
+	}
+	return nil
+}
+
+func isDisputeEvent(eventType string) bool {
+	return eventType == EventDisputeCreated || eventType == EventDisputeUpdated || eventType == EventDisputeClosed
 }
 
 func reportUnmatched(ctx context.Context, event Event, status Status) {

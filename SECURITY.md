@@ -224,6 +224,11 @@ equally deep. A few are worth reading before you trust them blindly:
   an admin who is neither its host nor its guest. The next run reads the charge
   again. A dispute stops it unless every dispute on the payment was won or closed
   as an inquiry.
+- Dispute events are accepted only from the signed Stripe webhook. Admins are
+  emailed once per booking. Nothing takes money back automatically: an admin who
+  is neither host nor guest reverses a sent payout, for no more than the disputed
+  amount or the payout, once per dispute. A won dispute or closed inquiry cannot
+  be reversed.
 
 ## Cancellations and refunds
 

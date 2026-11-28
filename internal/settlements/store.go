@@ -169,6 +169,45 @@ func (store *PostgresSettlementStore) Retry(ctx context.Context, adminID, bookin
 	return released, nil
 }
 
+func (store *PostgresSettlementStore) ListDisputes(ctx context.Context, adminID uuid.UUID, onlyDispute string, limit int) ([]PaymentDispute, error) {
+	disputes := []PaymentDispute{}
+	err := db.WithUserTx(ctx, store.DB, adminID.String(), func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx,
+			`SELECT dispute_id, listing_title, host_name, status, reason, amount_cents, currency, transfer_id,
+			        paid_out_cents, reversible_cents, reversed_cents, can_reverse
+			 FROM app.team_payment_disputes($1, $2)`, onlyDispute, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item PaymentDispute
+			if err := rows.Scan(&item.ID, &item.ListingTitle, &item.HostName, &item.Status, &item.Reason,
+				&item.AmountCents, &item.Currency, &item.TransferID, &item.PaidOutCents, &item.ReversibleCents,
+				&item.ReversedCents, &item.CanReverse); err != nil {
+				return err
+			}
+			disputes = append(disputes, item)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list payment disputes: %w", err)
+	}
+	return disputes, nil
+}
+
+func (store *PostgresSettlementStore) RecordReversal(ctx context.Context, adminID uuid.UUID, disputeID, reversalID string, cents int) (bool, error) {
+	var recorded bool
+	err := db.WithUserTx(ctx, store.DB, adminID.String(), func(tx pgx.Tx) error {
+		return tx.QueryRow(ctx, `SELECT app.record_dispute_reversal($1, $2, $3)`, disputeID, reversalID, cents).Scan(&recorded)
+	})
+	if err != nil {
+		return false, fmt.Errorf("record reversal: %w", err)
+	}
+	return recorded, nil
+}
+
 func textOrEmpty(value *string) string {
 	if value == nil {
 		return ""

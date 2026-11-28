@@ -38,6 +38,7 @@ var (
 	ErrNotAdmin           = errors.New("not found")
 	ErrNotBlocked         = errors.New("this payout is not blocked")
 	ErrOwnBooking         = errors.New("someone else on the team has to retry a payout for your own booking")
+	ErrCannotReverse      = errors.New("this payout cannot be taken back")
 )
 
 type SettlementService struct {
@@ -327,10 +328,53 @@ func (service *PayoutService) StartOnboarding(ctx context.Context, hostID uuid.U
 	return link, nil
 }
 
-type SettlementReviewService struct{ store ReviewStore }
+type SettlementReviewService struct {
+	store    ReviewStore
+	reverser Reverser
+}
 
-func NewSettlementReviewService(store ReviewStore) *SettlementReviewService {
-	return &SettlementReviewService{store: store}
+func NewSettlementReviewService(store ReviewStore, reverser Reverser) *SettlementReviewService {
+	return &SettlementReviewService{store: store, reverser: reverser}
+}
+
+func (service *SettlementReviewService) Disputes(ctx context.Context, adminID uuid.UUID) ([]PaymentDispute, error) {
+	if err := service.requireAdmin(ctx, adminID); err != nil {
+		return nil, err
+	}
+	return service.store.ListDisputes(ctx, adminID, "", maxListedBlocked)
+}
+
+func (service *SettlementReviewService) Reverse(ctx context.Context, adminID uuid.UUID, disputeID string) error {
+	if err := service.requireAdmin(ctx, adminID); err != nil {
+		return err
+	}
+	if disputeID == "" {
+		return ErrCannotReverse
+	}
+	found, err := service.store.ListDisputes(ctx, adminID, disputeID, 1)
+	if err != nil {
+		return err
+	}
+	if len(found) != 1 || !found[0].CanReverse {
+		return ErrCannotReverse
+	}
+	reversalID, err := service.reverser.Reverse(ctx, ReversalRequest{
+		DisputeID:   disputeID,
+		TransferID:  found[0].TransferID,
+		AmountCents: found[0].ReversibleCents,
+	})
+	if err != nil {
+		return fmt.Errorf("reverse transfer: %w", err)
+	}
+	recorded, err := service.store.RecordReversal(ctx, adminID, disputeID, reversalID, found[0].ReversibleCents)
+	if err != nil {
+		return err
+	}
+	if !recorded {
+		return ErrCannotReverse
+	}
+	slog.Info("Disputed payout taken back", "dispute_id", disputeID, "reversal_id", reversalID, "admin_id", adminID)
+	return nil
 }
 
 func (service *SettlementReviewService) Blocked(ctx context.Context, adminID uuid.UUID) ([]BlockedSettlement, error) {

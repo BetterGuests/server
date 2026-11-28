@@ -10,6 +10,7 @@ import (
 )
 
 type fakeStore struct {
+	disputes   []Dispute
 	quote      Quote
 	quoteErr   error
 	existing   Payment
@@ -25,6 +26,11 @@ type appliedOutcome struct {
 	guestID  uuid.UUID
 	intentID string
 	status   Status
+}
+
+func (store *fakeStore) RecordDispute(_ context.Context, dispute Dispute, _ time.Time) (bool, error) {
+	store.disputes = append(store.disputes, dispute)
+	return true, nil
 }
 
 func (store *fakeStore) QuoteBooking(context.Context, uuid.UUID, uuid.UUID) (Quote, error) {
@@ -248,5 +254,36 @@ func TestConfigFromLookupRequiresBothSecrets(t *testing.T) {
 	config, err := configFromLookup(func(key string) string { return values[key] })
 	if err != nil || config.Currency != "usd" {
 		t.Fatalf("config = %+v, err = %v", config, err)
+	}
+}
+
+func TestHandleWebhookRecordsEveryDisputeEvent(t *testing.T) {
+	for _, eventType := range []string{EventDisputeCreated, EventDisputeUpdated, EventDisputeClosed} {
+		store := &fakeStore{}
+		dispute := Dispute{ID: "dp_1", IntentID: "pi_1", Status: "needs_response", Reason: "fraudulent", AmountCents: 4000}
+		parser := fakeParser{event: Event{Type: eventType, Dispute: &dispute}}
+		if err := newService(store, &fakeIntents{}, parser).HandleWebhook(context.Background(), "sig", []byte("{}")); err != nil {
+			t.Fatalf("%s: %v", eventType, err)
+		}
+		if len(store.disputes) != 1 || store.disputes[0] != dispute || len(store.applied) != 0 {
+			t.Fatalf("%s: disputes = %+v, applied = %+v", eventType, store.disputes, store.applied)
+		}
+	}
+}
+
+func TestHandleWebhookRefusesADisputeWithoutAPayment(t *testing.T) {
+	for name, dispute := range map[string]*Dispute{"missing": nil, "no intent": {ID: "dp_1"}, "no id": {IntentID: "pi_1"}} {
+		store := &fakeStore{}
+		parser := fakeParser{event: Event{Type: EventDisputeCreated, Dispute: dispute}}
+		err := newService(store, &fakeIntents{}, parser).HandleWebhook(context.Background(), "sig", []byte("{}"))
+		if name == "no intent" {
+			if err != nil || len(store.disputes) != 0 {
+				t.Fatalf("%s: error = %v, disputes = %+v", name, err, store.disputes)
+			}
+			continue
+		}
+		if !errors.Is(err, ErrInvalidPayload) {
+			t.Fatalf("%s: error = %v", name, err)
+		}
 	}
 }

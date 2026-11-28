@@ -232,6 +232,17 @@ func (gateway *StripeGateway) ParseEvent(body []byte, signature string) (Event, 
 	}
 
 	parsed := Event{ID: event.ID, Type: string(event.Type), OccurredAt: time.Unix(event.Created, 0).UTC()}
+	if isDisputeEvent(parsed.Type) {
+		var dispute stripe.Dispute
+		if err := json.Unmarshal(event.Data.Raw, &dispute); err != nil {
+			return Event{}, errors.Join(ErrInvalidPayload, err)
+		}
+		parsed.Dispute = &Dispute{ID: dispute.ID, Status: string(dispute.Status), Reason: string(dispute.Reason), AmountCents: int(dispute.Amount)}
+		if dispute.PaymentIntent != nil {
+			parsed.Dispute.IntentID = dispute.PaymentIntent.ID
+		}
+		return parsed, nil
+	}
 	if _, relevant := statusForEvent(parsed.Type); !relevant {
 		return parsed, nil
 	}

@@ -65,6 +65,8 @@ const (
 	emailBatchSize       = 50
 	reportsPath          = "/admin/stay-reports"
 	userReportsPath      = "/admin/user-reports"
+	payoutsPath          = "/admin/payouts"
+	kindPaymentDisputed  = "payment_disputed"
 	adminListingsPath    = "/admin/listings"
 	hostingPath          = "/hosting"
 	verifyPath           = "/verify"

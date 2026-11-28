@@ -22,6 +22,7 @@ type finishedStay struct {
 	admin                                   *pgx.Conn
 	store                                   *PostgresSettlementStore
 	review                                  *SettlementReviewService
+	reverser                                *reversals
 	host, guest, team, listingID, bookingID uuid.UUID
 }
 
@@ -44,8 +45,9 @@ func newFinishedStay(t *testing.T) *finishedStay {
 	t.Cleanup(func() { _ = admin.Close(context.Background()) })
 
 	store := NewPostgresSettlementStore(pool)
+	reverser := &reversals{}
 	stay := &finishedStay{
-		t: t, ctx: ctx, admin: admin, store: store, review: NewSettlementReviewService(store),
+		t: t, ctx: ctx, admin: admin, store: store, review: NewSettlementReviewService(store, reverser), reverser: reverser,
 		host: uuid.New(), guest: uuid.New(), team: uuid.New(), bookingID: uuid.New(),
 	}
 	dbtest.SignUp(t, ctx, pool, stay.host, stay.guest, stay.team)

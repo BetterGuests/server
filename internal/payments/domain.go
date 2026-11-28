@@ -22,6 +22,10 @@ const (
 	EventSucceeded  = "payment_intent.succeeded"
 	EventFailed     = "payment_intent.payment_failed"
 	EventCanceled   = "payment_intent.canceled"
+
+	EventDisputeCreated = "charge.dispute.created"
+	EventDisputeUpdated = "charge.dispute.updated"
+	EventDisputeClosed  = "charge.dispute.closed"
 )
 
 const (
@@ -89,6 +93,15 @@ type Event struct {
 	BookingID  uuid.UUID
 	GuestID    uuid.UUID
 	OccurredAt time.Time
+	Dispute    *Dispute
+}
+
+type Dispute struct {
+	ID          string
+	IntentID    string
+	Status      string
+	Reason      string
+	AmountCents int
 }
 
 type IntentCreator interface {
@@ -105,6 +118,7 @@ type Store interface {
 	CreatePayment(ctx context.Context, payment Payment) error
 	ApplyOutcome(ctx context.Context, guestID uuid.UUID, intentID string, status Status, occurredAt time.Time) error
 	HoldForBooking(ctx context.Context, actorID, bookingID uuid.UUID) (PaymentHold, bool, error)
+	RecordDispute(ctx context.Context, dispute Dispute, occurredAt time.Time) (bool, error)
 }
 
 type PaymentHold struct {
