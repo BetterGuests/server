@@ -144,10 +144,12 @@ func (store *PostgresBookingStore) Decide(ctx context.Context, hostID, bookingID
 			 WHERE b.id = $1 AND l.id = b.listing_id AND l.host_id = $2 AND b.status = 'requested'`,
 			bookingID, hostID, string(next), decidedAt)
 		var pgError *pgconn.PgError
-		if errors.As(err, &pgError) && pgError.Code == restrictViolationCode {
+		switch {
+		case errors.As(err, &pgError) && pgError.Code == restrictViolationCode:
 			return ErrListingPaused
-		}
-		if err != nil {
+		case errors.As(err, &pgError) && pgError.Code == exclusionViolationCode:
+			return ErrBookingOverlaps
+		case err != nil:
 			return fmt.Errorf("decide booking: %w", err)
 		}
 		if tag.RowsAffected() == 1 {

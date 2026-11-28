@@ -67,6 +67,7 @@ func run() error {
 	go superviseJob(jobs, "verification pauses", pauses.Run)
 	go superviseJob(jobs, "settlement", settlement.Run)
 	go superviseJob(jobs, "trip updates", deps.tripUpdates.Run)
+	go superviseJob(jobs, "calendar sync", deps.calendarSync.Run)
 
 	server, err := createServer(routes(deps))
 	if err != nil {

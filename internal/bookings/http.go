@@ -228,7 +228,7 @@ func writeServiceError(w http.ResponseWriter, operation string, err error) {
 		writeBookingError(w, http.StatusNotFound, "booking not found")
 	case errors.Is(err, ErrHostIDRequired):
 		writeBookingJSON(w, http.StatusForbidden, map[string]string{"error": err.Error(), "code": VerificationRequiredCode})
-	case errors.Is(err, ErrNotAwaitingApproval), errors.Is(err, ErrNotCancellable), errors.Is(err, ErrPaymentNotAuthorized), errors.Is(err, ErrStayAlreadyStarted), errors.Is(err, ErrGuestBanned), errors.Is(err, ErrListingPaused):
+	case errors.Is(err, ErrNotAwaitingApproval), errors.Is(err, ErrNotCancellable), errors.Is(err, ErrPaymentNotAuthorized), errors.Is(err, ErrStayAlreadyStarted), errors.Is(err, ErrGuestBanned), errors.Is(err, ErrListingPaused), errors.Is(err, ErrBookingOverlaps):
 		writeBookingError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, ErrCaptureFailed), errors.Is(err, ErrReleaseFailed):
 		writeBookingError(w, http.StatusBadGateway, err.Error())

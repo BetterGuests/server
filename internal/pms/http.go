@@ -15,6 +15,58 @@ const maxRequestBytes = 32 << 10
 
 type HTTPHandler struct {
 	importer Importer
+	signIns  SignIns
+}
+
+func (handler *HTTPHandler) WithSignIns(signIns SignIns) *HTTPHandler {
+	handler.signIns = signIns
+	return handler
+}
+
+type authorizeRequest struct {
+	Provider ProviderName `json:"provider"`
+}
+
+type signInRequest struct {
+	Provider ProviderName `json:"provider"`
+	Code     string       `json:"code"`
+	State    string       `json:"state"`
+}
+
+func (handler *HTTPHandler) Providers(w http.ResponseWriter, r *http.Request) {
+	ready := []ProviderName{}
+	if handler.signIns != nil {
+		ready = handler.signIns.Providers()
+	}
+	respond(w, map[string]any{"sign_in": ready}, nil)
+}
+
+func (handler *HTTPHandler) Authorize(w http.ResponseWriter, r *http.Request) {
+	var request authorizeRequest
+	hostID, ok := accept(w, r, &request)
+	if !ok {
+		return
+	}
+	if handler.signIns == nil {
+		respond(w, nil, ErrUnknownProvider)
+		return
+	}
+	address, err := handler.signIns.Start(hostID, request.Provider)
+	respond(w, map[string]string{"url": address}, err)
+}
+
+func (handler *HTTPHandler) Connect(w http.ResponseWriter, r *http.Request) {
+	var request signInRequest
+	hostID, ok := accept(w, r, &request)
+	if !ok {
+		return
+	}
+	if handler.signIns == nil {
+		respond(w, nil, ErrUnknownProvider)
+		return
+	}
+	pass, err := handler.signIns.Finish(r.Context(), hostID, request.Provider, request.Code, request.State)
+	respond(w, map[string]string{"pass": pass}, err)
 }
 
 func NewHTTPHandler(importer Importer) *HTTPHandler {
@@ -93,6 +145,7 @@ func statusFor(err error) (int, error) {
 		{ErrCredentialsRequired, http.StatusBadRequest},
 		{ErrNothingSelected, http.StatusBadRequest},
 		{ErrTooManySelected, http.StatusBadRequest},
+		{ErrSignInExpired, http.StatusUnprocessableEntity},
 		{ErrCredentialsRefused, http.StatusUnprocessableEntity},
 		{ErrProviderBusy, http.StatusServiceUnavailable},
 		{ErrProviderFailed, http.StatusBadGateway},

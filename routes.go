@@ -8,6 +8,7 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/availability"
 	"github.com/BetterGuests/BetterGuests-Server/internal/bans"
 	"github.com/BetterGuests/BetterGuests-Server/internal/bookings"
+	"github.com/BetterGuests/BetterGuests-Server/internal/calendars"
 	"github.com/BetterGuests/BetterGuests-Server/internal/cancellations"
 	"github.com/BetterGuests/BetterGuests-Server/internal/cashback"
 	"github.com/BetterGuests/BetterGuests-Server/internal/compliance"
@@ -61,6 +62,8 @@ type routeDeps struct {
 	reports       *reports.HTTPHandler
 	bans          *bans.HTTPHandler
 	pms           *pms.HTTPHandler
+	calendars     *calendars.HTTPHandler
+	calendarSync  backgroundJob
 }
 
 type backgroundJob interface {
@@ -79,6 +82,7 @@ func routes(deps routeDeps) http.Handler {
 	deps.mountRealtime(mux)
 	deps.mountWaitlist(mux)
 	deps.mountListingReviews(mux)
+	deps.mountCalendarExport(mux)
 	deps.mountAuthenticatedAPI(mux)
 	return withMiddleware(mux, deps.origins)
 }
@@ -137,6 +141,13 @@ func (deps routeDeps) mountListingReviews(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/listings/{listing_id}/reviews/summary", deps.reviews.ListingReviewSummary)
 }
 
+func (deps routeDeps) mountCalendarExport(mux *http.ServeMux) {
+	if deps.calendars == nil {
+		return
+	}
+	mux.HandleFunc("GET /api/v1/calendars/{file}", deps.calendars.Export)
+}
+
 func (deps routeDeps) mountRealtime(mux *http.ServeMux) {
 	if deps.realtime == nil {
 		return
@@ -160,7 +171,17 @@ func (deps routeDeps) mountAuthenticatedAPI(mux *http.ServeMux) {
 	api.HandleFunc("POST /api/v1/compliance/age", deps.compliance.ConfirmAge)
 	api.HandleFunc("POST /api/v1/compliance/consents", deps.compliance.GrantConsent)
 	api.Handle("POST /api/v1/listings", perAccount(listingCreateBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.listings.CreateListing))))
+	if deps.calendars != nil {
+		api.HandleFunc("GET /api/v1/listings/{listing_id}/calendar-sync", deps.calendars.Overview)
+		api.Handle("POST /api/v1/listings/{listing_id}/calendar-sync/feeds", perAccount(calendarSyncBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.calendars.AddFeed))))
+		api.Handle("POST /api/v1/listings/{listing_id}/calendar-sync/feeds/{feed_id}/refresh", perAccount(calendarSyncBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.calendars.Refresh))))
+		api.Handle("DELETE /api/v1/listings/{listing_id}/calendar-sync/feeds/{feed_id}", deps.compliance.RequireAdult(http.HandlerFunc(deps.calendars.RemoveFeed)))
+		api.Handle("POST /api/v1/listings/{listing_id}/calendar-sync/link", perAccount(calendarSyncBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.calendars.ResetLink))))
+	}
 	if deps.pms != nil {
+		api.HandleFunc("GET /api/v1/hosting/pms/providers", deps.pms.Providers)
+		api.Handle("POST /api/v1/hosting/pms/authorize", perAccount(pmsSignInBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.pms.Authorize))))
+		api.Handle("POST /api/v1/hosting/pms/connect", perAccount(pmsSignInBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.pms.Connect))))
 		api.Handle("POST /api/v1/hosting/pms/preview", perAccount(pmsPreviewBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.pms.Preview))))
 		api.Handle("POST /api/v1/hosting/pms/import", perAccount(pmsImportBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.pms.Import))))
 	}

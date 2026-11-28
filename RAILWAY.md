@@ -146,6 +146,13 @@ The dashboard cannot override a value the config file sets.
     Without the key no email is sent; with it the other two are required.
     Reports and listing pauses are emailed to the hosts, guests and admins
     involved. Admin mail goes to the address in `app.admin_accounts`.
+  - Optional property system sign in: `HOSPITABLE_CLIENT_ID` and
+    `HOSPITABLE_CLIENT_SECRET`, `OWNERREZ_CLIENT_ID` and
+    `OWNERREZ_CLIENT_SECRET`. Each pair turns that system on and needs
+    `APP_WEB_URL`. Register `<APP_WEB_URL>/hosting/connect/hospitable` and
+    `<APP_WEB_URL>/hosting/connect/ownerrez` as the redirect addresses. Without
+    a pair the web shows that system as not available. Changing a secret ends
+    sign ins in progress.
   - `S3_ENDPOINT`, `S3_BUCKET`, `S3_REGION`, `S3_ACCESS_KEY_ID`,
     `S3_SECRET_ACCESS_KEY` — listing photos and cashback photos; optional
     `S3_URL_STYLE=path` for path-style buckets. Profile banners upload from the

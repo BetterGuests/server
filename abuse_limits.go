@@ -13,6 +13,8 @@ const day = 24 * time.Hour
 var (
 	accountWritesBudget  = middleware.RateLimiterConfig{RequestsPerWindow: 120, Window: time.Minute}
 	listingCreateBudget  = middleware.RateLimiterConfig{RequestsPerWindow: 10, Window: day}
+	calendarSyncBudget   = middleware.RateLimiterConfig{RequestsPerWindow: 30, Window: time.Hour}
+	pmsSignInBudget      = middleware.RateLimiterConfig{RequestsPerWindow: 20, Window: time.Hour}
 	pmsPreviewBudget     = middleware.RateLimiterConfig{RequestsPerWindow: 20, Window: time.Hour}
 	pmsImportBudget      = middleware.RateLimiterConfig{RequestsPerWindow: 10, Window: time.Hour}
 	listingPublishBudget = middleware.RateLimiterConfig{RequestsPerWindow: 20, Window: day}

@@ -12,10 +12,55 @@ import (
 type ProviderName string
 
 const (
-	Lodgify  ProviderName = "lodgify"
-	Guesty   ProviderName = "guesty"
-	Hostaway ProviderName = "hostaway"
+	Lodgify    ProviderName = "lodgify"
+	Guesty     ProviderName = "guesty"
+	Hostaway   ProviderName = "hostaway"
+	Hospitable ProviderName = "hospitable"
+	OwnerRez   ProviderName = "ownerrez"
 )
+
+var signInProviders = []ProviderName{Hospitable, OwnerRez}
+
+const (
+	purposeState = "state"
+	purposePass  = "pass"
+)
+
+type Authorizer interface {
+	AuthorizeURL(state string) string
+	Exchange(ctx context.Context, code string) (string, error)
+}
+
+type App struct {
+	Provider     ProviderName
+	ClientSecret string
+	Authorizer   Authorizer
+	Source       Source
+}
+
+type signInApp struct {
+	authorizer Authorizer
+	seal       sealer
+}
+
+type sealed struct {
+	Purpose  string       `json:"purpose"`
+	Provider ProviderName `json:"provider"`
+	Host     uuid.UUID    `json:"host"`
+	Expires  time.Time    `json:"expires"`
+	Token    string       `json:"token,omitempty"`
+}
+
+type PassOpener interface {
+	Handles(provider ProviderName) bool
+	Token(hostID uuid.UUID, provider ProviderName, pass string) (string, error)
+}
+
+type SignIns interface {
+	Providers() []ProviderName
+	Start(hostID uuid.UUID, provider ProviderName) (string, error)
+	Finish(ctx context.Context, hostID uuid.UUID, provider ProviderName, code, state string) (string, error)
+}
 
 type Credentials struct {
 	Account string
@@ -160,4 +205,5 @@ var (
 	ErrProviderFailed      = errors.New("we could not read from that system, try again")
 	ErrNothingSelected     = errors.New("choose at least one place to import")
 	ErrTooManySelected     = errors.New("import up to 25 places at a time")
+	ErrSignInExpired       = errors.New("that sign in ran out, connect again")
 )

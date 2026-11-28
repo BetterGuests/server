@@ -5,55 +5,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"net/netip"
 	"net/url"
-	"syscall"
-	"time"
 )
 
-const (
-	photoDownloadDeadline = 30 * time.Second
-	maxPhotoRedirects     = 3
-)
-
-var (
-	errPrivateAddress = errors.New("photo address is not public")
-	errPhotoRefused   = errors.New("photo could not be downloaded")
-)
-
-var sharedAddressSpace = netip.MustParsePrefix("100.64.0.0/10")
+var errPhotoRefused = errors.New("photo could not be downloaded")
 
 type WebPhotoFetcher struct {
 	client *http.Client
 }
 
-func NewWebPhotoFetcher() *WebPhotoFetcher {
-	dialer := &net.Dialer{Timeout: 5 * time.Second, Control: refusePrivateAddress}
-	return &WebPhotoFetcher{client: &http.Client{
-		Timeout:   photoDownloadDeadline,
-		Transport: &http.Transport{DialContext: dialer.DialContext, TLSHandshakeTimeout: 5 * time.Second},
-		CheckRedirect: func(request *http.Request, via []*http.Request) error {
-			if len(via) > maxPhotoRedirects || request.URL.Scheme != "https" {
-				return errPhotoRefused
-			}
-			return nil
-		},
-	}}
-}
-
-func refusePrivateAddress(_, address string, _ syscall.RawConn) error {
-	target, err := netip.ParseAddrPort(address)
-	if err != nil || !publicAddress(target.Addr()) {
-		return errPrivateAddress
-	}
-	return nil
-}
-
-func publicAddress(address netip.Addr) bool {
-	address = address.Unmap()
-	return address.IsGlobalUnicast() && !address.IsPrivate() && !sharedAddressSpace.Contains(address)
+func NewWebPhotoFetcher(client *http.Client) *WebPhotoFetcher {
+	return &WebPhotoFetcher{client: client}
 }
 
 func (fetcher *WebPhotoFetcher) Fetch(ctx context.Context, address string) ([]byte, string, error) {

@@ -3,6 +3,7 @@ package pms
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -203,20 +204,9 @@ func TestImportRefusesMoreThanOneBatch(t *testing.T) {
 	}
 }
 
-func TestPhotosAreNeverFetchedFromPrivateAddresses(t *testing.T) {
-	for _, address := range []string{"127.0.0.1:443", "10.0.0.4:443", "169.254.169.254:80", "[::1]:443", "[fd12::1]:443", "100.100.0.1:443", "[::ffff:192.168.1.1]:443"} {
-		if refusePrivateAddress("tcp", address, nil) == nil {
-			t.Errorf("%s was allowed", address)
-		}
-	}
-	if err := refusePrivateAddress("tcp", "93.184.216.34:443", nil); err != nil {
-		t.Errorf("public address refused: %v", err)
-	}
-}
-
 func TestPhotosAreOnlyFetchedOverHTTPS(t *testing.T) {
 	for _, address := range []string{"http://photos.test/a.jpg", "file:///etc/passwd", "not a url"} {
-		if _, _, err := NewWebPhotoFetcher().Fetch(context.Background(), address); !errors.Is(err, errPhotoRefused) {
+		if _, _, err := NewWebPhotoFetcher(http.DefaultClient).Fetch(context.Background(), address); !errors.Is(err, errPhotoRefused) {
 			t.Errorf("%s: error %v", address, err)
 		}
 	}

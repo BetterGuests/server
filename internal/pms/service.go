@@ -21,6 +21,7 @@ type ImportService struct {
 	existing     HostListings
 	writer       DraftWriter
 	photos       PhotoFetcher
+	passes       PassOpener
 	photoSlots   chan struct{}
 	inBackground func(func())
 }
@@ -36,8 +37,13 @@ func NewImportService(sources map[ProviderName]Source, existing HostListings, wr
 	}
 }
 
+func (service *ImportService) WithSignIns(passes PassOpener) *ImportService {
+	service.passes = passes
+	return service
+}
+
 func (service *ImportService) Preview(ctx context.Context, hostID uuid.UUID, provider ProviderName, credentials Credentials) ([]Candidate, error) {
-	properties, err := service.read(ctx, provider, credentials)
+	properties, err := service.read(ctx, hostID, provider, credentials)
 	if err != nil {
 		return nil, err
 	}
@@ -60,7 +66,7 @@ func (service *ImportService) Import(ctx context.Context, hostID uuid.UUID, prov
 	if len(propertyIDs) > maxPropertiesPerBatch {
 		return nil, ErrTooManySelected
 	}
-	properties, err := service.read(ctx, provider, credentials)
+	properties, err := service.read(ctx, hostID, provider, credentials)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +175,7 @@ func (service *ImportService) fetchPhotos(ctx context.Context, hostID uuid.UUID,
 	}
 }
 
-func (service *ImportService) read(ctx context.Context, provider ProviderName, credentials Credentials) ([]Property, error) {
+func (service *ImportService) read(ctx context.Context, hostID uuid.UUID, provider ProviderName, credentials Credentials) ([]Property, error) {
 	source, known := service.sources[provider]
 	if !known {
 		return nil, ErrUnknownProvider
@@ -181,6 +187,13 @@ func (service *ImportService) read(ctx context.Context, provider ProviderName, c
 	}
 	if len(credentials.Account) > maxCredentialLength || len(credentials.Secret) > maxCredentialLength {
 		return nil, ErrCredentialsRefused
+	}
+	if service.passes != nil && service.passes.Handles(provider) {
+		token, err := service.passes.Token(hostID, provider, credentials.Secret)
+		if err != nil {
+			return nil, err
+		}
+		credentials = Credentials{Secret: token}
 	}
 	ctx, cancel := context.WithTimeout(ctx, providerDeadline)
 	defer cancel()

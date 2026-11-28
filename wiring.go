@@ -15,6 +15,7 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/availability"
 	"github.com/BetterGuests/BetterGuests-Server/internal/bans"
 	"github.com/BetterGuests/BetterGuests-Server/internal/bookings"
+	"github.com/BetterGuests/BetterGuests-Server/internal/calendars"
 	"github.com/BetterGuests/BetterGuests-Server/internal/cancellations"
 	"github.com/BetterGuests/BetterGuests-Server/internal/cashback"
 	"github.com/BetterGuests/BetterGuests-Server/internal/compliance"
@@ -29,6 +30,7 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/profiles"
 	"github.com/BetterGuests/BetterGuests-Server/internal/proofs"
 	"github.com/BetterGuests/BetterGuests-Server/internal/proofscan"
+	"github.com/BetterGuests/BetterGuests-Server/internal/publicweb"
 	"github.com/BetterGuests/BetterGuests-Server/internal/realtime"
 	"github.com/BetterGuests/BetterGuests-Server/internal/reports"
 	"github.com/BetterGuests/BetterGuests-Server/internal/reviewdigest"
@@ -42,6 +44,11 @@ import (
 	"github.com/BetterGuests/BetterGuests-Server/internal/waitlist"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+const (
+	photoDownloadDeadline = 30 * time.Second
+	calendarFetchDeadline = 10 * time.Second
 )
 
 func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
@@ -198,11 +205,15 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		slog.Warn("listing photos are not screened: ANTHROPIC_API_KEY is not set")
 	}
 
-	importService := pms.NewImportService(map[pms.ProviderName]pms.Source{
-		pms.Lodgify:  pms.NewLodgifySource(),
-		pms.Guesty:   pms.NewGuestySource(),
-		pms.Hostaway: pms.NewHostawaySource(),
-	}, listingStore, listingService, pms.NewWebPhotoFetcher())
+	importService, signInService, err := buildPropertyImport(listingStore, listingService)
+	if err != nil {
+		return routeDeps{}, fmt.Errorf("property system configuration: %w", err)
+	}
+
+	calendarService := calendars.NewCalendarService(
+		calendars.NewPostgresCalendarStore(pool),
+		calendars.NewWebFetcher(publicweb.NewClient(calendarFetchDeadline)),
+	)
 
 	proofStore := proofs.NewPostgresProofStore(pool)
 	proofService := proofs.NewProofService(proofStore, proofObjectsFrom(objectStore))
@@ -253,12 +264,35 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		cancellations: cancellations.NewHTTPHandler(cancellationService, cancellationService).
 			WithListingDesk(cancellationService).
 			WithTeamCanceller(cancellationService),
-		userMap:    usermap.NewHTTPHandler(usermap.NewUserMapService(userDirectory, proofService)),
-		teamEvents: teamevents.NewHTTPHandler(teamevents.NewTeamEventsService(teamevents.NewPostgresTeamEventsStore(pool), proofService)),
-		reports:    reports.NewHTTPHandler(reportService, reportService),
-		pms:        pms.NewHTTPHandler(importService),
-		bans:       bans.NewHTTPHandler(bans.NewBanService(banStore, proofService, realtimeService)),
+		userMap:      usermap.NewHTTPHandler(usermap.NewUserMapService(userDirectory, proofService)),
+		teamEvents:   teamevents.NewHTTPHandler(teamevents.NewTeamEventsService(teamevents.NewPostgresTeamEventsStore(pool), proofService)),
+		reports:      reports.NewHTTPHandler(reportService, reportService),
+		calendars:    calendars.NewHTTPHandler(calendarService),
+		calendarSync: calendarService,
+		pms:          pms.NewHTTPHandler(importService).WithSignIns(signInService),
+		bans:         bans.NewHTTPHandler(bans.NewBanService(banStore, proofService, realtimeService)),
 	}, nil
+}
+
+func buildPropertyImport(listingStore *listings.PostgresListingStore, listingService *listings.ListingService) (*pms.ImportService, *pms.SignInService, error) {
+	apps, err := pms.AppsFromLookup(os.Getenv)
+	if err != nil {
+		return nil, nil, err
+	}
+	signIns, err := pms.NewSignInService(apps)
+	if err != nil {
+		return nil, nil, err
+	}
+	sources := map[pms.ProviderName]pms.Source{
+		pms.Lodgify:  pms.NewLodgifySource(),
+		pms.Guesty:   pms.NewGuestySource(),
+		pms.Hostaway: pms.NewHostawaySource(),
+	}
+	for _, app := range apps {
+		sources[app.Provider] = app.Source
+	}
+	importer := pms.NewImportService(sources, listingStore, listingService, pms.NewWebPhotoFetcher(publicweb.NewClient(photoDownloadDeadline))).WithSignIns(signIns)
+	return importer, signIns, nil
 }
 
 type realtimePublisher interface {
