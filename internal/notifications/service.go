@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"slices"
 	"strings"
 	"time"
@@ -186,6 +187,12 @@ type MailService struct {
 	sender    EmailSender
 	addresses EmailAddresses
 	webURL    string
+	apiURL    string
+}
+
+func (service *MailService) WithUnsubscribeLinks(apiURL string) *MailService {
+	service.apiURL = strings.TrimRight(apiURL, "/")
+	return service
 }
 
 func NewMailService(queue EmailQueue, sender EmailSender, addresses EmailAddresses, webURL string) *MailService {
@@ -202,6 +209,9 @@ func (service *MailService) SendDue(ctx context.Context) (int, error) {
 	for _, item := range pending {
 		if ctx.Err() != nil {
 			return sent, errors.Join(append(failures, ctx.Err())...)
+		}
+		if item.Category != "" && service.apiURL == "" {
+			continue
 		}
 		sendErr := service.send(ctx, item)
 		if sendErr != nil {
@@ -225,12 +235,22 @@ func (service *MailService) send(ctx context.Context, item PendingEmail) error {
 		}
 		address = found
 	}
-	return service.sender.Send(ctx, Email{
+	message := Email{
 		To:             address,
 		Subject:        item.Title,
 		Text:           item.Body + "\n\n" + service.webURL + emailPath(item),
 		IdempotencyKey: "notification/" + item.NotificationID.String(),
-	})
+	}
+	if item.Category != "" {
+		message.UnsubscribeURL = service.unsubscribeURL(item)
+		message.Text += "\n\nStop these emails: " + message.UnsubscribeURL
+	}
+	return service.sender.Send(ctx, message)
+}
+
+func (service *MailService) unsubscribeURL(item PendingEmail) string {
+	query := url.Values{"token": {item.Unsubscribe.String()}, "category": {item.Category}}
+	return service.apiURL + unsubscribePath + "?" + query.Encode()
 }
 
 func emailPath(item PendingEmail) string {
@@ -250,6 +270,19 @@ func emailPath(item PendingEmail) string {
 		return verifyPath
 	case kindIdentityReview:
 		return identityReviewsPath
+	case KindBookingRequested:
+		return hostRequestsPath
+	case kindPhotosWaiting:
+		return photosWaitingPath
+	case KindReviewInvite:
+		return reviewPathPrefix + item.BookingID.String()
+	case kindPhotoRetake:
+		return tripPathPrefix + item.BookingID.String() + tasksPathSuffix
+	case kindNewMessage:
+		if item.AsHost {
+			return hostMessagesPrefix + item.ConversationID.String()
+		}
+		return guestMessagesPrefix + item.ConversationID.String()
 	}
 	return tripPathPrefix + item.BookingID.String()
 }

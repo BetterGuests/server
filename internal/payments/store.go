@@ -22,7 +22,7 @@ func (store *PostgresPaymentStore) QuoteBooking(ctx context.Context, guestID, bo
 	var quote Quote
 	err := db.WithUserTx(ctx, store.DB, guestID.String(), func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx,
-			`SELECT b.id, b.listing_id, l.host_id, b.status, (b.ends_on - b.starts_on), COALESCE(l.nightly_price_cents, 0), b.starts_on
+			`SELECT b.id, b.listing_id, l.host_id, b.status, (b.ends_on - b.starts_on), COALESCE(b.nightly_price_cents, l.nightly_price_cents, 0), b.starts_on
 			 FROM app.bookings b
 			 JOIN app.listings l ON l.id = b.listing_id
 			 WHERE b.id = $1 AND b.guest_id = $2`,
@@ -134,9 +134,9 @@ func (store *PostgresPaymentStore) HoldForBooking(ctx context.Context, actorID, 
 	var hold PaymentHold
 	err := db.WithUserTx(ctx, store.DB, actorID.String(), func(tx pgx.Tx) error {
 		return tx.QueryRow(ctx,
-			`SELECT stripe_payment_intent_id, status FROM app.payments
+			`SELECT guest_id, stripe_payment_intent_id, status FROM app.payments
 			 WHERE booking_id = $1 AND (guest_id = $2 OR host_id = $2)`,
-			bookingID, actorID).Scan(&hold.IntentID, &hold.Status)
+			bookingID, actorID).Scan(&hold.GuestID, &hold.IntentID, &hold.Status)
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return PaymentHold{}, false, nil
@@ -145,41 +145,4 @@ func (store *PostgresPaymentStore) HoldForBooking(ctx context.Context, actorID, 
 		return PaymentHold{}, false, fmt.Errorf("select payment hold: %w", err)
 	}
 	return hold, true, nil
-}
-
-func (store *PostgresPaymentStore) CustomerID(ctx context.Context, accountID uuid.UUID) (string, bool, error) {
-	var customerID string
-	err := db.WithUserTx(ctx, store.DB, accountID.String(), func(tx pgx.Tx) error {
-		return tx.QueryRow(ctx,
-			`SELECT stripe_customer_id FROM app.stripe_customers WHERE account_id = $1`, accountID,
-		).Scan(&customerID)
-	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, fmt.Errorf("select stripe customer: %w", err)
-	}
-	return customerID, true, nil
-}
-
-func (store *PostgresPaymentStore) SaveCustomerID(ctx context.Context, accountID uuid.UUID, customerID string) (string, error) {
-	var saved string
-	err := db.WithUserTx(ctx, store.DB, accountID.String(), func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO app.accounts (id) VALUES ($1) ON CONFLICT (id) DO NOTHING`, accountID); err != nil {
-			return fmt.Errorf("ensure account: %w", err)
-		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO app.stripe_customers (account_id, stripe_customer_id) VALUES ($1, $2)
-			 ON CONFLICT (account_id) DO NOTHING`, accountID, customerID); err != nil {
-			return fmt.Errorf("insert stripe customer: %w", err)
-		}
-		return tx.QueryRow(ctx,
-			`SELECT stripe_customer_id FROM app.stripe_customers WHERE account_id = $1`, accountID,
-		).Scan(&saved)
-	})
-	if err != nil {
-		return "", fmt.Errorf("save stripe customer: %w", err)
-	}
-	return saved, nil
 }

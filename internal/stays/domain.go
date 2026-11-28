@@ -63,6 +63,15 @@ type ArrivalDetails struct {
 	CheckoutInstructions string `json:"checkout_instructions"`
 }
 
+type Address struct {
+	Line1       string `json:"line1"`
+	Line2       string `json:"line2,omitempty"`
+	City        string `json:"city"`
+	Region      string `json:"region,omitempty"`
+	PostalCode  string `json:"postal_code,omitempty"`
+	CountryCode string `json:"country_code"`
+}
+
 type ArrivalGuide struct {
 	ListingID    uuid.UUID `json:"listing_id"`
 	ListingTitle string    `json:"listing_title"`
@@ -89,6 +98,7 @@ type Record struct {
 	CheckedInAt  *time.Time
 	CheckedOutAt *time.Time
 	Arrival      *ArrivalDetails
+	Address      Address
 }
 
 type View struct {
@@ -109,6 +119,7 @@ type View struct {
 	CanCheckIn   bool            `json:"can_check_in"`
 	CanCheckOut  bool            `json:"can_check_out"`
 	Arrival      *ArrivalDetails `json:"arrival,omitempty"`
+	Address      *Address        `json:"address,omitempty"`
 }
 
 type Store interface {

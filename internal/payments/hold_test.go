@@ -10,14 +10,21 @@ import (
 )
 
 type controllerStub struct {
-	captured []string
-	canceled []string
-	err      error
+	captured     []string
+	canceled     []string
+	err          error
+	captureState Status
+	earlier      IntentState
+	missing      bool
 }
 
-func (stub *controllerStub) Capture(_ context.Context, intentID string) error {
+func (stub *controllerStub) Lookup(context.Context, string) (IntentState, bool, error) {
+	return stub.earlier, !stub.missing, stub.err
+}
+
+func (stub *controllerStub) Capture(_ context.Context, intentID string) (Status, error) {
 	stub.captured = append(stub.captured, intentID)
-	return stub.err
+	return stub.captureState, stub.err
 }
 
 func (stub *controllerStub) Cancel(_ context.Context, intentID string) error {
@@ -194,5 +201,45 @@ func TestSucceededEventTellsGuestAndHostTheBookingChanged(t *testing.T) {
 		if event.kind != "booking" || event.payload != want {
 			t.Fatalf("event = %+v", event)
 		}
+	}
+}
+
+func TestCaptureRecordsTheChargeWithoutWaitingForTheWebhook(t *testing.T) {
+	tests := []struct {
+		name       string
+		state      Status
+		captureErr error
+		applyErr   error
+		wantStored bool
+		wantErr    bool
+	}{
+		{name: "charged", state: StatusSucceeded, wantStored: true},
+		{name: "still processing at Stripe", state: StatusPending},
+		{name: "capture refused", captureErr: errors.New("declined"), wantErr: true},
+		{name: "charged but not saved is left to the webhook", state: StatusSucceeded, applyErr: errors.New("db down"), wantStored: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			guest := uuid.New()
+			store := &fakeStore{hasHold: true, hold: PaymentHold{GuestID: guest, IntentID: "pi_1", Status: StatusAuthorized}, applyErr: test.applyErr}
+			controller := &controllerStub{captureState: test.state, err: test.captureErr}
+			service := newService(store, &fakeIntents{}, fakeParser{}).WithController(controller)
+
+			err := service.Capture(context.Background(), uuid.New(), uuid.New())
+
+			if (err != nil) != test.wantErr {
+				t.Fatalf("error = %v", err)
+			}
+			if !test.wantStored {
+				if len(store.applied) != 0 {
+					t.Fatalf("applied = %+v", store.applied)
+				}
+				return
+			}
+			want := appliedOutcome{guest, "pi_1", StatusSucceeded}
+			if len(store.applied) != 1 || store.applied[0] != want {
+				t.Fatalf("applied = %+v", store.applied)
+			}
+		})
 	}
 }

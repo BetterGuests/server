@@ -19,6 +19,7 @@ type Config struct {
 	APIKey string
 	From   string
 	WebURL string
+	APIURL string
 }
 
 type Message struct {
@@ -26,6 +27,7 @@ type Message struct {
 	Subject        string
 	Text           string
 	IdempotencyKey string
+	UnsubscribeURL string
 }
 
 type Doer interface {

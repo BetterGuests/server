@@ -15,6 +15,7 @@ const (
 	StatusSucceeded  Status = "succeeded"
 	StatusFailed     Status = "failed"
 	StatusCanceled   Status = "canceled"
+	StatusProcessing Status = "processing"
 )
 
 const (
@@ -70,7 +71,6 @@ type IntentParams struct {
 	GuestID        uuid.UUID
 	IdempotencyKey string
 	ManualCapture  bool
-	CustomerID     string
 }
 
 type Intent struct {
@@ -83,7 +83,6 @@ type CheckoutResult struct {
 	ClientSecret    string `json:"client_secret"`
 	AmountCents     int    `json:"amount_cents"`
 	Currency        string `json:"currency"`
-	CustomerSession string `json:"customer_session_client_secret,omitempty"`
 }
 
 type Event struct {
@@ -122,62 +121,22 @@ type Store interface {
 }
 
 type PaymentHold struct {
+	GuestID  uuid.UUID
 	IntentID string
 	Status   Status
 }
 
+type IntentState struct {
+	Intent
+	Status        Status
+	AmountCents   int
+	ManualCapture bool
+}
+
 type IntentController interface {
-	Capture(ctx context.Context, intentID string) error
+	Lookup(ctx context.Context, intentID string) (IntentState, bool, error)
+	Capture(ctx context.Context, intentID string) (Status, error)
 	Cancel(ctx context.Context, intentID string) error
-}
-
-type BillingDetails struct {
-	Name       string `json:"name"`
-	Line1      string `json:"line1"`
-	Line2      string `json:"line2"`
-	City       string `json:"city"`
-	State      string `json:"state"`
-	PostalCode string `json:"postal_code"`
-	Country    string `json:"country"`
-}
-
-type SavedCard struct {
-	ID       string         `json:"id"`
-	Brand    string         `json:"brand"`
-	Last4    string         `json:"last4"`
-	ExpMonth int            `json:"exp_month"`
-	ExpYear  int            `json:"exp_year"`
-	Funding  string         `json:"funding"`
-	Wallet   string         `json:"wallet"`
-	Billing  BillingDetails `json:"billing"`
-
-	CardStyle
-
-	ArtURL    string `json:"art_url"`
-	ArtCardID string `json:"-"`
-}
-
-type CardManager interface {
-	SavedCards(ctx context.Context, accountID uuid.UUID) ([]SavedCard, error)
-	RemoveCard(ctx context.Context, accountID uuid.UUID, cardID string) error
-	StyleCard(ctx context.Context, accountID uuid.UUID, cardID string, style CardStyle) error
-	CardArtEnabled() bool
-	StartCardArt(ctx context.Context, accountID uuid.UUID, cardID string) (CollectSession, error)
-	LinkCardArt(ctx context.Context, accountID uuid.UUID, cardID, artCardID string) error
-}
-
-type Wallet interface {
-	ListCards(ctx context.Context, customerID string) ([]SavedCard, error)
-	DetachCard(ctx context.Context, cardID string) error
-	StyleCard(ctx context.Context, cardID string, style CardStyle) error
-	LinkArtCard(ctx context.Context, cardID, artCardID string) error
-	CreateCustomer(ctx context.Context, accountID uuid.UUID) (string, error)
-	CreateCustomerSession(ctx context.Context, customerID string) (string, error)
-}
-
-type CustomerStore interface {
-	CustomerID(ctx context.Context, accountID uuid.UUID) (string, bool, error)
-	SaveCustomerID(ctx context.Context, accountID uuid.UUID, customerID string) (string, error)
 }
 
 type Publisher interface {

@@ -39,7 +39,7 @@ func ConfigFromEnv() (Config, bool, error) {
 }
 
 func configFromLookup(lookup func(string) string) (Config, bool, error) {
-	config := Config{APIKey: lookup("RESEND_API_KEY"), From: lookup("EMAIL_FROM"), WebURL: lookup("APP_WEB_URL")}
+	config := Config{APIKey: lookup("RESEND_API_KEY"), From: lookup("EMAIL_FROM"), WebURL: lookup("APP_WEB_URL"), APIURL: lookup("API_PUBLIC_URL")}
 	if config.APIKey == "" {
 		return Config{}, false, nil
 	}
@@ -50,16 +50,29 @@ func configFromLookup(lookup func(string) string) (Config, bool, error) {
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "https" && parsed.Hostname() != "localhost") {
 		return Config{}, false, errors.New("APP_WEB_URL must be an https address, or localhost")
 	}
+	if config.APIURL != "" {
+		api, err := url.Parse(config.APIURL)
+		if err != nil || api.Host == "" || (api.Scheme != "https" && api.Hostname() != "localhost") {
+			return Config{}, false, errors.New("API_PUBLIC_URL must be an https address, or localhost")
+		}
+	}
 	return config, true, nil
 }
 
 func (client *ResendClient) Send(ctx context.Context, message Message) error {
-	body, err := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"from":    client.config.From,
 		"to":      []string{message.To},
 		"subject": message.Subject,
 		"text":    message.Text,
-	})
+	}
+	if message.UnsubscribeURL != "" {
+		payload["headers"] = map[string]string{
+			"List-Unsubscribe":      "<" + message.UnsubscribeURL + ">",
+			"List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+		}
+	}
+	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("encode email: %w", err)
 	}

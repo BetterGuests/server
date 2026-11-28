@@ -177,6 +177,9 @@ func viewOf(record Record, actorID uuid.UUID, now time.Time) (View, error) {
 	if !isGuest || arrivalVisible(record, view, now) {
 		view.Arrival = record.Arrival
 	}
+	if !isGuest || addressVisible(record.Status) {
+		view.Address = &record.Address
+	}
 	return view, nil
 }
 
@@ -201,6 +204,10 @@ func phaseOf(record Record, view View, now time.Time) Phase {
 		return PhaseArrivalReady
 	}
 	return PhaseUpcoming
+}
+
+func addressVisible(status string) bool {
+	return status == statusConfirmed || status == statusCompleted
 }
 
 func arrivalVisible(record Record, view View, now time.Time) bool {

@@ -84,14 +84,17 @@ func (store *memoryStore) HostBooking(_ context.Context, hostID uuid.UUID, booki
 	return HostBooking{BookingID: bookingID, GuestID: store.guestID, ListingTitle: "Emerald Escape"}, nil
 }
 
-func (store *memoryStore) ListPendingForHost(_ context.Context, hostID uuid.UUID, earliestEndsOn time.Time) ([]Submission, error) {
-	pending := []Submission{}
+func (store *memoryStore) ListPendingForHost(_ context.Context, hostID uuid.UUID, earliestEndsOn time.Time) ([]WaitingPhoto, error) {
+	pending := []WaitingPhoto{}
 	if hostID != store.hostID || store.state.EndsOn.Before(earliestEndsOn) {
 		return pending, nil
 	}
 	for _, submission := range store.submissions {
 		if submission.Status == TaskChecking {
-			pending = append(pending, submission)
+			pending = append(pending, WaitingPhoto{
+				Submission: submission, ListingTitle: "Emerald Escape", GuestName: "Maria S.",
+				StartsOn: store.state.EndsOn.AddDate(0, 0, -2), EndsOn: store.state.EndsOn,
+			})
 		}
 	}
 	return pending, nil

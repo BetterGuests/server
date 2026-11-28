@@ -81,6 +81,19 @@ const (
 	kindListingUnpaused  = "listing_unpaused"
 	missingGuestName     = "Your guest"
 	dayLayout            = "Jan 2"
+	kindPhotosWaiting    = "photos_waiting"
+	kindPhotoRetake      = "photo_retake"
+	kindNewMessage       = "new_message"
+	categoryReminders    = "reminders"
+	categoryMessages     = "messages"
+	unsubscribePath      = "/api/v1/email/unsubscribe"
+	deadLinkPage         = "<h1>This link does not work.</h1><p>Open the newest email and try again.</p>"
+	hostRequestsPath     = "/hosting/requests"
+	photosWaitingPath    = "/hosting/reviews-waiting"
+	guestMessagesPrefix  = "/messages/"
+	hostMessagesPrefix   = "/hosting/messages/"
+	reviewPathPrefix     = "/reviews/"
+	tasksPathSuffix      = "/tasks"
 )
 
 type Notification struct {
@@ -217,6 +230,10 @@ type PendingEmail struct {
 	Body           string
 	ForTeam        bool
 	TeamEmail      string
+	ConversationID uuid.UUID
+	Category       string
+	Unsubscribe    uuid.UUID
+	AsHost         bool
 }
 
 type Email struct {
@@ -224,6 +241,11 @@ type Email struct {
 	Subject        string
 	Text           string
 	IdempotencyKey string
+	UnsubscribeURL string
+}
+
+type Unsubscriber interface {
+	Unsubscribe(ctx context.Context, token uuid.UUID, category string) (bool, error)
 }
 
 type TeamAlertQueue interface {

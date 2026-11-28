@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/BetterGuests/BetterGuests-Server/db"
+	"github.com/BetterGuests/BetterGuests-Server/internal/stays"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -14,6 +15,11 @@ import (
 )
 
 const uniqueViolation = "23505"
+
+const startedStayBetween = `SELECT EXISTS (
+	SELECT 1 FROM app.bookings b JOIN app.listings l ON l.id = b.listing_id
+	WHERE l.host_id = $1 AND b.guest_id = $2 AND ($3::uuid IS NULL OR b.id = $3)
+	  AND ` + stays.StartedStayCondition + `$4)`
 
 const (
 	fromPublishedListing = `SELECT l.id, l.title, l.host_id, l.host_name
@@ -61,6 +67,11 @@ func (store *PostgresReportStore) Create(ctx context.Context, reporterID, report
 		if reported.accountID == reporterID {
 			return ErrOwnReport
 		}
+		if submission.Reason == ReasonPropertyDamage {
+			if err := requireStartedStay(ctx, tx, reporterID, reported.accountID, submission.BookingID, at); err != nil {
+				return err
+			}
+		}
 		if _, err := tx.Exec(ctx, `INSERT INTO app.accounts (id) VALUES ($1) ON CONFLICT (id) DO NOTHING`, reporterID); err != nil {
 			return fmt.Errorf("ensure account: %w", err)
 		}
@@ -83,6 +94,17 @@ func (store *PostgresReportStore) Create(ctx context.Context, reporterID, report
 		}
 		return nil
 	})
+}
+
+func requireStartedStay(ctx context.Context, tx pgx.Tx, hostID, guestID, bookingID uuid.UUID, at time.Time) error {
+	var started bool
+	if err := tx.QueryRow(ctx, startedStayBetween, hostID, guestID, optionalID(bookingID), at).Scan(&started); err != nil {
+		return fmt.Errorf("check for a started stay: %w", err)
+	}
+	if !started {
+		return ErrStayNotStarted
+	}
+	return nil
 }
 
 func findSubject(ctx context.Context, tx pgx.Tx, reporterID uuid.UUID, submission Submission) (subject, error) {

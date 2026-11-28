@@ -111,6 +111,14 @@ func (w *world) file(reporter uuid.UUID, submission reports.Submission) error {
 	return err
 }
 
+func (w *world) stayBeganDaysAgo(days int, status string) {
+	w.t.Helper()
+	start := time.Now().UTC().AddDate(0, 0, -days)
+	w.sql(`UPDATE app.bookings SET status = $2::text, starts_on = $3, ends_on = $4,
+		      completed_at = CASE WHEN $2::text = 'completed' THEN now() END WHERE id = $1`,
+		w.booking, status, start, start.AddDate(0, 0, 2))
+}
+
 func (w *world) openAbout(subject uuid.UUID) []reports.Report {
 	w.t.Helper()
 	all, err := w.service.List(w.ctx, w.admin, true)
@@ -128,6 +136,7 @@ func (w *world) openAbout(subject uuid.UUID) []reports.Report {
 
 func TestAListingAHostAndAGuestCanEachBeReportedAndReviewed(t *testing.T) {
 	w := newWorld(t)
+	w.stayBeganDaysAgo(3, "confirmed")
 	if err := w.file(w.guest, reports.Submission{Target: reports.TargetListing, Reason: reports.ReasonInaccurate, ListingID: w.listing}); err != nil {
 		t.Fatalf("report the listing: %v", err)
 	}
@@ -198,6 +207,43 @@ func TestEveryWayOfPointingAtAHostOrGuestFindsThem(t *testing.T) {
 			}
 			if about := w.openAbout(subject); len(about) != 1 {
 				t.Fatalf("reports = %+v", about)
+			}
+		})
+	}
+}
+
+func TestDamageCanOnlyBeReportedOnceAConfirmedStayHasReachedCheckIn(t *testing.T) {
+	cases := map[string]struct {
+		daysAgo int
+		status  string
+		want    error
+	}{
+		"upcoming confirmed stay":      {-10, "confirmed", reports.ErrStayNotStarted},
+		"request still waiting":        {3, "requested", reports.ErrStayNotStarted},
+		"approved but unpaid":          {3, "pending", reports.ErrStayNotStarted},
+		"cancelled stay":               {3, "cancelled", reports.ErrStayNotStarted},
+		"confirmed stay past check-in": {1, "confirmed", nil},
+		"completed stay":               {5, "completed", nil},
+	}
+	for name, test := range cases {
+		t.Run(name, func(t *testing.T) {
+			w := newWorld(t)
+			w.stayBeganDaysAgo(test.daysAgo, test.status)
+			for context, submission := range map[string]reports.Submission{
+				"booking":  {Target: reports.TargetGuest, Reason: reports.ReasonPropertyDamage, BookingID: w.booking},
+				"messages": {Target: reports.TargetGuest, Reason: reports.ReasonPropertyDamage, ConversationID: w.conversation},
+			} {
+				if err := w.file(w.host, submission); !errors.Is(err, test.want) {
+					t.Errorf("from %s: %v, want %v", context, err, test.want)
+				}
+				w.sql(`DELETE FROM app.user_reports WHERE subject_id = $1`, w.guest)
+			}
+			messageStore := messages.NewPostgresMessageStore(w.pool)
+			for viewer, want := range map[uuid.UUID]bool{w.host: test.want == nil, w.guest: false} {
+				summary, err := messageStore.Get(w.ctx, viewer, w.conversation)
+				if err != nil || summary.DamageReportable != want {
+					t.Errorf("damage reportable = %v (%v), want %v", summary.DamageReportable, err, want)
+				}
 			}
 		})
 	}

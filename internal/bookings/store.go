@@ -25,7 +25,7 @@ const detailColumns = `b.id, b.listing_id, b.guest_id, l.host_id, b.status, b.st
 	b.completed_at, b.decided_at, b.verification_id, b.created_at,
 	COALESCE(gn.display_name, ''), l.title, COALESCE(l.city, ''), COALESCE(l.region, ''),
 	COALESCE(l.host_name, ''), COALESCE(l.host_avatar_url, ''),
-	(b.ends_on - b.starts_on), COALESCE(l.nightly_price_cents, 0), l.currency, COALESCE(p.status, ''),
+	(b.ends_on - b.starts_on), COALESCE(b.nightly_price_cents, l.nightly_price_cents, 0), l.currency, COALESCE(p.status, ''),
 	COALESCE(p.amount_cents, 0),
 	EXISTS (SELECT 1 FROM app.listing_suspensions s WHERE s.listing_id = b.listing_id AND s.lifted_at IS NULL)`
 
