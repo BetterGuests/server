@@ -8,15 +8,15 @@ import (
 	"github.com/stripe/stripe-go/v82"
 )
 
-func TestOnlyCardsAndPayLaterAreOffered(t *testing.T) {
+func TestOnlyCardsLinkAndPayLaterAreOffered(t *testing.T) {
 	tests := map[string]struct {
 		amount   int
 		currency string
 		want     []string
 	}{
-		"at the Afterpay limit":   {afterpayMaxCents, "usd", []string{"card", "klarna", "afterpay_clearpay"}},
-		"over the Afterpay limit": {afterpayMaxCents + 1, "usd", []string{"card", "klarna"}},
-		"another currency":        {5000, "eur", []string{"card", "klarna"}},
+		"at the Afterpay limit":   {afterpayMaxCents, "usd", []string{"card", "link", "klarna", "afterpay_clearpay"}},
+		"over the Afterpay limit": {afterpayMaxCents + 1, "usd", []string{"card", "link", "klarna"}},
+		"another currency":        {5000, "eur", []string{"card", "link", "klarna"}},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {

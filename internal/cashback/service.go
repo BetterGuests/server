@@ -354,14 +354,14 @@ func (service *CashbackService) HostTrip(ctx context.Context, hostID, bookingID 
 
 func (service *CashbackService) PendingForHost(ctx context.Context, hostID uuid.UUID) ([]PendingSubmission, error) {
 	earliestOpen := LatestSettleableEndsOn(service.now()).AddDate(0, 0, 1)
-	submissions, err := service.store.ListPendingForHost(ctx, hostID, earliestOpen)
+	waiting, err := service.store.ListPendingForHost(ctx, hostID, earliestOpen)
 	if err != nil {
 		return nil, err
 	}
-	submissions = service.signedAll(ctx, submissions)
-	pending := make([]PendingSubmission, 0, len(submissions))
+	pending := make([]PendingSubmission, 0, len(waiting))
 	plans := map[uuid.UUID]chores.Plan{}
-	for _, submission := range submissions {
+	for _, photo := range waiting {
+		submission := service.signed(ctx, photo.Submission)
 		plan, loaded := plans[submission.BookingID]
 		if !loaded {
 			plan, err = service.bookingPlan(ctx, hostID, submission.BookingID)
@@ -370,7 +370,14 @@ func (service *CashbackService) PendingForHost(ctx context.Context, hostID uuid.
 			}
 			plans[submission.BookingID] = plan
 		}
-		pending = append(pending, PendingSubmission{Submission: submission, TaskLabel: taskLabel(plan, submission.TaskKey)})
+		pending = append(pending, PendingSubmission{
+			Submission:   submission,
+			TaskLabel:    taskLabel(plan, submission.TaskKey),
+			ListingTitle: photo.ListingTitle,
+			GuestName:    photo.GuestName,
+			StartsOn:     photo.StartsOn.Format(time.DateOnly),
+			EndsOn:       photo.EndsOn.Format(time.DateOnly),
+		})
 	}
 	return pending, nil
 }

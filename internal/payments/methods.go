@@ -14,6 +14,7 @@ const (
 func paymentMethodTypes(amountCents int, currency string) []string {
 	types := []string{
 		string(stripe.PaymentMethodTypeCard),
+		string(stripe.PaymentMethodTypeLink),
 		string(stripe.PaymentMethodTypeKlarna),
 	}
 	if currency == afterpayCurrency && amountCents <= afterpayMaxCents {

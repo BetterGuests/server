@@ -12,6 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const StartedStayCondition = `b.status IN ('confirmed', 'completed') AND (b.starts_on + l.check_in_time) AT TIME ZONE l.time_zone <= `
+
 type PostgresStayStore struct{ DB *pgxpool.Pool }
 
 func NewPostgresStayStore(pool *pgxpool.Pool) *PostgresStayStore {
@@ -31,6 +33,8 @@ func (store *PostgresStayStore) Stay(ctx context.Context, actorID, bookingID uui
 				&record.CheckedInAt, &record.CheckedOutAt, &hasArrival,
 				&arrival.EntryInstructions, &arrival.EntryCode, &arrival.WifiName, &arrival.WifiPassword,
 				&arrival.CheckoutInstructions,
+				&record.Address.Line1, &record.Address.Line2, &record.Address.City, &record.Address.Region,
+				&record.Address.PostalCode, &record.Address.CountryCode,
 			}
 		)
 		err := tx.QueryRow(ctx,
@@ -38,7 +42,9 @@ func (store *PostgresStayStore) Stay(ctx context.Context, actorID, bookingID uui
 			        to_char(l.check_in_time, 'HH24:MI'), to_char(l.check_out_time, 'HH24:MI'), l.time_zone,
 			        s.checked_in_at, s.checked_out_at, a.listing_id IS NOT NULL,
 			        COALESCE(a.entry_instructions, ''), COALESCE(a.entry_code, ''), COALESCE(a.wifi_name, ''),
-			        COALESCE(a.wifi_password, ''), COALESCE(a.checkout_instructions, '')
+			        COALESCE(a.wifi_password, ''), COALESCE(a.checkout_instructions, ''),
+			        l.address_line1, COALESCE(l.address_line2, ''), COALESCE(l.city, ''), COALESCE(l.region, ''),
+			        COALESCE(l.postal_code, ''), COALESCE(l.country_code, '')
 			 FROM app.bookings b
 			 JOIN app.listings l ON l.id = b.listing_id
 			 LEFT JOIN app.booking_stays s ON s.booking_id = b.id

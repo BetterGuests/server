@@ -147,6 +147,17 @@ type PendingSubmission struct {
 	Submission   Submission `json:"submission"`
 	TaskLabel    string     `json:"task_label"`
 	ListingTitle string     `json:"listing_title"`
+	GuestName    string     `json:"guest_name"`
+	StartsOn     string     `json:"starts_on"`
+	EndsOn       string     `json:"ends_on"`
+}
+
+type WaitingPhoto struct {
+	Submission   Submission
+	ListingTitle string
+	GuestName    string
+	StartsOn     time.Time
+	EndsOn       time.Time
 }
 
 type HostTripView struct {
@@ -201,7 +212,7 @@ type Store interface {
 	ListSubmissions(ctx context.Context, actingID, bookingID uuid.UUID) ([]Submission, error)
 	ListRefunds(ctx context.Context, actingID, bookingID uuid.UUID) ([]Refund, error)
 	HostBooking(ctx context.Context, hostID, bookingID uuid.UUID) (HostBooking, error)
-	ListPendingForHost(ctx context.Context, hostID uuid.UUID, earliestEndsOn time.Time) ([]Submission, error)
+	ListPendingForHost(ctx context.Context, hostID uuid.UUID, earliestEndsOn time.Time) ([]WaitingPhoto, error)
 	LoadReviewTarget(ctx context.Context, actingID, submissionID uuid.UUID) (ReviewTarget, error)
 	ApplyReview(ctx context.Context, actingID, submissionID uuid.UUID, status TaskStatus, note string, reviewedAt time.Time) error
 	Settlement(ctx context.Context, actingID, bookingID uuid.UUID) (SettlementState, error)

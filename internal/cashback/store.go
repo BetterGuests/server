@@ -191,14 +191,16 @@ func (store *PostgresCashbackStore) HostBooking(ctx context.Context, hostID, boo
 	return booking, nil
 }
 
-func (store *PostgresCashbackStore) ListPendingForHost(ctx context.Context, hostID uuid.UUID, earliestEndsOn time.Time) ([]Submission, error) {
-	submissions := []Submission{}
+func (store *PostgresCashbackStore) ListPendingForHost(ctx context.Context, hostID uuid.UUID, earliestEndsOn time.Time) ([]WaitingPhoto, error) {
+	waiting := []WaitingPhoto{}
 	err := db.WithUserTx(ctx, store.DB, hostID.String(), func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx,
-			`SELECT s.id, s.booking_id, s.guest_id, s.task_key, s.photo_url, s.status, COALESCE(s.note, ''), s.reviewed_at, s.created_at, s.updated_at
+			`SELECT s.id, s.booking_id, s.guest_id, s.task_key, s.photo_url, s.status, COALESCE(s.note, ''), s.reviewed_at, s.created_at, s.updated_at,
+			        l.title, COALESCE(gn.display_name, ''), b.starts_on, b.ends_on
 			 FROM app.booking_task_submissions s
 			 JOIN app.bookings b ON b.id = s.booking_id
 			 JOIN app.listings l ON l.id = b.listing_id
+			 LEFT JOIN app.account_names gn ON gn.account_id = s.guest_id
 			 WHERE s.status = 'checking' AND l.host_id = $1 AND b.ends_on >= $2
 			 ORDER BY s.created_at
 			 LIMIT 200`,
@@ -208,18 +210,19 @@ func (store *PostgresCashbackStore) ListPendingForHost(ctx context.Context, host
 		}
 		defer rows.Close()
 		for rows.Next() {
-			var submission Submission
-			if err := rows.Scan(scanSubmission(&submission)...); err != nil {
+			var photo WaitingPhoto
+			fields := append(scanSubmission(&photo.Submission), &photo.ListingTitle, &photo.GuestName, &photo.StartsOn, &photo.EndsOn)
+			if err := rows.Scan(fields...); err != nil {
 				return err
 			}
-			submissions = append(submissions, submission)
+			waiting = append(waiting, photo)
 		}
 		return rows.Err()
 	})
 	if err != nil {
 		return nil, fmt.Errorf("list pending for host: %w", err)
 	}
-	return submissions, nil
+	return waiting, nil
 }
 
 func (store *PostgresCashbackStore) LoadReviewTarget(ctx context.Context, actingID, submissionID uuid.UUID) (ReviewTarget, error) {

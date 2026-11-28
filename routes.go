@@ -83,6 +83,7 @@ func routes(deps routeDeps) http.Handler {
 	deps.mountWaitlist(mux)
 	deps.mountListingReviews(mux)
 	deps.mountCalendarExport(mux)
+	deps.mountEmailUnsubscribe(mux)
 	deps.mountAuthenticatedAPI(mux)
 	return withMiddleware(mux, deps.origins)
 }
@@ -103,11 +104,6 @@ func (deps routeDeps) mountPayments(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/webhooks/stripe", deps.payments.StripeWebhook)
 	if deps.authenticate != nil {
 		mux.Handle("POST /api/v1/payments/checkout", deps.authenticate(perAccount(checkoutBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.payments.StartCheckout)))))
-		mux.Handle("GET /api/v1/payments/cards", deps.authenticate(http.HandlerFunc(deps.payments.ListSavedCards)))
-		mux.Handle("DELETE /api/v1/payments/cards/{card_id}", deps.authenticate(http.HandlerFunc(deps.payments.RemoveSavedCard)))
-		mux.Handle("PUT /api/v1/payments/cards/{card_id}/style", deps.authenticate(http.HandlerFunc(deps.payments.StyleSavedCard)))
-		mux.Handle("POST /api/v1/payments/cards/{card_id}/art/session", deps.authenticate(perAccount(cardArtBudget, deps.compliance.RequireAdult(http.HandlerFunc(deps.payments.StartCardArt)))))
-		mux.Handle("PUT /api/v1/payments/cards/{card_id}/art", deps.authenticate(deps.compliance.RequireAdult(http.HandlerFunc(deps.payments.LinkCardArt))))
 	}
 }
 
@@ -146,6 +142,14 @@ func (deps routeDeps) mountCalendarExport(mux *http.ServeMux) {
 		return
 	}
 	mux.HandleFunc("GET /api/v1/calendars/{file}", deps.calendars.Export)
+}
+
+func (deps routeDeps) mountEmailUnsubscribe(mux *http.ServeMux) {
+	if deps.inbox == nil {
+		return
+	}
+	mux.HandleFunc("GET /api/v1/email/unsubscribe", deps.inbox.UnsubscribePage)
+	mux.HandleFunc("POST /api/v1/email/unsubscribe", deps.inbox.Unsubscribe)
 }
 
 func (deps routeDeps) mountRealtime(mux *http.ServeMux) {

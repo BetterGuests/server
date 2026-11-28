@@ -150,6 +150,8 @@ func (store *PostgresNotificationStore) QueueTeamAlerts(ctx context.Context) ([]
 		     SELECT * FROM app.queue_team_alerts()
 		     UNION ALL
 		     SELECT * FROM app.queue_user_report_alerts()
+		     UNION ALL
+		     SELECT * FROM app.queue_rejected_photo_alerts()
 		 ) alerts`)
 	if err != nil {
 		return nil, fmt.Errorf("queue team alerts: %w", err)
@@ -173,16 +175,53 @@ func (store *PostgresNotificationStore) AwaitingEmail(ctx context.Context, limit
 	if err != nil {
 		return nil, fmt.Errorf("query waiting email: %w", err)
 	}
-	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (PendingEmail, error) {
+	safety, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (PendingEmail, error) {
 		var item PendingEmail
 		err := row.Scan(&item.NotificationID, &item.AccountID, &item.BookingID, &item.Kind,
 			&item.Title, &item.Body, &item.ForTeam, &item.TeamEmail)
 		return item, err
 	})
+	if err != nil {
+		return nil, fmt.Errorf("read waiting email: %w", err)
+	}
+	members, err := store.memberEmails(ctx, limit)
+	if err != nil {
+		return nil, err
+	}
+	return append(safety, members...), nil
+}
+
+func (store *PostgresNotificationStore) memberEmails(ctx context.Context, limit int) ([]PendingEmail, error) {
+	rows, err := store.DB.Query(ctx,
+		`SELECT email_id, account_id, COALESCE(booking_id, '00000000-0000-0000-0000-000000000000'::uuid),
+		        COALESCE(conversation_id, '00000000-0000-0000-0000-000000000000'::uuid), kind, title, body, category,
+		        COALESCE(unsubscribe_token, '00000000-0000-0000-0000-000000000000'::uuid), as_host
+		 FROM app.member_emails_awaiting($1)`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("query waiting member email: %w", err)
+	}
+	items, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (PendingEmail, error) {
+		var item PendingEmail
+		err := row.Scan(&item.NotificationID, &item.AccountID, &item.BookingID, &item.ConversationID, &item.Kind,
+			&item.Title, &item.Body, &item.Category, &item.Unsubscribe, &item.AsHost)
+		return item, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read waiting member email: %w", err)
+	}
+	return items, nil
+}
+
+func (store *PostgresNotificationStore) Unsubscribe(ctx context.Context, token uuid.UUID, category string) (bool, error) {
+	var found bool
+	if err := store.DB.QueryRow(ctx, `SELECT app.unsubscribe_email($1, $2)`, token, category).Scan(&found); err != nil {
+		return false, fmt.Errorf("unsubscribe email: %w", err)
+	}
+	return found, nil
 }
 
 func (store *PostgresNotificationStore) RecordEmailAttempt(ctx context.Context, notificationID uuid.UUID, delivered bool) error {
-	if _, err := store.DB.Exec(ctx, `SELECT app.record_email_attempt($1, $2)`, notificationID, delivered); err != nil {
+	if _, err := store.DB.Exec(ctx, `SELECT app.record_member_email_attempt($1, $2)`, notificationID, delivered); err != nil {
 		return fmt.Errorf("record email attempt: %w", err)
 	}
 	return nil

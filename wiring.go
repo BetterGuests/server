@@ -129,17 +129,8 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 	stripeGateway := payments.NewStripeGateway(paymentConfig)
 	paymentStore := payments.NewPostgresPaymentStore(pool)
 	paymentService := payments.NewPaymentService(paymentStore, stripeGateway, stripeGateway, paymentConfig).
-		WithSavedCards(stripeGateway, paymentStore).
 		WithController(stripeGateway).
 		WithPublisher(tripPublisher)
-	vgsConfig, cardArtEnabled, err := payments.VGSConfigFromLookup(os.Getenv)
-	if err != nil {
-		return routeDeps{}, fmt.Errorf("card art configuration: %w", err)
-	}
-	if cardArtEnabled {
-		paymentService.WithCardArt(payments.NewVGSClient(vgsConfig))
-	}
-
 	cancellationService := cancellations.NewCancellationService(
 		cancellations.NewPostgresCancellationStore(pool),
 		cancellations.NewStripeGateway(paymentConfig.SecretKey),
@@ -157,7 +148,10 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 			resendSender{client: email.NewResendClient(mailConfig, nil)},
 			accountEmails{accounts: accountStore, fetcher: nameFetcher},
 			mailConfig.WebURL,
-		))
+		).WithUnsubscribeLinks(mailConfig.APIURL))
+		if mailConfig.APIURL == "" {
+			slog.Warn("reminder and message emails are off: API_PUBLIC_URL is not set")
+		}
 	} else {
 		slog.Warn("email is off: RESEND_API_KEY is not set")
 	}
@@ -247,7 +241,7 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 			WithPlans(cashbackService),
 		verification: verification.NewHTTPHandler(verificationService, verificationService).WithStatusReader(verificationStore).WithReconciler(verificationService).WithDeletion(deletionService).
 			WithReviews(verification.NewReviewService(verificationStore).WithInquiries(verificationStore, personaClient)),
-		payments: payments.NewHTTPHandler(paymentService, paymentService).WithCards(paymentService),
+		payments: payments.NewHTTPHandler(paymentService, paymentService),
 		payouts: settlements.NewHTTPHandler(payoutService, payoutService).
 			WithBlockedReviewer(settlements.NewSettlementReviewService(
 				settlements.NewPostgresSettlementStore(pool),
@@ -259,7 +253,7 @@ func buildRouteDeps(pool *pgxpool.Pool) (routeDeps, error) {
 		availability: availability.NewHTTPHandler(availability.NewAvailabilityService(availability.NewPostgresAvailabilityStore(pool))),
 		stays:        stays.NewHTTPHandler(stayService, stayService),
 		autoMessages: automessages.NewHTTPHandler(autoMessageService),
-		inbox:        notifications.NewHTTPHandler(notifications.NewNotificationService(notificationStore)),
+		inbox:        notifications.NewHTTPHandler(notifications.NewNotificationService(notificationStore)).WithUnsubscriber(notificationStore),
 		tripUpdates:  journeyService,
 		cancellations: cancellations.NewHTTPHandler(cancellationService, cancellationService).
 			WithListingDesk(cancellationService).
@@ -321,6 +315,7 @@ func (sender resendSender) Send(ctx context.Context, message notifications.Email
 		Subject:        message.Subject,
 		Text:           message.Text,
 		IdempotencyKey: message.IdempotencyKey,
+		UnsubscribeURL: message.UnsubscribeURL,
 	})
 }
 

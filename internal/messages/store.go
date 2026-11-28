@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/BetterGuests/BetterGuests-Server/db"
+	"github.com/BetterGuests/BetterGuests-Server/internal/stays"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -24,6 +25,8 @@ const summaryColumns = `c.id, c.listing_id, COALESCE(l.title, ''), c.guest_id, c
 	` + pinnedAtFor + ` IS NOT NULL,
 	EXISTS (SELECT 1 FROM app.bookings b WHERE b.listing_id = c.listing_id AND b.guest_id = c.guest_id)
 	  AND NOT EXISTS (SELECT 1 FROM app.bookings b WHERE ` + stayStillOpen + `),
+	c.host_id = $1 AND EXISTS (SELECT 1 FROM app.bookings b JOIN app.listings l ON l.id = b.listing_id
+	  WHERE l.host_id = c.host_id AND b.guest_id = c.guest_id AND ` + stays.StartedStayCondition + `now()),
 	stay.id, to_char(stay.starts_on, 'YYYY-MM-DD'), to_char(stay.ends_on, 'YYYY-MM-DD'), stay.status`
 
 const stayStillOpen = `b.listing_id = c.listing_id AND b.guest_id = c.guest_id AND ` + bookingStillOpen
@@ -563,7 +566,7 @@ func scanSummary(row pgx.Row) (Summary, error) {
 		&summary.ID, &summary.ListingID, &summary.ListingTitle, &summary.GuestID, &summary.HostID,
 		&summary.Role, &summary.CounterpartyName, &summary.CounterpartyAvatarURL,
 		&summary.LastMessageAt, &summary.LastMessagePreview, &summary.UnreadCount, &summary.CanDelete,
-		&summary.Pinned, &summary.StayEnded,
+		&summary.Pinned, &summary.StayEnded, &summary.DamageReportable,
 		&bookingID, &startsOn, &endsOn, &status,
 	)
 	if bookingID != nil {

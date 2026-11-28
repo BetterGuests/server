@@ -18,6 +18,7 @@ var (
 	ErrOwnReport       = errors.New("you cannot report yourself or your own listing")
 	ErrTargetNotFound  = errors.New("we could not find what you are reporting")
 	ErrAlreadyReported = errors.New("you already reported this and our team is reviewing it")
+	ErrStayNotStarted  = errors.New("you can report damage once their stay has started")
 	ErrInvalidDecision = errors.New("choose an outcome and keep the note to 1000 characters or fewer")
 	ErrReportNotFound  = errors.New("that report is not open")
 	ErrNotAdmin        = errors.New("not found")

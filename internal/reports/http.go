@@ -106,6 +106,7 @@ func fail(w http.ResponseWriter, err error) {
 		{ErrInvalidReport, http.StatusBadRequest},
 		{ErrInvalidDetails, http.StatusBadRequest},
 		{ErrOwnReport, http.StatusBadRequest},
+		{ErrStayNotStarted, http.StatusBadRequest},
 		{ErrInvalidDecision, http.StatusBadRequest},
 		{ErrTargetNotFound, http.StatusNotFound},
 		{ErrReportNotFound, http.StatusNotFound},

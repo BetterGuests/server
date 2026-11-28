@@ -95,6 +95,7 @@ type Summary struct {
 	Pinned                bool       `json:"pinned"`
 	StayEnded             bool       `json:"stay_ended"`
 	Stay                  *Stay      `json:"stay,omitempty"`
+	DamageReportable      bool       `json:"damage_reportable"`
 	Participants          `json:"-"`
 }
 
